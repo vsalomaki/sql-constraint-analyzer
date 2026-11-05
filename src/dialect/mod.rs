@@ -4,6 +4,7 @@
 pub mod oracle;
 
 use std::borrow::Cow;
+use std::io::{self, BufRead};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +15,41 @@ pub enum DialectId {
     Oracle,
 }
 
+/// The program that runs the script; its rules decide where statements end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Runner {
+    #[default]
+    #[value(name = "sqlplus")]
+    SqlPlus,
+    /// SQLcl, and SQL Developer's script engine.
+    #[value(name = "sqlcl")]
+    Sqlcl,
+}
+
+/// One include command of a master script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Include {
+    /// The line the command starts on, from 1.
+    pub line: u64,
+    /// The name is looked up beside the script that holds the command, not in the working directory.
+    pub beside_script: bool,
+    /// The file name as written, quotes and arguments removed; a default extension is not added yet.
+    pub name: String,
+}
+
 impl DialectId {
+    /// The include commands of the script in `reader`, in order.
+    pub fn script_includes(
+        self,
+        reader: impl BufRead,
+        runner: Runner,
+        encoding: crate::source::Encoding,
+    ) -> io::Result<Vec<Include>> {
+        match self {
+            Self::Oracle => oracle::script::includes(reader, runner, encoding),
+        }
+    }
+
     pub fn rules(self) -> &'static Rules {
         match self {
             Self::Oracle => &oracle::RULES,

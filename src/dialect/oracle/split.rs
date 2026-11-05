@@ -23,14 +23,7 @@ use std::io::{self, BufRead};
 use super::lex::{Delimiter, alternative_delimiter, is_word_byte};
 use crate::source::{Piece, PieceKind, Span};
 
-/// The program that runs the script; its rules decide where statements end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Runner {
-    #[default]
-    SqlPlus,
-    /// SQLcl, and SQL Developer's script engine.
-    Sqlcl,
-}
+pub use crate::dialect::Runner;
 
 /// Longest line or piece read before giving up: a file with no terminator would otherwise be read whole into memory.
 pub const MAX_PIECE_BYTES: usize = 256 << 20;
@@ -364,6 +357,14 @@ impl<R: BufRead> Splitter<R> {
         }
     }
 
+    /// Treats the reader as starting `offset` bytes into the file, so pieces carry offsets in the file as stored
+    /// (the input layer skips a byte-order mark before handing the reader over).
+    #[must_use]
+    pub fn starting_at(mut self, offset: u64) -> Self {
+        self.offset = offset;
+        self
+    }
+
     fn too_long(&self, what: &str, line: u64) -> io::Error {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -643,6 +644,15 @@ mod tests {
 
     fn split(text: &str) -> Vec<(PieceKind, u64, String)> {
         split_with(Runner::SqlPlus, text)
+    }
+
+    #[test]
+    fn offsets_start_where_the_reader_was_positioned() {
+        let pieces: Vec<_> = Splitter::new("select 1;\n".as_bytes(), Runner::SqlPlus)
+            .starting_at(3)
+            .map(|p| p.unwrap().span)
+            .collect();
+        assert_eq!(pieces, [Span { start: 3, end: 12 }]);
     }
 
     #[test]
