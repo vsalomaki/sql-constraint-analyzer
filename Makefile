@@ -1,7 +1,15 @@
-.PHONY: lint fmt test check-all install-hooks fixtures
+.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop
 
 GEN = cargo run -q -F gen --bin sqlca-gen -- --dialect oracle
 FIXTURES = tests/fixtures/gen/oracle
+
+## Loads generated exports into Oracle Free (Docker) and checks Oracle rejects what the manifests expect.
+oracle-check:
+	scripts/oracle/check.sh
+
+## Removes the Oracle Free container that oracle-check keeps between runs.
+oracle-stop:
+	scripts/oracle/check.sh --stop
 
 ## Regenerates the committed generator fixtures; review the diff before committing it.
 fixtures:

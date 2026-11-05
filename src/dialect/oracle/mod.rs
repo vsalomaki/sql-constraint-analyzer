@@ -1,5 +1,8 @@
 //! Oracle, as SQL Developer and SQL\*Plus write it.
 
+#[cfg(test)]
+#[cfg(feature = "gen")]
+mod check;
 #[cfg(feature = "gen")]
 pub(crate) mod synth;
 
