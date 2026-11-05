@@ -9,7 +9,7 @@ use std::path::Path;
 
 pub use structure::{Row, StructureError, resolve_row};
 
-use crate::catalog::{CatalogBuilder, Issue, Origin};
+use crate::catalog::{Catalog, CatalogBuilder, Issue, Kind, Origin};
 use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::Finding;
 use crate::input::{self, InputError, InputFile, Role};
@@ -28,7 +28,7 @@ pub struct Options {
 }
 
 /// Something about the run that isn't a finding, with where it is when that is known.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct Problem {
     pub file: String,
     pub line: Option<u64>,
@@ -66,8 +66,10 @@ pub struct Report {
     /// By file, then line; summary findings last.
     pub findings: Vec<Finding>,
     pub warnings: Vec<Warning>,
-    /// Statements that couldn't be read, and files that couldn't be read to the end.
+    /// Statements that couldn't be read.
     pub errors: Vec<Problem>,
+    /// Files that couldn't be read to the end, so the check is incomplete.
+    pub unreadable: Vec<Problem>,
     /// DDL the catalog couldn't apply as written.
     pub catalog: Vec<Problem>,
     /// Statements that change data in ways the checker doesn't follow.
@@ -75,6 +77,17 @@ pub struct Report {
     /// Statements the checker has no use for (commits, grants, sequences, SQL*Plus commands).
     pub unused: u64,
     pub rows: u64,
+    pub schema: SchemaCounts,
+}
+
+/// What the schema pass found, for the run's summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SchemaCounts {
+    pub tables: usize,
+    /// Primary keys, unique constraints and indexes, and foreign keys; NOT NULL and CHECK aren't counted.
+    pub keys: usize,
+    pub disabled: usize,
+    pub deferred: usize,
 }
 
 /// Checks `files`, in the order given. Only a file that can't be opened stops the run; everything else ends up in the
@@ -102,6 +115,7 @@ pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError>
         )?;
     }
     let (catalog, issues) = builder.finish();
+    report.schema = schema_counts(&catalog);
     report.catalog = issues
         .into_iter()
         .map(|Issue { origin, message }| problem(&names, origin.file, Some(origin.line), message))
@@ -171,6 +185,29 @@ pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError>
     Ok(report)
 }
 
+fn schema_counts(catalog: &Catalog) -> SchemaCounts {
+    let keys = catalog
+        .tables()
+        .iter()
+        .flat_map(|t| &t.constraints)
+        .filter(|c| {
+            matches!(
+                c.kind,
+                Kind::PrimaryKey { .. } | Kind::Unique { .. } | Kind::ForeignKey { .. }
+            )
+        });
+    let mut counts = SchemaCounts {
+        tables: catalog.tables().len(),
+        ..SchemaCounts::default()
+    };
+    for key in keys {
+        counts.keys += 1;
+        counts.disabled += usize::from(!key.state.enabled);
+        counts.deferred += usize::from(key.state.initially_deferred);
+    }
+    counts
+}
+
 /// A path as the user gave it, with `/` between its parts on Windows too, so findings read the same everywhere.
 fn display(path: &Path) -> String {
     let text = path.to_string_lossy();
@@ -207,9 +244,12 @@ fn read(
         let piece: Piece = match piece {
             Ok(piece) => piece,
             Err(error) => {
-                report
-                    .errors
-                    .push(problem(names, index, None, error.to_string()));
+                // Both passes read the file; the last one to read it reports it.
+                if pass == Pass::Rows || file.role == Role::Schema {
+                    report
+                        .unreadable
+                        .push(problem(names, index, None, error.to_string()));
+                }
                 break;
             }
         };

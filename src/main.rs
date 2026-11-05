@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use sqlca::check;
 use sqlca::dialect::{DialectId, Runner};
 use sqlca::input::{self, InputSpec, Resolved};
+use sqlca::report;
 use sqlca::source::Encoding;
 
 /// Checks Oracle SQL exports for rows that violate the declared constraints.
@@ -21,9 +23,9 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Report rows that violate constraints; never writes files.
-    Check(InputArgs),
+    Check(CheckArgs),
     /// Write fixed files to a folder or in place, with a report of every change.
-    Fix(InputArgs),
+    Fix(CheckArgs),
     /// Show the files that would be read, their roles and their order, then exit.
     Inputs(InputsArgs),
 }
@@ -114,6 +116,65 @@ impl InputArgs {
 }
 
 #[derive(Debug, Args)]
+struct CheckArgs {
+    #[command(flatten)]
+    input: InputArgs,
+
+    /// The schema of unqualified table names. Folded like an unquoted name unless written in double quotes.
+    ///
+    /// Without it, an unqualified name means the only table of that name in any schema, and a name several
+    /// schemas have is reported as ambiguous.
+    #[arg(long, value_name = "NAME")]
+    default_schema: Option<String>,
+
+    /// Also report children inserted before their parent, judging rows in the order the files run.
+    ///
+    /// Without it, the check is of the end state: a parent anywhere in the input satisfies its children.
+    #[arg(long)]
+    load_order: bool,
+
+    /// text (default), or JSON Lines: one finding per line, then a summary line.
+    #[arg(long, value_enum, default_value_t)]
+    format: report::Format,
+
+    /// Show at most N findings per constraint (0: all); the counts stay exact.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    max_per_constraint: u64,
+
+    /// Show only the result line on stderr.
+    #[arg(short, long, conflicts_with = "verbose")]
+    quiet: bool,
+
+    /// Also list every statement the check doesn't follow.
+    #[arg(short, long)]
+    verbose: bool,
+}
+
+impl CheckArgs {
+    /// The default schema as the dialect stores it: quoted names as written, others folded.
+    fn default_schema(&self, dialect: DialectId) -> Option<String> {
+        let rules = dialect.rules();
+        let name = self.default_schema.as_deref()?;
+        let quote = rules.ident_quote;
+        Some(
+            name.strip_prefix(quote)
+                .and_then(|n| n.strip_suffix(quote))
+                .map_or_else(|| rules.fold(name), str::to_owned),
+        )
+    }
+
+    fn verbosity(&self) -> report::Verbosity {
+        if self.quiet {
+            report::Verbosity::Quiet
+        } else if self.verbose {
+            report::Verbosity::Verbose
+        } else {
+            report::Verbosity::Normal
+        }
+    }
+}
+
+#[derive(Debug, Args)]
 struct InputsArgs {
     #[command(flatten)]
     input: InputArgs,
@@ -150,12 +211,44 @@ fn run(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<Ex
             input::write_listing(&resolved.files, args.format == Format::Json, out)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Check(args) | Command::Fix(args) => {
-            let resolved = input::resolve(&args.spec(), &mut io::stdin().lock())?;
+        Command::Check(args) => check(args, out, err),
+        Command::Fix(args) => {
+            let resolved = input::resolve(&args.input.spec(), &mut io::stdin().lock())?;
             resolved.require_data()?;
             anyhow::bail!("`sqlca {}` is not implemented yet", cli.command.name())
         }
     }
+}
+
+fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<ExitCode> {
+    let spec = args.input.spec();
+    let resolved = input::resolve(&spec, &mut io::stdin().lock())?;
+    resolved.require_data()?;
+    let verbosity = args.verbosity();
+    if verbosity != report::Verbosity::Quiet {
+        let mode = if args.load_order {
+            "load-order mode"
+        } else {
+            "end-state mode"
+        };
+        writeln!(err, "sqlca {} · check · {mode}", env!("CARGO_PKG_VERSION"))?;
+        write_header(&resolved, err)?;
+    }
+    let options = check::Options {
+        dialect: spec.dialect,
+        runner: spec.runner,
+        encoding: spec.encoding,
+        default_schema: args.default_schema(spec.dialect),
+        load_order: args.load_order,
+    };
+    let result = check::run(&resolved.files, &options)?;
+    let omitted =
+        report::write_findings(&result.findings, args.format, args.max_per_constraint, out)?;
+    if args.format == report::Format::Json {
+        report::write_json_summary(&result, &omitted, out)?;
+    }
+    report::write_run(&result, &omitted, verbosity, err)?;
+    Ok(ExitCode::from(report::exit_code(&result)))
 }
 
 fn write_header(resolved: &Resolved, err: &mut dyn Write) -> io::Result<()> {

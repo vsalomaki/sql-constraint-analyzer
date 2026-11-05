@@ -297,22 +297,21 @@ fn json_lines_carry_position_role_path_bytes_and_order() {
 }
 
 #[test]
-fn check_and_fix_accept_the_input_options_but_are_not_built_yet() {
+fn check_runs_and_fix_accepts_the_input_options_but_is_not_built_yet() {
     let dir = workspace(&[("a.sql", b"")]);
-    for command in ["check", "fix"] {
-        sqlca_in(&dir)
-            .args([
-                command,
-                "a.sql",
-                "--encoding",
-                "windows-1252",
-                "--runner",
-                "sqlcl",
-            ])
-            .assert()
-            .code(2)
-            .stderr(contains("is not implemented yet"));
-    }
+    let args = ["a.sql", "--encoding", "windows-1252", "--runner", "sqlcl"];
+    sqlca_in(&dir)
+        .arg("check")
+        .args(args)
+        .assert()
+        .code(0)
+        .stderr(contains("Result     0 findings"));
+    sqlca_in(&dir)
+        .arg("fix")
+        .args(args)
+        .assert()
+        .code(2)
+        .stderr(contains("is not implemented yet"));
 }
 
 #[test]

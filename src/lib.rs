@@ -6,6 +6,7 @@ pub mod check;
 pub mod dialect;
 pub mod finding;
 pub mod input;
+pub mod report;
 pub mod source;
 pub mod statement;
 #[cfg(feature = "gen")]
