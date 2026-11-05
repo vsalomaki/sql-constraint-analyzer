@@ -5,6 +5,8 @@
 mod check;
 mod cursor;
 pub mod ddl;
+pub mod eval;
+pub mod insert;
 pub mod lex;
 pub mod script;
 pub mod split;

@@ -93,6 +93,14 @@ pub struct Rules {
 }
 
 impl Rules {
+    /// An unquoted identifier as the dialect stores it.
+    pub fn fold(&self, name: &str) -> String {
+        match self.fold {
+            Fold::Upper => name.to_uppercase(),
+            Fold::Lower => name.to_lowercase(),
+        }
+    }
+
     /// An identifier as the dialect stores it, quoted when it isn't a plain name in the folded case.
     pub fn display_ident<'a>(&self, name: &'a str) -> Cow<'a, str> {
         let folded = |c: char| match self.fold {
@@ -135,5 +143,7 @@ mod tests {
             ..*rules
         };
         assert_eq!(lower.qualified("app", "EMPLOYEES"), "app.\"EMPLOYEES\"");
+        assert_eq!(rules.fold("Emp_ä"), "EMP_Ä");
+        assert_eq!(lower.fold("Emp"), "emp");
     }
 }
