@@ -1,4 +1,8 @@
-.PHONY: lint fmt test check-all
+.PHONY: lint fmt test check-all install-hooks
+
+## Turns on the gitleaks pre-push hook for this clone.
+install-hooks:
+	git config core.hooksPath .githooks
 
 ## Format check, dependency policy, then clippy with warnings as errors.
 lint:

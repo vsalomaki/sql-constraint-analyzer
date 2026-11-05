@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Pre-push: scan commits about to be pushed for secrets via gitleaks.
+# Override (NOT recommended): git push --no-verify
+#
+# Standalone variant — drop in `.githooks/pre-push` and activate per-clone
+# with `git config core.hooksPath .githooks`. For a husky-managed repo use
+# the POSIX `pre-push.husky` variant instead.
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks not found in PATH — install: https://github.com/gitleaks/gitleaks#installation" >&2
+  exit 1
+fi
+
+zero='0000000000000000000000000000000000000000'
+fail=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ "$local_sha" == "$zero" ]] && continue   # branch deletion
+  if [[ "$remote_sha" == "$zero" ]]; then
+    range="$local_sha"                        # new branch — scan all reachable commits
+  else
+    range="$remote_sha..$local_sha"           # update — scan only new commits
+  fi
+
+  echo "[gitleaks] scanning $local_ref ($range)"
+  if ! gitleaks detect --no-banner --redact --log-opts="$range" .; then
+    fail=1
+  fi
+done
+
+if (( fail )); then
+  echo
+  echo "[gitleaks] secrets detected — push blocked." >&2
+  exit 1
+fi

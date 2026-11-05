@@ -39,6 +39,9 @@ make lint    # rustfmt check, cargo deny, clippy with warnings as errors
 make test    # cargo nextest
 ```
 
+Once per clone, `make install-hooks` turns on a pre-push hook that scans outgoing commits for secrets with
+[gitleaks](https://github.com/gitleaks/gitleaks#installation). `git push --no-verify` skips it (discouraged).
+
 ## Test data
 
 The repository holds only synthetic data: exports written by `sqlca-gen`, and exports of synthetic data made with

@@ -1,0 +1,24 @@
+# Local gitleaks config — extends the default ruleset.
+# https://github.com/gitleaks/gitleaks#configuration
+[extend]
+useDefault = true
+
+# Add project-specific allowlist entries here as false positives surface.
+# Scope as narrowly as the situation allows — see recipe README for the
+# tradeoffs between `paths`-only, `regexes`-only, and the combined form.
+#
+# `condition = "AND"` is load-bearing when pairing `paths` + `regexes`:
+# without it gitleaks defaults to OR (allow if EITHER matches), which is
+# the opposite of "only this pattern in this file."
+#
+# Template — combined form (narrow on both axes):
+# [[allowlist]]
+# description = "<reason this is safe to ignore>"
+# paths     = ['''<glob matching the file(s)>''']
+# regexes   = ['''<tight regex matching the specific value>''']
+# condition = "AND"
+#
+# Template — path-only (when the file is dominated by fixtures):
+# [[allowlist]]
+# description = "<reason this whole file is allowlist-safe>"
+# paths = ['''<glob matching the file>''']
