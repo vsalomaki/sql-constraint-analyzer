@@ -1,6 +1,6 @@
-//! Column values: how each is written as an Oracle literal, and its canonical form for keys.
+//! Column values and their canonical form for keys; each dialect writes them as literals.
 
-use super::rng::Rng;
+use crate::dialect::Rules;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Value {
@@ -9,7 +9,7 @@ pub(crate) enum Value {
     /// A decimal in its canonical text, such as `7.5`.
     Decimal(String),
     Text(String),
-    /// A `CHAR(n)` value; trailing spaces don't count when comparing.
+    /// A `CHAR(n)` value; whether trailing spaces count is a dialect rule.
     Char(String),
     /// Days since 1970-01-01, midnight.
     Date(i64),
@@ -23,16 +23,20 @@ impl Value {
         Self::Text(s.into())
     }
 
-    /// The value as the key comparison sees it; `None` is NULL, and Oracle stores `''` as NULL.
-    pub(crate) fn canonical(&self) -> Option<String> {
+    /// The value as the dialect compares it in keys; `None` is NULL.
+    pub(crate) fn canonical(&self, rules: &Rules) -> Option<String> {
         match self {
             Self::Null | Self::NextVal(..) => None,
             Self::Int(n) => Some(n.to_string()),
             Self::Decimal(s) => Some(s.clone()),
-            Self::Text(s) => (!s.is_empty()).then(|| s.clone()),
+            Self::Text(s) => (!(s.is_empty() && rules.empty_string_is_null)).then(|| s.clone()),
             Self::Char(s) => {
-                let trimmed = s.trim_end_matches(' ');
-                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                let s = if rules.char_ignores_trailing_spaces {
+                    s.trim_end_matches(' ')
+                } else {
+                    s
+                };
+                (!(s.is_empty() && rules.empty_string_is_null)).then(|| s.to_owned())
             }
             Self::Date(days) => {
                 let (y, m, d) = civil_from_days(*days);
@@ -50,85 +54,6 @@ impl Value {
             }
         }
     }
-}
-
-/// Literal styles the noise options switch on.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct LiteralStyle {
-    pub(crate) quoted_numbers: bool,
-    pub(crate) numeric_forms: bool,
-    pub(crate) q_quote: bool,
-}
-
-const MONTHS: [&str; 12] = [
-    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-];
-
-impl LiteralStyle {
-    pub(crate) fn render(self, value: &Value, rng: &mut Rng) -> String {
-        match value {
-            Value::Null => "null".into(),
-            Value::Int(n) => self.number(&n.to_string(), rng),
-            Value::Decimal(s) => self.number(s, rng),
-            Value::Text(s) | Value::Char(s) => self.string(s, rng),
-            Value::Date(days) => {
-                let (y, m, d) = civil_from_days(*days);
-                format!(
-                    "to_date('{d:02}-{}-{:02}','DD-MON-RR')",
-                    month(m),
-                    y.rem_euclid(100)
-                )
-            }
-            Value::Timestamp(secs) => {
-                let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
-                let s = secs.rem_euclid(86_400);
-                let (h24, min, sec) = (s / 3600, s % 3600 / 60, s % 60);
-                let (h12, ampm) = match h24 {
-                    0 => (12, "AM"),
-                    1..=11 => (h24, "AM"),
-                    12 => (12, "PM"),
-                    _ => (h24 - 12, "PM"),
-                };
-                format!(
-                    "to_timestamp('{d:02}-{}-{:02} {h12:02}.{min:02}.{sec:02}.000000000 {ampm}','DD-MON-RR HH.MI.SSXFF AM')",
-                    month(m),
-                    y.rem_euclid(100)
-                )
-            }
-            Value::NextVal(schema, seq) => format!("{schema}.{seq}.NEXTVAL"),
-        }
-    }
-
-    fn number(self, digits: &str, rng: &mut Rng) -> String {
-        if self.numeric_forms {
-            match rng.below(5) {
-                0 => digits.to_owned(),
-                2 if !digits.contains('.') => format!("{digits}.0"),
-                3 if !digits.contains('.') => format!("{digits}E0"),
-                4 if !digits.contains('.') && !digits.starts_with('-') => format!("'0{digits}'"),
-                _ => format!("'{digits}'"),
-            }
-        } else if self.quoted_numbers {
-            format!("'{digits}'")
-        } else {
-            digits.to_owned()
-        }
-    }
-
-    fn string(self, s: &str, rng: &mut Rng) -> String {
-        if self.q_quote && s.contains('\'') && !s.contains("]'") && rng.below(2) == 0 {
-            format!("q'[{s}]'")
-        } else {
-            format!("'{}'", s.replace('\'', "''"))
-        }
-    }
-}
-
-fn month(m: u32) -> &'static str {
-    MONTHS
-        .get(usize::try_from(m.saturating_sub(1)).unwrap_or(0))
-        .copied()
-        .unwrap_or("JAN")
 }
 
 /// Days since 1970-01-01 → (year, month 1–12, day 1–31), proleptic Gregorian (Howard Hinnant's algorithm).
@@ -175,59 +100,23 @@ mod tests {
     }
 
     #[test]
-    fn literals_look_like_sql_developer_writes_them() {
-        let mut rng = Rng::new(1, 1);
-        let sqldev = LiteralStyle {
-            quoted_numbers: true,
-            ..LiteralStyle::default()
+    fn canonical_forms_follow_the_dialect_rules() {
+        let oracle = crate::dialect::DialectId::Oracle.rules();
+        assert_eq!(Value::text("").canonical(oracle), None);
+        assert_eq!(
+            Value::Char("FI ".into()).canonical(oracle).as_deref(),
+            Some("FI")
+        );
+        assert_eq!(Value::Int(10).canonical(oracle).as_deref(), Some("10"));
+        let strict = Rules {
+            empty_string_is_null: false,
+            char_ignores_trailing_spaces: false,
+            ..*oracle
         };
-        assert_eq!(sqldev.render(&Value::Int(100), &mut rng), "'100'");
+        assert_eq!(Value::text("").canonical(&strict).as_deref(), Some(""));
         assert_eq!(
-            sqldev.render(&Value::text("O'Brien"), &mut rng),
-            "'O''Brien'"
-        );
-        assert_eq!(
-            sqldev.render(&Value::Date(days_from_civil(2003, 6, 17)), &mut rng),
-            "to_date('17-JUN-03','DD-MON-RR')"
-        );
-        let ts = days_from_civil(2005, 9, 21) * 86_400 + 13 * 3600 + 2 * 60 + 3;
-        assert_eq!(
-            sqldev.render(&Value::Timestamp(ts), &mut rng),
-            "to_timestamp('21-SEP-05 01.02.03.000000000 PM','DD-MON-RR HH.MI.SSXFF AM')"
-        );
-        assert_eq!(
-            LiteralStyle::default().render(&Value::Null, &mut rng),
-            "null"
-        );
-    }
-
-    #[test]
-    fn canonical_forms_follow_oracle_comparison() {
-        assert_eq!(Value::text("").canonical(), None);
-        assert_eq!(Value::Char("FI ".into()).canonical().as_deref(), Some("FI"));
-        assert_eq!(Value::Int(10).canonical().as_deref(), Some("10"));
-    }
-
-    #[test]
-    fn every_numeric_form_means_the_same_number() {
-        let style = LiteralStyle {
-            numeric_forms: true,
-            ..LiteralStyle::default()
-        };
-        let mut rng = Rng::new(9, 9);
-        let forms: std::collections::BTreeSet<String> = (0..200)
-            .map(|_| style.render(&Value::Int(10), &mut rng))
-            .collect();
-        assert_eq!(
-            forms.into_iter().collect::<Vec<_>>(),
-            ["'010'", "'10'", "10", "10.0", "10E0"]
-        );
-        let negative: std::collections::BTreeSet<String> = (0..200)
-            .map(|_| style.render(&Value::Int(-3), &mut rng))
-            .collect();
-        assert_eq!(
-            negative.into_iter().collect::<Vec<_>>(),
-            ["'-3'", "-3", "-3.0", "-3E0"]
+            Value::Char("FI ".into()).canonical(&strict).as_deref(),
+            Some("FI ")
         );
     }
 }

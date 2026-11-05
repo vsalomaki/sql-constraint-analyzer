@@ -7,6 +7,8 @@ rows that violate the declared constraints, foreign keys above all, and can writ
 
 ## What it will do
 
+Oracle comes first; other SQL dialects are meant to plug in the same way later (`--dialect`).
+
 - Read DDL and data files of any size (GBs), streaming, in the order given.
 - Build the schema from `CREATE TABLE`, `ALTER TABLE … ADD CONSTRAINT`, `CREATE UNIQUE INDEX`.
 - Report every row that breaks a foreign key, a primary key or unique key (duplicates), or a NOT NULL column, with

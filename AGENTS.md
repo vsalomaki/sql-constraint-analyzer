@@ -24,9 +24,24 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `bacon` | clippy on save; `t` for tests |
 | `cargo run -- <args>` | Runs `sqlca` |
 | `cargo run -F gen --bin sqlca-gen -- <args>` | Runs the generator; it builds only with the `gen` feature |
-| `make fixtures` | Regenerates `tests/fixtures/gen/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
+| `make fixtures` | Regenerates `tests/fixtures/gen/<dialect>/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
 
 Run `make lint` and `make test` before calling a change done.
+
+## Dialects
+
+Oracle is the only dialect, but nothing outside `src/dialect/` may depend on one. Neutral code (input handling,
+catalog, checks, reporting, fixing, the generator's model, rows and plants) never names a dialect.
+
+- `src/dialect/mod.rs` holds `DialectId` and `Rules`: identifier folding and quoting, whether `''` is NULL, `CHAR`
+  padding, how partially NULL unique keys compare, deferrable foreign keys. Semantics differ through `Rules`, never
+  through `if oracle` in neutral code.
+- `src/dialect/<name>/` holds the syntax: for now `oracle/synth.rs` (the generator's DDL, literals, `INSERT`
+  shapes, SQL\*Plus headers, `load.sql`) behind the `synth::Render` trait. The parser lands beside it.
+- A planted violation that exists only under some rules (`''` in a NOT NULL column, a partially NULL unique
+  duplicate, a deferred FK) is planted only when the dialect's `Rules` make it one.
+- Adding a dialect means a new folder, a `DialectId` value, its `Rules` and `Render`, and its fixtures under
+  `tests/fixtures/gen/<dialect>/`.
 
 ## Conventions
 

@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
+use sqlca::dialect::DialectId;
 use sqlca::synth::{self, Encoding, Layout, LineEnding, Noise, Options, Placement};
 
 /// Writes SQL Developer–style Oracle exports with planted constraint violations, and a manifest of the expected
@@ -14,6 +15,9 @@ struct Cli {
     /// Folder to write into; must not exist yet, or be empty.
     #[arg(long)]
     out: PathBuf,
+    /// SQL dialect to write.
+    #[arg(long, value_enum, default_value_t = DialectId::Oracle)]
+    dialect: DialectId,
     #[arg(long, default_value_t = 1)]
     seed: u64,
     /// Number of employees; the other tables scale from it (about 10 rows per employee in all).
@@ -75,6 +79,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     )]
     let violations_ppm = (cli.violations * 1_000_000.0).round() as u32;
     let options = Options {
+        dialect: cli.dialect,
         seed: cli.seed,
         rows: cli.rows,
         layout: cli.layout,

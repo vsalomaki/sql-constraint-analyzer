@@ -4,14 +4,16 @@ use std::io;
 use std::path::Path;
 
 use super::out::{Out, OutputFile, Role};
+use super::render::{Batch, DdlItem, DdlStyle, Edge, Insert, Render};
 use super::rng::Rng;
 use super::schema::{
-    self, APP_SCHEMA, APP_TABLES, AUDIT_SEQ, Constraint, DdlStyle, Kind, REF_SCHEMA, REF_TABLES,
-    State, TableId,
+    self, APP_SCHEMA, APP_TABLES, AUDIT_SEQ, Constraint, Kind, REF_SCHEMA, REF_TABLES, State,
+    TableId,
 };
-use super::value::{LiteralStyle, Value, days_from_civil};
+use super::value::{Value, days_from_civil};
 use super::{Layout, Options, Placement};
-use crate::finding::{Finding, FindingKind, Location, display_ident, qualified_name};
+use crate::dialect::{Fold, Rules, UniqueNulls};
+use crate::finding::{Finding, FindingKind, Location};
 
 #[derive(Debug, Clone, Copy)]
 enum Section {
@@ -71,12 +73,20 @@ pub(crate) fn write_export(
         }
         if options.constraints == Placement::AfterData {
             for &table in tables {
-                let text = w.style().late_keys(table);
-                w.ddl(schema, Section::Constraints, table.name(), &text)?;
+                w.ddl(
+                    schema,
+                    Section::Constraints,
+                    table.name(),
+                    DdlItem::LateKeys(table),
+                )?;
             }
             for &table in tables {
-                let text = w.style().foreign_keys(table);
-                w.ddl(schema, Section::RefConstraints, table.name(), &text)?;
+                w.ddl(
+                    schema,
+                    Section::RefConstraints,
+                    table.name(),
+                    DdlItem::ForeignKeys(table),
+                )?;
             }
         }
     }
@@ -161,10 +171,10 @@ impl Row {
             .map(|(_, v)| v)
     }
 
-    fn key(&self, columns: &[&str]) -> Vec<Option<String>> {
+    fn key(&self, columns: &[&str], rules: &Rules) -> Vec<Option<String>> {
         columns
             .iter()
-            .map(|c| self.get(c).and_then(Value::canonical))
+            .map(|c| self.get(c).and_then(|v| v.canonical(rules)))
             .collect()
     }
 }
@@ -176,6 +186,8 @@ struct Plant {
     table: Option<String>,
     columns: Vec<String>,
     key: Vec<Option<String>>,
+    /// Fill `key` from the row's values of `columns` when it is written.
+    key_from_row: bool,
     first: Option<Location>,
 }
 
@@ -187,18 +199,15 @@ impl Plant {
             table: None,
             columns: columns.iter().map(|c| (*c).to_owned()).collect(),
             key: Vec::new(),
+            key_from_row: false,
             first: None,
         }
     }
 
-    fn duplicate(
-        constraint: String,
-        columns: &[&str],
-        row: &Row,
-        first: Option<&Location>,
-    ) -> Self {
+    /// A duplicate of `columns`; its key is read from the row when the row is written.
+    fn duplicate(constraint: String, columns: &[&str], first: Option<&Location>) -> Self {
         Self {
-            key: row.key(columns),
+            key_from_row: true,
             first: first.cloned(),
             ..Self::new(FindingKind::DuplicateKey, Some(constraint), columns)
         }
@@ -212,9 +221,10 @@ impl Plant {
 struct Writer<'o> {
     options: &'o Options,
     omitted: &'o [TableId],
+    render: Box<dyn Render>,
+    rules: &'static Rules,
     out: Out,
     eol: &'static str,
-    literals: LiteralStyle,
     findings: Vec<Finding>,
     empty_parents: Vec<(&'static Constraint, u64)>,
     loaded: Vec<TableId>,
@@ -230,17 +240,15 @@ struct Writer<'o> {
 
 impl<'o> Writer<'o> {
     fn new(options: &'o Options, root: &Path, omitted: &'o [TableId]) -> Self {
-        let noise = options.noise;
+        let render = options.dialect.render(options.noise);
+        let rules = render.rules();
         Self {
             options,
             omitted,
+            render,
+            rules,
             out: Out::new(root, options.encoding),
             eol: options.line_ending.as_str(),
-            literals: LiteralStyle {
-                quoted_numbers: noise.quoted_numbers,
-                numeric_forms: noise.numeric_forms,
-                q_quote: noise.q_quote,
-            },
             findings: Vec::new(),
             empty_parents: Vec::new(),
             loaded: Vec::new(),
@@ -263,7 +271,14 @@ impl<'o> Writer<'o> {
         }
     }
 
-    fn ddl(&mut self, schema: &str, section: Section, object: &str, text: &str) -> io::Result<()> {
+    fn ddl(
+        &mut self,
+        schema: &str,
+        section: Section,
+        object: &str,
+        item: DdlItem,
+    ) -> io::Result<()> {
+        let text = self.render.ddl(item, &self.style());
         if text.is_empty() {
             return Ok(());
         }
@@ -275,16 +290,15 @@ impl<'o> Writer<'o> {
 
     /// Tables, the sequence and trigger, and (before the data) the foreign keys of one schema.
     fn schema_ddl(&mut self, schema: &str, tables: &[TableId]) -> io::Result<()> {
-        let style = self.style();
         if schema == APP_SCHEMA && self.options.noise.nextval {
-            self.ddl(schema, Section::Sequence, AUDIT_SEQ, &style.sequence())?;
+            self.ddl(schema, Section::Sequence, AUDIT_SEQ, DdlItem::Sequence)?;
         }
         for &table in tables {
             self.ddl(
                 schema,
                 Section::Table,
                 table.name(),
-                &style.create_table(table),
+                DdlItem::CreateTable(table),
             )?;
         }
         if schema == APP_SCHEMA && self.options.noise.plsql_trigger {
@@ -292,7 +306,7 @@ impl<'o> Writer<'o> {
                 schema,
                 Section::Trigger,
                 schema::AUDIT_TRIGGER,
-                &style.trigger(),
+                DdlItem::Trigger,
             )?;
         }
         if self.options.constraints == Placement::BeforeData {
@@ -301,7 +315,7 @@ impl<'o> Writer<'o> {
                     schema,
                     Section::RefConstraints,
                     table.name(),
-                    &style.foreign_keys(table),
+                    DdlItem::ForeignKeys(table),
                 )?;
             }
         }
@@ -324,23 +338,7 @@ impl<'o> Writer<'o> {
         if self.omitted.contains(&table) {
             return Ok(());
         }
-        let eol = self.eol;
-        let noise = self.options.noise;
-        let name = table.qualified();
-        let header: String = [
-            noise
-                .rem_header
-                .then(|| format!("REM INSERTING into {name}{eol}")),
-            noise
-                .set_define_off
-                .then(|| format!("SET DEFINE OFF;{eol}")),
-            noise
-                .comments
-                .then(|| format!("/* Rows of {name}; a ';' or -- in here is not SQL */{eol}")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let header = self.render.data_section(table, Edge::Start, self.eol);
         if !header.is_empty() {
             self.write_data(&header)?;
         }
@@ -350,9 +348,9 @@ impl<'o> Writer<'o> {
     fn end_table(&mut self) -> io::Result<()> {
         if !self.omitted.contains(&self.table) {
             self.close_group()?;
-            if self.options.noise.comments {
-                let text = format!("-- end of {}{}", self.table.qualified(), self.eol);
-                self.write_data(&text)?;
+            let footer = self.render.data_section(self.table, Edge::End, self.eol);
+            if !footer.is_empty() {
+                self.write_data(&footer)?;
             }
         }
         self.loaded.push(self.table);
@@ -367,7 +365,7 @@ impl<'o> Writer<'o> {
     fn close_group(&mut self) -> io::Result<()> {
         if self.group_left > 0 {
             self.group_left = 0;
-            let text = format!("SELECT 1 FROM DUAL;{}", self.eol);
+            let text = self.render.batch(Batch::End, self.eol);
             self.write_data(&text)?;
         }
         Ok(())
@@ -382,19 +380,19 @@ impl<'o> Writer<'o> {
         self.options.constraints == Placement::AfterData
     }
 
-    /// Whether the end-state check applies: Oracle never validates rows already there against an `ENABLE
-    /// NOVALIDATE` constraint added after them.
+    /// Whether the end-state check applies: a not-validated constraint added after the data never checks the rows
+    /// already there.
     fn checks_end_state(&self, fk: &Constraint) -> bool {
         match fk.state {
-            State::Enable => true,
-            State::EnableNovalidate => !self.after_data(),
-            State::Disable => false,
+            State::Enforced => true,
+            State::NotValidated => !self.after_data(),
+            State::Disabled => false,
         }
     }
 
     fn checks_load_order(&self, fk: &Constraint) -> bool {
         let deferred = matches!(fk.kind, Kind::Foreign { deferred: true, .. });
-        !self.after_data() && fk.state != State::Disable && !deferred
+        !self.after_data() && fk.state != State::Disabled && !deferred
     }
 
     fn parent_loaded(&self, parent: TableId, index: u64, current: u64) -> bool {
@@ -406,7 +404,7 @@ impl<'o> Writer<'o> {
     }
 
     /// A normal row: valid in the end state and, unless the data is shuffled, in load order too. Children reference
-    /// it by index, so a finding here would leave Oracle rejecting rows the manifest calls valid.
+    /// it by index, so a finding here would leave the database rejecting rows the manifest calls valid.
     fn normal(
         &mut self,
         index: u64,
@@ -421,7 +419,7 @@ impl<'o> Writer<'o> {
         {
             return Err(io::Error::other(format!(
                 "generator bug: normal row {index} of {} has a finding: {finding:?}",
-                self.table.qualified()
+                self.table.qualified(self.rules)
             )));
         }
         Ok(at)
@@ -449,7 +447,7 @@ impl<'o> Writer<'o> {
         }
         let mut fk_findings = Vec::new();
         for &(fk, target) in refs {
-            let key = row.key(fk.columns);
+            let key = row.key(fk.columns, self.rules);
             if key.iter().any(Option::is_none) {
                 continue;
             }
@@ -473,7 +471,7 @@ impl<'o> Writer<'o> {
             };
             fk_findings.push(Plant {
                 key,
-                ..Plant::new(kind, Some(fk.qualified()), fk.columns)
+                ..Plant::new(kind, Some(fk.qualified(self.rules)), fk.columns)
             });
         }
         let has_nextval = row
@@ -489,14 +487,22 @@ impl<'o> Writer<'o> {
             && !has_nextval;
         let at = self.write_row(row, groupable)?;
         for plant in plants.into_iter().chain(fk_findings) {
+            let key = if plant.key_from_row {
+                let columns: Vec<&str> = plant.columns.iter().map(String::as_str).collect();
+                row.key(&columns, self.rules)
+            } else {
+                plant.key
+            };
             self.findings.push(Finding {
                 kind: plant.kind,
                 constraint: plant.constraint,
-                table: plant.table.unwrap_or_else(|| self.table.qualified()),
+                table: plant
+                    .table
+                    .unwrap_or_else(|| self.table.qualified(self.rules)),
                 columns: plant.columns,
                 file: Some(at.file.clone()),
                 line: Some(at.line),
-                key: plant.key,
+                key,
                 first: plant.first,
                 count: None,
             });
@@ -518,61 +524,54 @@ impl<'o> Writer<'o> {
 
     fn write_row(&mut self, row: &Row, groupable: bool) -> io::Result<Location> {
         let eol = self.eol;
+        let rules = self.rules;
         let case = if self.options.noise.mixed_case {
             self.style_rng.below(3)
         } else {
             0
         };
         let table = match row.table_name {
-            Some(name) => qualified_name(self.table.schema(), name),
-            None => self.table.qualified(),
+            Some(name) => rules.qualified(self.table.schema(), name),
+            None => self.table.qualified(rules),
         };
-        let table = cased(&table, case);
+        let table = cased(rules, &table, case);
         let wrap = self.options.noise.wrapped_statements && self.style_rng.below(2) == 0;
-        let sep = if wrap {
-            format!(",{eol}    ")
-        } else {
-            ",".to_owned()
-        };
-        let brk = if wrap { eol } else { " " };
-        let columns = if row.column_list {
-            let names: Vec<String> = row.cells.iter().map(|(c, _)| cased(c, case)).collect();
-            format!(" ({})", names.join(&sep))
-        } else {
-            String::new()
-        };
+        let columns: Option<Vec<String>> = row.column_list.then(|| {
+            row.cells
+                .iter()
+                .map(|(c, _)| cased(rules, c, case))
+                .collect()
+        });
         let mut values: Vec<String> = row
             .cells
             .iter()
-            .map(|(_, v)| self.literals.render(v, &mut self.style_rng))
+            .map(|(_, v)| self.render.literal(v, &mut self.style_rng))
             .collect();
         if row.drop_last_value {
             values.pop();
         }
-        let values = values.join(&sep);
+        let insert = Insert {
+            table: &table,
+            columns: columns.as_deref(),
+            values: &values,
+            case,
+            wrap,
+            eol,
+        };
         if groupable {
             if self.group_left == 0 {
                 self.group_left = 2 + self.style_rng.below(3);
-                self.write_data(&format!("INSERT ALL{eol}"))?;
+                self.write_data(&self.render.batch(Batch::Start, eol))?;
             }
-            let at = self.write_data(&format!(
-                "  INTO {table}{columns}{brk}VALUES ({values}){eol}"
-            ))?;
+            let at = self.write_data(&self.render.batch(Batch::Row(&insert), eol))?;
             self.group_left -= 1;
             if self.group_left == 0 {
-                self.write_data(&format!("SELECT 1 FROM DUAL;{eol}"))?;
+                self.write_data(&self.render.batch(Batch::End, eol))?;
             }
             Ok(at)
         } else {
             self.close_group()?;
-            let (insert, keyword) = match case {
-                1 => ("insert into", "values"),
-                2 => ("INSERT INTO", "VALUES"),
-                _ => ("Insert into", "values"),
-            };
-            self.write_data(&format!(
-                "{insert} {table}{columns}{brk}{keyword} ({values});{eol}"
-            ))
+            self.write_data(&self.render.insert(&insert))
         }
     }
 
@@ -580,8 +579,8 @@ impl<'o> Writer<'o> {
         for (fk, count) in std::mem::take(&mut self.empty_parents) {
             self.findings.push(Finding {
                 kind: FindingKind::ParentTableEmpty,
-                constraint: Some(fk.qualified()),
-                table: fk.table.qualified(),
+                constraint: Some(fk.qualified(self.rules)),
+                table: fk.table.qualified(self.rules),
                 columns: fk.columns.iter().map(|c| (*c).to_owned()).collect(),
                 file: None,
                 line: None,
@@ -612,17 +611,23 @@ impl<'o> Writer<'o> {
     }
 }
 
-/// An identifier written in one of three cases: as Oracle stores it, lower case, or quoted. A quoted
-/// mixed-case name stays as it is.
-fn cased(name: &str, case: u64) -> String {
+/// An identifier written in one of three cases: as the dialect stores it, in the other case, or quoted. A name
+/// that needs quotes stays as it is.
+fn cased(rules: &Rules, name: &str, case: u64) -> String {
+    let q = rules.ident_quote;
     name.split('.')
         .map(|part| {
-            if part.starts_with('"') || display_ident(part) != part {
+            let shown = rules.display_ident(part);
+            if part.starts_with(q) {
                 part.to_owned()
+            } else if shown != part {
+                // A name that needs quotes under the dialect's folding, such as `EMP_ID` where names fold to lower case.
+                shown.into_owned()
             } else {
-                match case {
-                    1 => part.to_ascii_lowercase(),
-                    2 => format!("\"{part}\""),
+                match (case, rules.fold) {
+                    (1, Fold::Upper) => part.to_ascii_lowercase(),
+                    (1, Fold::Lower) => part.to_ascii_uppercase(),
+                    (2, _) => format!("{q}{part}{q}"),
                     _ => part.to_owned(),
                 }
             }
@@ -725,7 +730,7 @@ fn departments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
         DeptPlant::DuplicateId,
         DeptPlant::NullId,
     ];
-    if w.options.deferred_violations {
+    if w.options.deferred_violations && w.rules.deferrable_foreign_keys {
         kinds.push(DeptPlant::MissingManager);
     }
     let refs = |manager: Target, country: Target| {
@@ -789,23 +794,21 @@ fn departments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 DeptPlant::MissingCountry | DeptPlant::MissingManager => Vec::new(),
                 DeptPlant::DuplicateName => {
                     vec![Plant::duplicate(
-                        schema::DEPARTMENTS_NAME_UK.qualified(),
+                        schema::DEPARTMENTS_NAME_UK.qualified(w.rules),
                         &["NAME"],
-                        &row,
                         first.as_ref(),
                     )]
                 }
                 DeptPlant::DuplicateId => {
                     vec![Plant::duplicate(
-                        schema::DEPARTMENTS_PK.qualified(),
+                        schema::DEPARTMENTS_PK.qualified(w.rules),
                         &["DEPT_ID"],
-                        &row,
                         first.as_ref(),
                     )]
                 }
                 DeptPlant::NullId => vec![Plant::not_null(
                     "DEPT_ID",
-                    Some(schema::DEPARTMENTS_PK.qualified()),
+                    Some(schema::DEPARTMENTS_PK.qualified(w.rules)),
                 )],
             };
             // An extra's FK columns are NULL unless planted with a value no parent has.
@@ -907,8 +910,13 @@ fn employee_row(w: &mut Writer<'_>, s: &Sizes, e: u64, manager: Option<u64>) -> 
 }
 
 fn employees(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
+    // `''` violates NOT NULL only where the dialect stores it as NULL.
+    let kinds: Vec<EmpPlant> = EMP_PLANTS
+        .into_iter()
+        .filter(|p| *p != EmpPlant::EmptyEmail || w.rules.empty_string_is_null)
+        .collect();
     for e in 0..s.employees {
-        let mut plants = w.plants_at(&EMP_PLANTS, e, s.employees);
+        let mut plants = w.plants_at(&kinds, e, s.employees);
         // A forward reference needs a later employee, so it is always planted at the middle one as well.
         if e == s.employees / 2 && !plants.contains(&EmpPlant::ForwardManager) {
             plants.push(EmpPlant::ForwardManager);
@@ -985,7 +993,7 @@ fn employee_extra(
         EmpPlant::UnknownTable => {
             row_shape.1 = Some("EMPLOYEES_ARCHIVE");
             found.push(Plant {
-                table: Some(qualified_name(APP_SCHEMA, "EMPLOYEES_ARCHIVE")),
+                table: Some(w.rules.qualified(APP_SCHEMA, "EMPLOYEES_ARCHIVE")),
                 ..Plant::new(FindingKind::UnknownTable, None, &[])
             });
         }
@@ -998,16 +1006,14 @@ fn employee_extra(
     };
     match plant {
         EmpPlant::DuplicateId => found.push(Plant::duplicate(
-            schema::EMPLOYEES_PK.qualified(),
+            schema::EMPLOYEES_PK.qualified(w.rules),
             &["EMP_ID"],
-            &row,
             first,
         )),
         EmpPlant::DuplicateEmail => {
             found.push(Plant::duplicate(
-                schema::EMPLOYEES_EMAIL_UIX.qualified(),
+                schema::EMPLOYEES_EMAIL_UIX.qualified(w.rules),
                 &["EMAIL"],
-                &row,
                 first,
             ));
         }
@@ -1104,17 +1110,15 @@ fn projects(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 ProjectPlant::MissingDept => Vec::new(),
                 ProjectPlant::DuplicateCode => {
                     vec![Plant::duplicate(
-                        schema::PROJECTS_PK.qualified(),
+                        schema::PROJECTS_PK.qualified(w.rules),
                         &["PROJECT_CODE"],
-                        &row,
                         first.as_ref(),
                     )]
                 }
                 ProjectPlant::DuplicateExternalRef => {
                     vec![Plant::duplicate(
-                        schema::PROJECTS_EXTREF_UK.qualified(),
+                        schema::PROJECTS_EXTREF_UK.qualified(w.rules),
                         &["EXTERNAL_REF"],
-                        &row,
                         first.as_ref(),
                     )]
                 }
@@ -1127,7 +1131,7 @@ fn projects(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
 
 #[derive(Clone, Copy, PartialEq)]
 enum AssignmentPlant {
-    /// (employee, NULL) a second time: a duplicate of the composite unique key in Oracle.
+    /// (employee, NULL) a second time: a duplicate where partially NULL unique keys conflict.
     DuplicateNullRole,
     DuplicateKey,
     MissingEmployee,
@@ -1141,6 +1145,12 @@ fn assignments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
         AssignmentPlant::MissingEmployee,
         AssignmentPlant::MissingProject,
     ];
+    // A partially NULL unique key is a duplicate only where the dialect compares the non-NULL parts.
+    let partial_conflict = w.rules.unique_nulls == UniqueNulls::PartialKeysConflict;
+    let kinds: Vec<AssignmentPlant> = kinds
+        .into_iter()
+        .filter(|p| *p != AssignmentPlant::DuplicateNullRole || partial_conflict)
+        .collect();
     let refs = |emp: Target, project: Target| {
         [
             (&schema::ASSIGNMENTS_EMP_FK, emp),
@@ -1203,16 +1213,14 @@ fn assignments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             let found = match plant {
                 AssignmentPlant::DuplicateNullRole => {
                     vec![Plant::duplicate(
-                        schema::ASSIGNMENTS_ROLE_UK.qualified(),
+                        schema::ASSIGNMENTS_ROLE_UK.qualified(w.rules),
                         &["EMP_ID", "ROLE"],
-                        &row,
                         first(1),
                     )]
                 }
                 AssignmentPlant::DuplicateKey => vec![Plant::duplicate(
-                    schema::ASSIGNMENTS_PK.qualified(),
+                    schema::ASSIGNMENTS_PK.qualified(w.rules),
                     &["EMP_ID", "PROJECT_CODE"],
-                    &row,
                     first(0),
                 )],
                 _ => Vec::new(),
@@ -1319,9 +1327,8 @@ fn timesheets(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 TimesheetPlant::NullHours => vec![Plant::not_null("HOURS", None)],
                 TimesheetPlant::DuplicateId => {
                     vec![Plant::duplicate(
-                        schema::TIMESHEETS_PK.qualified(),
+                        schema::TIMESHEETS_PK.qualified(w.rules),
                         &["TS_ID"],
-                        &row,
                         last.as_ref(),
                     )]
                 }
@@ -1437,6 +1444,32 @@ mod tests {
             assert!(s.extra_dept_id(s.employees) < 1_000_000_000, "{rows}");
             assert!(s.extra_emp_id(s.employees) < 1_000_000_000, "{rows}");
         }
-        assert_eq!(missing_id(4).canonical().as_deref(), Some("-4"));
+        assert_eq!(
+            missing_id(4)
+                .canonical(crate::dialect::DialectId::default().rules())
+                .as_deref(),
+            Some("-4")
+        );
+    }
+}
+
+#[cfg(test)]
+mod casing_tests {
+    use super::*;
+    use crate::dialect::DialectId;
+
+    #[test]
+    fn identifiers_are_cased_and_quoted_by_the_dialect_rules() {
+        let oracle = DialectId::Oracle.rules();
+        assert_eq!(cased(oracle, "EMP_ID", 0), "EMP_ID");
+        assert_eq!(cased(oracle, "EMP_ID", 1), "emp_id");
+        assert_eq!(cased(oracle, "EMP_ID", 2), "\"EMP_ID\"");
+        assert_eq!(cased(oracle, "APP.\"AuditLog\"", 1), "app.\"AuditLog\"");
+        let lower = Rules {
+            fold: Fold::Lower,
+            ..*oracle
+        };
+        assert_eq!(cased(&lower, "EMP_ID", 0), "\"EMP_ID\"");
+        assert_eq!(cased(&lower, "emp_id", 1), "EMP_ID");
     }
 }

@@ -1,7 +1,7 @@
 .PHONY: lint fmt test check-all install-hooks fixtures
 
-GEN = cargo run -q -F gen --bin sqlca-gen --
-FIXTURES = tests/fixtures/gen
+GEN = cargo run -q -F gen --bin sqlca-gen -- --dialect oracle
+FIXTURES = tests/fixtures/gen/oracle
 
 ## Regenerates the committed generator fixtures; review the diff before committing it.
 fixtures:

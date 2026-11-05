@@ -1,15 +1,16 @@
-//! Test-data generator: writes SQL Developer–style Oracle exports with planted constraint violations, and a
-//! manifest listing the findings an analyzer must report for them.
+//! Test-data generator: writes exports with planted constraint violations, and a manifest listing the findings an
+//! analyzer must report for them. The model, rows and plants here are neutral; the chosen dialect writes the syntax.
 //!
 //! Every planted violation is an extra row with keys outside the normal rows' range, so no child row ever
-//! references a bad one. Oracle (which rejects a bad row and then its children) and the analyzer (which judges each
-//! row on its own) therefore agree on the findings by construction.
+//! references a bad one. The database (which rejects a bad row and then its children) and the analyzer (which judges
+//! each row on its own) therefore agree on the findings by construction.
 
 mod data;
 mod out;
-mod rng;
-mod schema;
-mod value;
+pub(crate) mod render;
+pub(crate) mod rng;
+pub(crate) mod schema;
+pub(crate) mod value;
 
 use std::fs;
 use std::io;
@@ -17,8 +18,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::dialect::DialectId;
 use crate::finding::Finding;
 pub use out::{Encoding, LineEnding, OutputFile};
+pub(crate) use render::Render;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -153,6 +156,8 @@ impl Noise {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Options {
+    #[serde(default)]
+    pub dialect: DialectId,
     pub seed: u64,
     /// Number of employees; the other tables scale from it.
     pub rows: u64,
@@ -174,6 +179,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            dialect: DialectId::default(),
             seed: 1,
             rows: 100,
             layout: Layout::default(),
@@ -208,6 +214,11 @@ pub enum Error {
     TooFewRows(u64),
     #[error("unknown table `{0}` in --omit-data")]
     UnknownTable(String),
+    #[error("{dialect:?} has no syntax for the noise switches {switches:?}")]
+    UnsupportedNoise {
+        dialect: DialectId,
+        switches: Vec<&'static str>,
+    },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -222,6 +233,14 @@ pub const ORDER_FILE: &str = "order.txt";
 pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     if options.rows < MIN_ROWS {
         return Err(Error::TooFewRows(options.rows));
+    }
+    let render = options.dialect.render(options.noise);
+    let switches = render.unsupported_noise();
+    if !switches.is_empty() {
+        return Err(Error::UnsupportedNoise {
+            dialect: options.dialect,
+            switches,
+        });
     }
     let omitted = options
         .omit_data
@@ -238,17 +257,13 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     let (files, findings) = data::write_export(options, root, &omitted)?;
 
     let eol = options.line_ending.as_str();
-    let lines = |prefix: &str| {
-        files.iter().fold(String::new(), |mut text, f| {
-            text.push_str(prefix);
-            text.push_str(&f.path);
-            text.push_str(eol);
-            text
-        })
-    };
-    let load = format!("SET DEFINE OFF{eol}{}", lines("@@"));
-    let order = lines("");
-    fs::write(root.join(LOAD_SCRIPT), load)?;
+    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    fs::write(root.join(LOAD_SCRIPT), render.load_script(&paths, eol))?;
+    let order = paths.iter().fold(String::new(), |mut text, path| {
+        text.push_str(path);
+        text.push_str(eol);
+        text
+    });
     fs::write(root.join(ORDER_FILE), order)?;
 
     let manifest = Manifest {
