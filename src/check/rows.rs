@@ -12,7 +12,7 @@ use crate::catalog::{Catalog, Column, Constraint, Kind, Origin, Parent, Table, T
 use crate::dialect::{DialectId, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::source::Encoding;
-use crate::statement::{ColumnDefault, Expr, InsertRow};
+use crate::statement::{ColumnDefault, DataType, Expr, InsertRow};
 use crate::value::{self, Canonical, Literal};
 
 /// Where a row is: its file's position in the run, its offset there, and its line.
@@ -194,7 +194,7 @@ impl<'a> Checker<'a> {
             .columns
             .iter()
             .zip(&literals)
-            .map(|(column, literal)| value::canonical(literal, column.data_type.family, self.rules))
+            .map(|(column, literal)| value::canonical(literal, &column.data_type, self.rules))
             .collect();
         let assumed: Vec<bool> = table
             .columns
@@ -411,16 +411,19 @@ impl<'a> Checker<'a> {
             }) else {
                 continue;
             };
-            // A child value compares as the parent column's type would store it.
+            // A child value is stored as its own column stores numbers, then compared as the parent's type compares.
             let parts: Vec<(Canonical, bool)> = columns
                 .iter()
                 .zip(&parent_columns)
                 .map(|(&child, parent)| {
                     let literal = literals.get(child).unwrap_or(&Literal::Null);
-                    let family = parent.data_type.family;
+                    let compared = DataType {
+                        decimal: table.columns.get(child).and_then(|c| c.data_type.decimal),
+                        ..DataType::of(parent.data_type.family)
+                    };
                     (
-                        value::canonical(literal, family, self.rules),
-                        value::assumption(literal, family).is_some(),
+                        value::canonical(literal, &compared, self.rules),
+                        value::assumption(literal, compared.family).is_some(),
                     )
                 })
                 .collect();

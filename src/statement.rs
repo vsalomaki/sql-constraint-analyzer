@@ -38,6 +38,28 @@ pub struct DataType {
     pub family: TypeFamily,
     /// The type as written, upper-cased: `NUMBER(9,0)`, `VARCHAR2(40 BYTE)`.
     pub written: String,
+    /// The digits a decimal number type stores; `None` where it stores a number as given (`NUMBER`, `FLOAT`).
+    pub decimal: Option<Decimal>,
+}
+
+impl DataType {
+    /// A type of `family` with nothing more known about it.
+    pub fn of(family: TypeFamily) -> Self {
+        Self {
+            family,
+            written: String::new(),
+            decimal: None,
+        }
+    }
+}
+
+/// `NUMBER(precision, scale)`: values are rounded to `scale` digits after the point (before it when negative), and
+/// may have at most `precision` significant digits from there. `NUMBER(*, s)`, `INTEGER` and `DECIMAL` have a scale
+/// but no precision of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decimal {
+    pub precision: Option<u8>,
+    pub scale: i16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,7 +6,8 @@ use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
     AlterAction, ColumnDef, ColumnDefault, ConstraintDef, ConstraintKind, ConstraintState,
-    DataType, Expr, Ident, IndexColumn, ParseError, Skip, StateChange, Statement, TypeFamily,
+    DataType, Decimal, Expr, Ident, IndexColumn, ParseError, Skip, StateChange, Statement,
+    TypeFamily,
 };
 
 /// The statement a table or index DDL piece makes, or `None` when the piece is something else.
@@ -132,10 +133,7 @@ const COLUMN_CLAUSES: &[&str] = &[
 fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
     let name = c.ident("a column name")?;
     let data_type = if c.at_item_end() || c.at_any_word(COLUMN_CLAUSES) {
-        DataType {
-            family: TypeFamily::Other,
-            written: String::new(),
-        }
+        DataType::of(TypeFamily::Other)
     } else {
         data_type(c)?
     };
@@ -208,9 +206,26 @@ fn data_type(c: &mut Cursor) -> Result<DataType, ParseError> {
     };
     c.name("a column type")?;
     let mut family = family;
+    // Oracle gives these scale 0 and no precision of their own unless given them.
+    let mut decimal = matches!(
+        first.as_deref(),
+        Some("INTEGER" | "INT" | "SMALLINT" | "DECIMAL" | "DEC" | "NUMERIC")
+    )
+    .then_some(Decimal {
+        precision: None,
+        scale: 0,
+    });
+    let sized = matches!(
+        first.as_deref(),
+        Some("NUMBER" | "DECIMAL" | "DEC" | "NUMERIC")
+    );
     loop {
         if c.at_punct(b'(') {
+            let open = c.pos();
             c.skip_parens()?;
+            if sized {
+                decimal = decimal_args(c, open + 1, c.pos() - 1).or(decimal);
+            }
         } else if c.eat_any_word(&[
             "PRECISION",
             "CHAR",
@@ -240,6 +255,25 @@ fn data_type(c: &mut Cursor) -> Result<DataType, ParseError> {
     Ok(DataType {
         family,
         written: written_type(c, start),
+        decimal,
+    })
+}
+
+/// `(p)`, `(p, s)` or `(*, s)` from the tokens `from..to` inside a number type's parentheses.
+fn decimal_args(c: &Cursor, from: usize, to: usize) -> Option<Decimal> {
+    let text: String = (from..to)
+        .filter_map(|i| c.token(i))
+        .map(|t| c.token_text(t))
+        .collect();
+    let (precision, scale) = text.split_once(',').unwrap_or((&text, "0"));
+    let precision = if precision == "*" {
+        None
+    } else {
+        Some(precision.parse().ok()?)
+    };
+    Some(Decimal {
+        precision,
+        scale: scale.parse().ok()?,
     })
 }
 
@@ -949,6 +983,31 @@ mod tests {
                 (family, spelled),
                 "{written}"
             );
+        }
+    }
+
+    #[test]
+    fn decimal_types_know_their_precision_and_scale() {
+        type PrecisionScale = Option<(Option<u8>, i16)>;
+        let cases: [(&str, PrecisionScale); 9] = [
+            ("NUMBER(9,0)", Some((Some(9), 0))),
+            ("NUMBER(9)", Some((Some(9), 0))),
+            ("NUMBER(*, 2)", Some((None, 2))),
+            ("NUMBER(2,-3)", Some((Some(2), -3))),
+            ("NUMBER", None),
+            ("INTEGER", Some((None, 0))),
+            ("DECIMAL(10,2)", Some((Some(10), 2))),
+            ("NUMERIC", Some((None, 0))),
+            ("FLOAT(126)", None),
+        ];
+        for (written, expected) in cases {
+            let Statement::CreateTable { columns, .. } =
+                parse(&format!("CREATE TABLE T (C {written})"))
+            else {
+                panic!("not a CREATE TABLE");
+            };
+            let decimal = columns[0].data_type.decimal.map(|d| (d.precision, d.scale));
+            assert_eq!(decimal, expected, "{written}");
         }
     }
 
