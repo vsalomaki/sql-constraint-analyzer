@@ -9,6 +9,7 @@ ignore = []
 # Only licences a dependency has; a new permissive one is added with the dependency that brings it.
 allow = [
     "Apache-2.0",
+    "BSD-3-Clause",
     "MIT",
     "Unicode-3.0",
 ]

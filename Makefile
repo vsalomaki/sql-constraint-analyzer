@@ -1,4 +1,14 @@
-.PHONY: lint fmt test check-all install-hooks
+.PHONY: lint fmt test check-all install-hooks fixtures
+
+GEN = cargo run -q -F gen --bin sqlca-gen --
+FIXTURES = tests/fixtures/gen
+
+## Regenerates the committed generator fixtures; review the diff before committing it.
+fixtures:
+	rm -rf $(FIXTURES)
+	$(GEN) --out $(FIXTURES)/separate-sqldev --rows 20
+	$(GEN) --out $(FIXTURES)/single-all-crlf-1252 --rows 20 --layout single --noise all --line-endings crlf --encoding windows-1252
+	$(GEN) --out $(FIXTURES)/type-after-data-shuffled --rows 20 --layout type --noise all --constraints after-data --shuffle-order
 
 ## Turns on the gitleaks pre-push hook for this clone.
 install-hooks:

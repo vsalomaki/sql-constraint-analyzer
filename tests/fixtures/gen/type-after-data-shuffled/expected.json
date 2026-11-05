@@ -1,0 +1,413 @@
+{
+  "generator": "sqlca-gen 0.1.0",
+  "options": {
+    "seed": 1,
+    "rows": 20,
+    "layout": "type",
+    "constraints": "after-data",
+    "shuffle-order": true,
+    "violations-ppm": 1000,
+    "deferred-violations": true,
+    "noise": {
+      "rem-header": true,
+      "set-define-off": true,
+      "comments": true,
+      "storage-clauses": true,
+      "plsql-trigger": true,
+      "quoted-numbers": true,
+      "numeric-forms": true,
+      "multiline-strings": true,
+      "q-quote": true,
+      "embedded-delimiters": true,
+      "nextval": true,
+      "insert-all": true,
+      "mixed-case": true,
+      "no-column-list": true,
+      "wrapped-statements": true
+    },
+    "line-ending": "lf",
+    "encoding": "utf-8",
+    "omit-data": []
+  },
+  "files": [
+    {
+      "path": "ref/tables.sql",
+      "schema": "REF",
+      "ddl": true,
+      "data": false
+    },
+    {
+      "path": "ref/data.sql",
+      "schema": "REF",
+      "ddl": false,
+      "data": true
+    },
+    {
+      "path": "ref/constraints.sql",
+      "schema": "REF",
+      "ddl": true,
+      "data": false
+    },
+    {
+      "path": "app/sequences.sql",
+      "schema": "APP",
+      "ddl": true,
+      "data": false
+    },
+    {
+      "path": "app/tables.sql",
+      "schema": "APP",
+      "ddl": true,
+      "data": false
+    },
+    {
+      "path": "app/triggers.sql",
+      "schema": "APP",
+      "ddl": true,
+      "data": false
+    },
+    {
+      "path": "app/data.sql",
+      "schema": "APP",
+      "ddl": false,
+      "data": true
+    },
+    {
+      "path": "app/constraints.sql",
+      "schema": "APP",
+      "ddl": true,
+      "data": false
+    },
+    {
+      "path": "app/ref_constraints.sql",
+      "schema": "APP",
+      "ddl": true,
+      "data": false
+    }
+  ],
+  "findings": [
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_ROLE_UK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "ROLE"
+      ],
+      "file": "app/data.sql",
+      "line": 48,
+      "key": [
+        "1004",
+        null
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 46
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_PK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/data.sql",
+      "line": 96,
+      "key": [
+        "1008",
+        "P00003"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 84
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 153,
+      "key": [
+        "-3"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data.sql",
+      "line": 196,
+      "key": [
+        "NOPE4"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.TIMESHEETS_ASSIGNMENT_FK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/data.sql",
+      "line": 430,
+      "key": [
+        "1005",
+        "P00003"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "HOURS"
+      ],
+      "file": "app/data.sql",
+      "line": 598
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.TIMESHEETS_PK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "TS_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 761,
+      "key": [
+        "80"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 750
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 886,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 891,
+      "key": [
+        "-2"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_PK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 932,
+      "key": [
+        "1005"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 913
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data.sql",
+      "line": 952,
+      "key": [
+        "user7@example.com"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 950
+      }
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data.sql",
+      "line": 972
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data.sql",
+      "line": 999
+    },
+    {
+      "kind": "unknown_column",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL_ADDR"
+      ],
+      "file": "app/data.sql",
+      "line": 1052
+    },
+    {
+      "kind": "value_count_mismatch",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/data.sql",
+      "line": 1093
+    },
+    {
+      "kind": "unknown_table",
+      "table": "APP.EMPLOYEES_ARCHIVE",
+      "columns": [],
+      "file": "app/data.sql",
+      "line": 1112
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_PK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data.sql",
+      "line": 1178,
+      "key": [
+        "P00002"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 1176
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_EXTREF_UK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "EXTERNAL_REF"
+      ],
+      "file": "app/data.sql",
+      "line": 1198,
+      "key": [
+        "EXT-3"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 1187
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.AUDITLOG_EMP_FK",
+      "table": "APP.\"AuditLog\"",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 1238,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_COUNTRY_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "COUNTRY_CODE"
+      ],
+      "file": "app/data.sql",
+      "line": 1254,
+      "key": [
+        "XX"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_NAME_UK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "NAME"
+      ],
+      "file": "app/data.sql",
+      "line": 1265,
+      "key": [
+        "Myynti & markkinointi 1"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 1256
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 1269,
+      "key": [
+        "30"
+      ],
+      "first": {
+        "file": "app/data.sql",
+        "line": 1267
+      }
+    },
+    {
+      "kind": "not_null",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 1280
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_MANAGER_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data.sql",
+      "line": 1291,
+      "key": [
+        "-5"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+REM INSERTING into REF.COUNTRIES
+SET DEFINE OFF;
+/* Rows of REF.COUNTRIES; a ';' or -- in here is not SQL */
+INSERT ALL
+  INTO "REF"."COUNTRIES" ("COUNTRY_CODE",
+    "NAME")
+VALUES ('FI',
+    'Finland')
+  INTO "REF"."COUNTRIES" ("COUNTRY_CODE",
+    "NAME")
+VALUES ('SE',
+    'Sweden')
+  INTO "REF"."COUNTRIES" ("COUNTRY_CODE","NAME") VALUES ('NO','Norway')
+SELECT 1 FROM DUAL;
+INSERT ALL
+  INTO "REF"."COUNTRIES" ("COUNTRY_CODE","NAME") VALUES ('DK','Denmark')
+  INTO REF.COUNTRIES (COUNTRY_CODE,
+    NAME)
+VALUES ('EE',
+    'Estonia')
+  INTO ref.countries (country_code,
+    name)
+VALUES ('DE',
+    'Germany')
+  INTO REF.COUNTRIES (COUNTRY_CODE,
+    NAME)
+VALUES ('FR',
+    'France')
+SELECT 1 FROM DUAL;
+INSERT ALL
+  INTO "REF"."COUNTRIES" ("COUNTRY_CODE",
+    "NAME")
+VALUES ('ES',
+    'Spain')
+  INTO "REF"."COUNTRIES" ("COUNTRY_CODE","NAME") VALUES ('GB','United Kingdom')
+SELECT 1 FROM DUAL;
+INSERT ALL
+  INTO REF.COUNTRIES (COUNTRY_CODE,
+    NAME)
+VALUES ('US',
+    'United States')
+SELECT 1 FROM DUAL;
+-- end of REF.COUNTRIES
