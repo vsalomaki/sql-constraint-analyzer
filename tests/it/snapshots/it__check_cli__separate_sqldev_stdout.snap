@@ -1,0 +1,29 @@
+---
+source: tests/it/check_cli.rs
+expression: stdout
+---
+app/data/DEPARTMENTS.sql:4: missing parent for APP.DEPARTMENTS_COUNTRY_FK: COUNTRY_CODE='XX'
+app/data/DEPARTMENTS.sql:6: duplicate key APP.DEPARTMENTS_NAME_UK: NAME='Myynti & markkinointi 1', first at app/data/DEPARTMENTS.sql:5
+app/data/DEPARTMENTS.sql:8: duplicate key APP.DEPARTMENTS_PK: DEPT_ID='30', first at app/data/DEPARTMENTS.sql:7
+app/data/DEPARTMENTS.sql:10: NULL in APP.DEPARTMENTS.DEPT_ID, which APP.DEPARTMENTS_PK makes NOT NULL
+app/data/DEPARTMENTS.sql:12: missing parent for APP.DEPARTMENTS_MANAGER_FK: MANAGER_ID='-5'
+app/data/EMPLOYEES.sql:5: missing parent for APP.EMPLOYEES_DEPT_FK: DEPT_ID='-1'
+app/data/EMPLOYEES.sql:8: missing parent for APP.EMPLOYEES_MANAGER_FK: MANAGER_ID='-2'
+app/data/EMPLOYEES.sql:11: duplicate key APP.EMPLOYEES_PK: EMP_ID='1005', first at app/data/EMPLOYEES.sql:10
+app/data/EMPLOYEES.sql:14: duplicate key APP.EMPLOYEES_EMAIL_UIX: EMAIL='user7@example.com', first at app/data/EMPLOYEES.sql:13
+app/data/EMPLOYEES.sql:17: NULL in NOT NULL column APP.EMPLOYEES.EMAIL
+app/data/EMPLOYEES.sql:19: NULL in NOT NULL column APP.EMPLOYEES.EMAIL
+app/data/EMPLOYEES.sql:23: unknown column EMAIL_ADDR in APP.EMPLOYEES
+app/data/EMPLOYEES.sql:26: the value count doesn't match the columns of APP.EMPLOYEES
+app/data/EMPLOYEES.sql:29: unknown table APP.EMPLOYEES_ARCHIVE
+app/data/PROJECTS.sql:5: missing parent for APP.PROJECTS_DEPT_FK: DEPT_NAME='Lakkautettu 1'
+app/data/PROJECTS.sql:7: duplicate key APP.PROJECTS_PK: PROJECT_CODE='P00002', first at app/data/PROJECTS.sql:6
+app/data/PROJECTS.sql:9: duplicate key APP.PROJECTS_EXTREF_UK: EXTERNAL_REF='EXT-3', first at app/data/PROJECTS.sql:8
+app/data/ASSIGNMENTS.sql:13: duplicate key APP.ASSIGNMENTS_ROLE_UK: EMP_ID='1004', ROLE=NULL, first at app/data/ASSIGNMENTS.sql:12
+app/data/ASSIGNMENTS.sql:22: duplicate key APP.ASSIGNMENTS_PK: EMP_ID='1008', PROJECT_CODE='P00003', first at app/data/ASSIGNMENTS.sql:20
+app/data/ASSIGNMENTS.sql:31: missing parent for APP.ASSIGNMENTS_EMP_FK: EMP_ID='-3'
+app/data/ASSIGNMENTS.sql:40: missing parent for APP.ASSIGNMENTS_PROJECT_FK: PROJECT_CODE='NOPE4'
+app/data/TIMESHEETS.sql:31: missing parent for APP.TIMESHEETS_ASSIGNMENT_FK: EMP_ID='1005', PROJECT_CODE='P00003'
+app/data/TIMESHEETS.sql:57: NULL in NOT NULL column APP.TIMESHEETS.HOURS
+app/data/TIMESHEETS.sql:85: duplicate key APP.TIMESHEETS_PK: TS_ID='80', first at app/data/TIMESHEETS.sql:84
+app/data/AuditLog.sql:5: missing parent for APP.AUDITLOG_EMP_FK: EMP_ID='-1'

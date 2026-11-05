@@ -1,0 +1,9 @@
+---
+source: tests/it/check_cli.rs
+expression: stderr
+---
+sqlca VERSION · check · end-state mode
+Inputs     23 files, 40854 bytes: 0 schema, 21 data, 2 reference
+Schema     8 tables · 23 keys (1 disabled, 1 deferred)
+Data       215 rows
+Result     25 findings (missing parent 9, duplicate key 9, NULL in NOT NULL 4, unknown table 1, unknown column 1, value count 1) · 0 warnings · 0 errors → exit 1
