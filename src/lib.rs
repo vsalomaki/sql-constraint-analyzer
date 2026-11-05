@@ -3,6 +3,7 @@
 
 pub mod dialect;
 pub mod finding;
+pub mod input;
 pub mod source;
 pub mod statement;
 #[cfg(feature = "gen")]
