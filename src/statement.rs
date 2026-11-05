@@ -65,6 +65,22 @@ impl Default for ConstraintState {
     }
 }
 
+/// A change to an existing constraint's state; `None` leaves that switch as it was. Deferrability itself can't change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StateChange {
+    pub enabled: Option<bool>,
+    pub validated: Option<bool>,
+    pub initially_deferred: Option<bool>,
+}
+
+impl ConstraintState {
+    pub fn apply(&mut self, change: StateChange) {
+        self.enabled = change.enabled.unwrap_or(self.enabled);
+        self.validated = change.validated.unwrap_or(self.validated);
+        self.initially_deferred = change.initially_deferred.unwrap_or(self.initially_deferred);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstraintKind {
     PrimaryKey {
@@ -123,10 +139,10 @@ pub enum AlterAction {
     AddColumns(Vec<ColumnDef>),
     /// `MODIFY (col NOT NULL …)` and the like: the constraints the modified columns gain.
     ModifyColumns(Vec<(Ident, Vec<ConstraintDef>)>),
-    /// `ENABLE` / `DISABLE` / `MODIFY CONSTRAINT name …`: a constraint's new state.
+    /// `ENABLE` / `DISABLE` / `MODIFY CONSTRAINT name …`: what changes in a constraint's state.
     ChangeConstraint {
         name: Ident,
-        state: ConstraintState,
+        change: StateChange,
     },
     /// Anything else, as written: storage, renames, drops.
     Other(String),

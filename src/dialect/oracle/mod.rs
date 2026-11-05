@@ -3,6 +3,8 @@
 #[cfg(test)]
 #[cfg(feature = "gen")]
 mod check;
+mod cursor;
+pub mod ddl;
 pub mod lex;
 pub mod script;
 pub mod split;
