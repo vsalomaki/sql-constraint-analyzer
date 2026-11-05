@@ -278,13 +278,14 @@ impl<'o> Writer<'o> {
         object: &str,
         item: DdlItem,
     ) -> io::Result<()> {
-        let text = self.render.ddl(item, &self.style());
-        if text.is_empty() {
+        let sql = self.render.ddl(item, &self.style());
+        if sql.text.is_empty() {
             return Ok(());
         }
         let path = file_path(self.options.layout, schema, section, object);
+        let text = format!("{}{}", sql.text, self.eol);
         self.out
-            .write(&path, schema, Role::Ddl, &format!("{text}{}", self.eol))?;
+            .write(&path, schema, Role::Ddl, &text, sql.statements)?;
         Ok(())
     }
 
@@ -339,8 +340,8 @@ impl<'o> Writer<'o> {
             return Ok(());
         }
         let header = self.render.data_section(table, Edge::Start, self.eol);
-        if !header.is_empty() {
-            self.write_data(&header)?;
+        if !header.text.is_empty() {
+            self.write_data(&header.text, header.statements)?;
         }
         Ok(())
     }
@@ -349,24 +350,30 @@ impl<'o> Writer<'o> {
         if !self.omitted.contains(&self.table) {
             self.close_group()?;
             let footer = self.render.data_section(self.table, Edge::End, self.eol);
-            if !footer.is_empty() {
-                self.write_data(&footer)?;
+            if !footer.text.is_empty() {
+                self.write_data(&footer.text, footer.statements)?;
             }
         }
         self.loaded.push(self.table);
         Ok(())
     }
 
-    fn write_data(&mut self, text: &str) -> io::Result<Location> {
-        self.out
-            .write(&self.data_path, self.table.schema(), Role::Data, text)
+    fn write_data(&mut self, text: &str, statements: u64) -> io::Result<Location> {
+        self.out.write(
+            &self.data_path,
+            self.table.schema(),
+            Role::Data,
+            text,
+            statements,
+        )
     }
 
     fn close_group(&mut self) -> io::Result<()> {
         if self.group_left > 0 {
             self.group_left = 0;
             let text = self.render.batch(Batch::End, self.eol);
-            self.write_data(&text)?;
+            // An `INSERT ALL` is one statement, however many rows it has.
+            self.write_data(&text, 1)?;
         }
         Ok(())
     }
@@ -561,17 +568,17 @@ impl<'o> Writer<'o> {
         if groupable {
             if self.group_left == 0 {
                 self.group_left = 2 + self.style_rng.below(3);
-                self.write_data(&self.render.batch(Batch::Start, eol))?;
+                self.write_data(&self.render.batch(Batch::Start, eol), 0)?;
             }
-            let at = self.write_data(&self.render.batch(Batch::Row(&insert), eol))?;
+            let at = self.write_data(&self.render.batch(Batch::Row(&insert), eol), 0)?;
             self.group_left -= 1;
             if self.group_left == 0 {
-                self.write_data(&self.render.batch(Batch::End, eol))?;
+                self.write_data(&self.render.batch(Batch::End, eol), 1)?;
             }
             Ok(at)
         } else {
             self.close_group()?;
-            self.write_data(&self.render.insert(&insert))
+            self.write_data(&self.render.insert(&insert), 1)
         }
     }
 

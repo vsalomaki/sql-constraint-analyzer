@@ -39,8 +39,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - `src/dialect/mod.rs` holds `DialectId` and `Rules`: identifier folding and quoting, whether `''` is NULL, `CHAR`
   padding, how partially NULL unique keys compare, deferrable foreign keys. Semantics differ through `Rules`, never
   through `if oracle` in neutral code.
-- `src/dialect/<name>/` holds the syntax: for now `oracle/synth.rs` (the generator's DDL, literals, `INSERT`
-  shapes, SQL\*Plus headers, `load.sql`) behind the `synth::Render` trait. The parser lands beside it.
+- `src/dialect/<name>/` holds the syntax. For Oracle: `split.rs` (script into pieces, on bytes, by SQL\*Plus or
+  SQLcl rules: `Runner`, default SQL\*Plus), `lex.rs` (one statement into tokens), and `synth.rs` (the
+  generator's DDL, literals, `INSERT` shapes, SQL\*Plus headers, `load.sql`, and how many statements each wrote)
+  behind the `synth::Render` trait. The parser lands beside them. `src/source.rs` holds the neutral `Piece` and `Span` they produce.
 - A planted violation that exists only under some rules (`''` in a NOT NULL column, a partially NULL unique
   duplicate, a deferred FK) is planted only when the dialect's `Rules` make it one.
 - Adding a dialect means a new folder, a `DialectId` value, its `Rules` and `Render`, and its fixtures under

@@ -9,7 +9,7 @@ macro_rules! put {
 
 use super::RULES;
 use crate::dialect::Rules;
-use crate::synth::render::{Batch, DdlItem, DdlStyle, Edge, Insert};
+use crate::synth::render::{Batch, DdlItem, DdlStyle, Edge, Insert, Sql};
 use crate::synth::rng::Rng;
 use crate::synth::schema::{
     APP_SCHEMA, AUDIT_SEQ, AUDIT_TRIGGER, Constraint, DefaultValue, EMPLOYEES_EMAIL_UIX, Form,
@@ -64,25 +64,38 @@ impl synth::Render for Render {
         Vec::new()
     }
 
-    fn ddl(&self, item: DdlItem, style: &DdlStyle<'_>) -> String {
+    fn ddl(&self, item: DdlItem, style: &DdlStyle<'_>) -> Sql {
         let writer = DdlWriter::from(style);
-        match item {
-            DdlItem::CreateTable(table) => writer.create_table(table),
-            DdlItem::LateKeys(table) => writer.late_keys(table),
-            DdlItem::ForeignKeys(table) => writer.foreign_keys(table),
-            DdlItem::Sequence => writer.sequence(),
-            DdlItem::Trigger => writer.trigger(),
-        }
+        let (text, statements) = match item {
+            DdlItem::CreateTable(table) => (
+                writer.create_table(table),
+                create_table_statements(table, style.keys_in_table),
+            ),
+            DdlItem::LateKeys(table) => (writer.late_keys(table), key_statements(table, |_| true)),
+            DdlItem::ForeignKeys(table) => (
+                writer.foreign_keys(table),
+                count(constraints_of(table).filter(|c| c.is_foreign())),
+            ),
+            DdlItem::Sequence => (writer.sequence(), 1),
+            // The PL/SQL block ended by `/`, then `ALTER TRIGGER … ENABLE`.
+            DdlItem::Trigger => (writer.trigger(), 2),
+        };
+        Sql { text, statements }
     }
 
     fn literal(&self, value: &Value, rng: &mut Rng) -> String {
         self.literals.render(value, rng)
     }
 
-    fn data_section(&self, table: TableId, edge: Edge, eol: &str) -> String {
+    fn data_section(&self, table: TableId, edge: Edge, eol: &str) -> Sql {
         let name = table.qualified(&RULES);
         let noise = self.noise;
-        match edge {
+        // `REM` and `SET DEFINE OFF` are script commands; comments are no statements.
+        let statements = match edge {
+            Edge::Start => u64::from(noise.rem_header) + u64::from(noise.set_define_off),
+            Edge::End => 0,
+        };
+        let text = match edge {
             Edge::Start => [
                 noise
                     .rem_header
@@ -99,7 +112,8 @@ impl synth::Render for Render {
             .collect(),
             Edge::End if noise.comments => format!("-- end of {name}{eol}"),
             Edge::End => String::new(),
-        }
+        };
+        Sql { text, statements }
     }
 
     fn insert(&self, insert: &Insert<'_>) -> String {
@@ -139,6 +153,33 @@ impl synth::Render for Render {
                 script
             })
     }
+}
+
+fn count<T>(items: impl Iterator<Item = T>) -> u64 {
+    u64::try_from(items.count()).unwrap_or(u64::MAX)
+}
+
+/// Statements in a `CREATE TABLE` item: the table, each `MODIFY … NOT NULL` and `ADD` column, and, when keys are in
+/// the table DDL, its `ALTER TABLE … ADD CONSTRAINT` keys and unique index.
+fn create_table_statements(table: TableId, keys_in_table: bool) -> u64 {
+    let columns = table.columns();
+    let separate = count(
+        columns
+            .iter()
+            .filter(|c| c.not_null == NotNull::AfterTable || c.added_later),
+    );
+    let keys = if keys_in_table {
+        key_statements(table, |c| c.form == Form::Alter)
+    } else {
+        0
+    };
+    1 + separate + keys
+}
+
+/// `ALTER TABLE … ADD` statements for the keys `which` selects, plus the unique index.
+fn key_statements(table: TableId, which: impl Fn(&Constraint) -> bool) -> u64 {
+    let keys = count(constraints_of(table).filter(|c| !c.is_foreign() && which(c)));
+    keys + u64::from(table == EMPLOYEES_EMAIL_UIX.table)
 }
 
 /// Writes DDL the way SQL Developer exports it.

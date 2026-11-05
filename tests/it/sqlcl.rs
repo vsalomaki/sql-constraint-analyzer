@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sqlca::source::PieceKind;
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sqlcl")
 }
@@ -76,4 +78,56 @@ fn no_fixture_file_holds_an_error_spooled_by_sqlcl() {
             "{path} has an error in it"
         );
     }
+}
+
+#[test]
+fn every_fixture_file_splits_cleanly_and_data_files_into_one_statement_per_row() {
+    let order = fs::read_to_string(root().join("order.txt")).unwrap();
+    for path in order.lines().filter(|l| !l.is_empty()) {
+        let pieces = crate::split::pieces(&root().join(path));
+        assert!(
+            pieces
+                .iter()
+                .all(|p| !matches!(p.kind, PieceKind::Unterminated | PieceKind::RunAgain)),
+            "{path}: {pieces:?}"
+        );
+    }
+    for (table, rows) in counts() {
+        let (schema, name) = table.split_once('.').unwrap();
+        let path = root()
+            .join(schema.to_ascii_lowercase())
+            .join("data")
+            .join(format!("{}.sql", name.replace('"', "")));
+        let pieces = crate::split::pieces(&path);
+        let of = |kind| pieces.iter().filter(|p| p.kind == kind).count();
+        assert_eq!(
+            (of(PieceKind::Command), of(PieceKind::Sql)),
+            (2, rows),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn sqlcl_ddl_splits_into_its_statements() {
+    let shape = |path: &str| -> Vec<(PieceKind, u64)> {
+        crate::split::pieces(&root().join(path))
+            .iter()
+            .map(|p| (p.kind, p.line))
+            .collect()
+    };
+    // CREATE TABLE, the primary key, and DBMS_METADATA's `INSERT … SELECT … FROM …@ KU$`.
+    assert_eq!(
+        shape("app/tables/EMPLOYEES.sql"),
+        [
+            (PieceKind::Sql, 2),
+            (PieceKind::Sql, 20),
+            (PieceKind::Sql, 26)
+        ]
+    );
+    assert_eq!(
+        shape("app/triggers/AUDITLOG_BI.sql"),
+        [(PieceKind::Block, 2), (PieceKind::Sql, 9)]
+    );
 }
