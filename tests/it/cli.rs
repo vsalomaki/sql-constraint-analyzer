@@ -30,16 +30,6 @@ fn version_is_the_package_version() {
 }
 
 #[test]
-fn a_subcommand_not_built_yet_exits_2_with_a_message() {
-    sqlca()
-        .arg("check")
-        .assert()
-        .code(2)
-        .stdout("")
-        .stderr(contains("`sqlca check` is not implemented yet"));
-}
-
-#[test]
 fn no_subcommand_is_a_usage_error() {
     sqlca().assert().code(2).stderr(contains("Usage"));
 }

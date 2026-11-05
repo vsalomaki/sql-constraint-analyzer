@@ -314,3 +314,19 @@ fn check_and_fix_accept_the_input_options_but_are_not_built_yet() {
             .stderr(contains("is not implemented yet"));
     }
 }
+
+#[test]
+fn check_and_fix_refuse_schema_files_without_data() {
+    let dir = workspace(&[("schema.sql", b""), ("ref.sql", b"")]);
+    for command in ["check", "fix"] {
+        sqlca_in(&dir)
+            .args([command, "--schema", "schema.sql", "--reference", "ref.sql"])
+            .assert()
+            .code(2)
+            .stderr(contains("no data files to check"));
+    }
+    sqlca_in(&dir)
+        .args(["inputs", "--schema", "schema.sql"])
+        .assert()
+        .success();
+}
