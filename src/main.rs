@@ -150,7 +150,9 @@ fn run(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<Ex
             input::write_listing(&resolved.files, args.format == Format::Json, out)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Check(_) | Command::Fix(_) => {
+        Command::Check(args) | Command::Fix(args) => {
+            let resolved = input::resolve(&args.spec(), &mut io::stdin().lock())?;
+            resolved.require_data()?;
             anyhow::bail!("`sqlca {}` is not implemented yet", cli.command.name())
         }
     }

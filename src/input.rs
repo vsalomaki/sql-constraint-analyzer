@@ -47,6 +47,11 @@ pub enum InputError {
     },
     #[error("no input files: give paths or patterns, --files-from or --script")]
     Empty,
+    #[error(
+        "no data files to check: give paths or patterns, --files-from or --script \
+         (--schema and --reference files are read for their tables only)"
+    )]
+    NoData,
 }
 
 /// What a file is for. Schema files count as loaded first, then reference files, then the data.
@@ -129,6 +134,17 @@ struct Candidate {
 }
 
 /// The files of a run in processing order. `stdin` is read only for `--files-from -`.
+impl Resolved {
+    /// A run that checks rows needs data files; schema and reference files alone leave nothing to check.
+    pub fn require_data(&self) -> Result<(), InputError> {
+        if self.files.iter().any(|f| f.role == Role::Data) {
+            Ok(())
+        } else {
+            Err(InputError::NoData)
+        }
+    }
+}
+
 pub fn resolve(spec: &InputSpec, stdin: &mut dyn Read) -> Result<Resolved, InputError> {
     let mut candidates = Vec::new();
     expand_patterns(&spec.schema, Role::Schema, &mut candidates)?;
