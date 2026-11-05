@@ -1,8 +1,8 @@
 //! Oracle DDL into neutral statements: `CREATE TABLE`, `ALTER TABLE` and `CREATE INDEX`, as far as the catalog needs
 //! them. Physical attributes (storage, tablespaces, partitions, LOB clauses) are skipped by balancing parentheses.
 
-use super::cursor::Cursor;
-use super::lex::{TokenKind, is_word_byte};
+use super::cursor::{Cursor, first_word};
+use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
     AlterAction, ColumnDef, ColumnDefault, ConstraintDef, ConstraintKind, ConstraintState,
@@ -46,30 +46,6 @@ const TABLE_MODIFIERS: &[&str] = &[
     "IMMUTABLE",
     "BLOCKCHAIN",
 ];
-
-/// The statement's first word upper-cased, past blanks and comments, without lexing the rest.
-fn first_word(text: &[u8]) -> Option<String> {
-    let mut rest = text;
-    loop {
-        rest = rest.trim_ascii_start();
-        if let Some(after) = rest.strip_prefix(b"--") {
-            rest = after
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(&[][..], |n| after.get(n..).unwrap_or_default());
-        } else if let Some(after) = rest.strip_prefix(b"/*") {
-            rest = after
-                .windows(2)
-                .position(|w| w == b"*/")
-                .map_or(&[][..], |n| after.get(n + 2..).unwrap_or_default());
-        } else {
-            break;
-        }
-    }
-    let n = rest.iter().take_while(|&&b| is_word_byte(b)).count();
-    let word = rest.get(..n).filter(|w| !w.is_empty())?;
-    Some(String::from_utf8_lossy(word).to_ascii_uppercase())
-}
 
 fn create_table(c: &mut Cursor) -> Result<Statement, ParseError> {
     c.eat_words(&["IF", "NOT", "EXISTS"]);
@@ -1655,8 +1631,9 @@ mod catalog {
 mod fixtures {
     use std::path::{Path, PathBuf};
 
-    use super::{first_word, parse_ddl};
+    use super::parse_ddl;
     use crate::catalog::{Catalog, CatalogBuilder, Kind, Lookup, Origin, Parent, Table};
+    use crate::dialect::oracle::cursor::first_word;
 
     use crate::dialect::Runner;
     use crate::dialect::oracle::RULES;

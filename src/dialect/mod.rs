@@ -8,6 +8,10 @@ use std::io::{self, BufRead};
 
 use serde::{Deserialize, Serialize};
 
+use crate::source::{Encoding, Piece};
+use crate::statement::{Expr, ParseError, Statement};
+use crate::value::Literal;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum DialectId {
@@ -43,10 +47,38 @@ impl DialectId {
         self,
         reader: impl BufRead,
         runner: Runner,
-        encoding: crate::source::Encoding,
+        encoding: Encoding,
     ) -> io::Result<Vec<Include>> {
         match self {
             Self::Oracle => oracle::script::includes(reader, runner, encoding),
+        }
+    }
+
+    /// The pieces of the script in `reader`, which starts `offset` bytes into its file, split by `runner`'s rules.
+    pub fn pieces<'r>(
+        self,
+        reader: impl BufRead + 'r,
+        runner: Runner,
+        offset: u64,
+    ) -> Box<dyn Iterator<Item = io::Result<Piece>> + 'r> {
+        match self {
+            Self::Oracle => {
+                Box::new(oracle::split::Splitter::new(reader, runner).starting_at(offset))
+            }
+        }
+    }
+
+    /// What a piece of a script does, as a neutral statement.
+    pub fn parse(self, piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
+        match self {
+            Self::Oracle => oracle::parse::parse(piece, encoding),
+        }
+    }
+
+    /// The value an expression in an `INSERT` stands for.
+    pub fn evaluate(self, expr: &Expr, encoding: Encoding) -> Literal {
+        match self {
+            Self::Oracle => oracle::eval::evaluate(expr, encoding),
         }
     }
 
