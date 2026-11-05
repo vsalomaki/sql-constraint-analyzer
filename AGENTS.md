@@ -42,7 +42,12 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - `src/dialect/<name>/` holds the syntax. For Oracle: `split.rs` (script into pieces, on bytes, by SQL\*Plus or
   SQLcl rules: `Runner`, default SQL\*Plus), `lex.rs` (one statement into tokens), and `synth.rs` (the
   generator's DDL, literals, `INSERT` shapes, SQL\*Plus headers, `load.sql`, and how many statements each wrote)
-  behind the `synth::Render` trait. The parser lands beside them. `src/source.rs` holds the neutral `Piece` and `Span` they produce.
+  behind the `synth::Render` trait. `ddl.rs` parses `CREATE TABLE`, `ALTER TABLE` and `CREATE INDEX` into the
+  neutral statements of `src/statement.rs`, over the token cursor in `cursor.rs`. `src/source.rs` holds the
+  neutral `Piece` and `Span` the splitter produces.
+- `src/catalog.rs` (neutral) builds tables, ordered columns and resolved constraints from the DDL statements. It
+  applies every `CREATE TABLE` before the rest, since a version-sorted glob reads `ref_constraints/` before
+  `tables/`.
 - A planted violation that exists only under some rules (`''` in a NOT NULL column, a partially NULL unique
   duplicate, a deferred FK) is planted only when the dialect's `Rules` make it one.
 - Adding a dialect means a new folder, a `DialectId` value, its `Rules` and `Render`, and its fixtures under
