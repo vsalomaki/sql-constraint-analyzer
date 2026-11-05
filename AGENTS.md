@@ -27,6 +27,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `make fixtures` | Regenerates `tests/fixtures/gen/<dialect>/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
 | `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
+| `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
 
 Run `make lint` and `make test` before calling a change done.
 
@@ -116,6 +117,11 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - **Only synthetic data is committed:** `sqlca-gen` output or Oracle exports of synthetic data. A real export is run
   locally and never committed; what it teaches becomes a generator option and a synthetic fixture.
 - Large generated exports (GB scale) go to `gen-out/`, which is git-ignored.
+- `tests/fixtures/sqlcl/` (`make sqlcl-fixtures`, needs Docker) is a generated export loaded into Oracle Free and
+  exported again by SQLcl through `DBMS_METADATA`, in SQL Developer's separate-files layout with `order.txt` and
+  `counts.csv`. It has no violations. Its `DBMS_METADATA` DDL ends each table with an `INSERT … SELECT … FROM …@ KU$`
+  statement, as this Oracle version writes it; the analyzer skips it as an `INSERT … SELECT`. Rows that got
+  `SYSTIMESTAMP` change on every regeneration, so review the diff.
 - Prove a fix by reverting it and watching a test fail.
 
 ### Ground truth
@@ -139,6 +145,7 @@ Linux, and `test` (a default-features build, then nextest with all features) on 
 - Tool versions (`cargo-deny`, `cargo-nextest`) are pinned in the workflow. Bumping one means bumping it there and
   checking the local version.
 - Check workflow edits with `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7`.
+- `.github/workflows/oracle.yml` runs `scripts/oracle/check.sh` on a runner, started by hand only (`workflow_dispatch`).
 - The repository setting "Require approval for all external contributors" holds a fork's run for approval as a
   second layer.
 
