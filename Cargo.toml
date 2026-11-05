@@ -1,0 +1,77 @@
+[package]
+name = "sql-constraint-analyzer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Checks Oracle SQL exports for rows that violate the declared constraints, and fixes them"
+license = "Apache-2.0"
+repository = "https://github.com/vsalomaki/sql-constraint-analyzer"
+publish = false
+default-run = "sqlca"
+
+[lib]
+name = "sqlca"
+path = "src/lib.rs"
+
+# `doc = false`: the binary shares the library's name, and rustdoc would write both to the same place.
+[[bin]]
+name = "sqlca"
+path = "src/main.rs"
+doc = false
+
+[[bin]]
+name = "sqlca-gen"
+path = "src/bin/sqlca-gen.rs"
+required-features = ["gen"]
+doc = false
+
+[features]
+# The test-data generator; its dependencies stay out of the analyzer.
+gen = []
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color", "suggestions"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+unreachable = "warn"
+unimplemented = "warn"
+exit = "warn"
+indexing_slicing = "warn"
+string_slice = "warn"
+get_unwrap = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
+mem_forget = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

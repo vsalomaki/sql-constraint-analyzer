@@ -1,0 +1,14 @@
+/target/
+
+# Local planning notes; never pushed.
+/PLAN.md
+
+# fix --in-place report folders and generated exports.
+/sqlca-fix-*/
+/gen-out/
+
+# Tooling state.
+/.worktrees/
+/.claude/worktrees/
+/.claude/settings.local.json
+junit.xml

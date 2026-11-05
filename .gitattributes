@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Fixtures are byte-exact exports: no line-ending conversion.
+tests/fixtures/** -text
