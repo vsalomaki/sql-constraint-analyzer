@@ -24,6 +24,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `bacon` | clippy on save; `t` for tests |
 | `cargo run -- <args>` | Runs `sqlca` |
 | `cargo run -F gen --bin sqlca-gen -- <args>` | Runs the generator; it builds only with the `gen` feature |
+| `make fixtures` | Regenerates `tests/fixtures/gen/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
 
 Run `make lint` and `make test` before calling a change done.
 
@@ -112,3 +113,43 @@ Linux, and `test` (a default-features build, then nextest with all features) on 
 - Tool versions (`cargo-deny`, `cargo-nextest`) are pinned in the workflow. Bumping one means bumping it there and
   checking the local version.
 - Check workflow edits with `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7`.
+- The repository setting "Require approval for all external contributors" holds a fork's run for approval as a
+  second layer.
+
+## Git workflow
+
+- **Never push to `main`.** Every change goes through a branch and a pull request. The `main` ruleset enforces it:
+  no direct or force pushes, linear history, review threads resolved, and the required checks (`lint`,
+  `test (ubuntu-24.04)`, `test (windows-2025)`, `test (macos-15)`) green on a branch that is up to date with `main`.
+  No approval is needed. The ruleset is live GitHub state; check it with
+  `gh api repos/vsalomaki/sql-constraint-analyzer/rulesets` when GitHub behaves differently from this. Renaming a CI
+  job means updating the ruleset's required checks in the same change.
+- **Branches:** `<type>/<issue>-<slug>` with an issue, `<type>/<slug>` without (`feat/test-data-generator`). Types:
+  `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `ci`.
+- **Commits:** Conventional Commits, `<type>(#<issue>): <description>` with an issue, `<type>(<area>): <description>`
+  without.
+- **Rebase, never merge:** rebase on `origin/main`. Review fixes amend the commit they belong to and force-push the
+  branch, rather than adding fixup commits.
+- **Merging:** rebase only (`gh pr merge <n> --rebase`); squash and merge commits are off, and GitHub deletes the
+  branch. Rebase-merge replays every commit, so squash locally first unless each commit is meant to land.
+- **PR body:** `## Summary` (what and why) and `## Test plan` (what was run, what a reviewer can rerun).
+- **After a merge:** remove the PR's worktree and delete its local branch with `git branch -D` (rebase-merge rewrites
+  the commits, so `-d` refuses).
+
+## External review
+
+Non-trivial PRs get a Codex review before merging:
+
+```sh
+CX=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | sort -V | tail -1)
+node "$CX" adversarial-review --background --base main --scope branch "<focus text>"
+node "$CX" status --all      # match the job id you launched
+node "$CX" result <job-id>
+```
+
+- Run the launch command in the background; it can block past a tool timeout. A job takes a few minutes. One that
+  answers within seconds with a generic reply did no work: relaunch it.
+- A finding is a claim: verify it against the code, and reject it with reasoning when it doesn't hold. Weigh the
+  complexity a fix adds (see "Engineering principles"); prove a fix by reverting it and watching a test fail.
+- When several reviewers run, wait for all of them, then make one round of changes. Say in the PR what the review
+  found and what changed.
