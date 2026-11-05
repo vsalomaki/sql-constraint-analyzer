@@ -1,6 +1,7 @@
 {
   "generator": "sqlca-gen 0.1.0",
   "options": {
+    "dialect": "oracle",
     "seed": 1,
     "rows": 20,
     "layout": "single",

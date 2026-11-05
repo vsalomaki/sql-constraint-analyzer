@@ -374,13 +374,17 @@ fn output_into_a_non_empty_folder_is_refused() {
     ));
 }
 
-/// The committed fixtures are what the generator writes today; `make fixtures` refreshes them on purpose.
+/// The committed fixtures (`tests/fixtures/gen/<dialect>/<variant>`) are what the generator writes today; `make
+/// fixtures` refreshes them on purpose.
 #[test]
 fn committed_fixtures_regenerate_byte_for_byte() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gen");
     let mut checked = 0;
-    for entry in fs::read_dir(&fixtures).unwrap() {
-        let committed = entry.unwrap().path();
+    let variants = fs::read_dir(&fixtures)
+        .unwrap()
+        .flat_map(|dialect| fs::read_dir(dialect.unwrap().path()).unwrap())
+        .map(|variant| variant.unwrap().path());
+    for committed in variants {
         let manifest: Manifest =
             serde_json::from_slice(&fs::read(committed.join(synth::MANIFEST_FILE)).unwrap())
                 .unwrap();

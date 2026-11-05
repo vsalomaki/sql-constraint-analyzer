@@ -1,7 +1,5 @@
 //! A constraint violation in an export: what the analyzer reports, and what the generator's manifest expects.
 
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -31,10 +29,10 @@ pub struct Location {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Finding {
     pub kind: FindingKind,
-    /// `SCHEMA.NAME` of the constraint or unique index; absent for structure errors and unnamed NOT NULLs.
+    /// `SCHEMA.NAME` of the constraint or unique index, as the dialect displays it; absent for structure errors and unnamed NOT NULLs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraint: Option<String>,
-    /// `SCHEMA.TABLE` of the row.
+    /// `SCHEMA.TABLE` of the row, as the dialect displays it.
     pub table: String,
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,34 +51,9 @@ pub struct Finding {
     pub count: Option<u64>,
 }
 
-/// An identifier as Oracle stores it, quoted when it isn't a plain upper-case name.
-pub fn display_ident(name: &str) -> Cow<'_, str> {
-    let mut chars = name.chars();
-    let plain = chars.next().is_some_and(|c| c.is_ascii_uppercase())
-        && chars
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '$' | '#'));
-    if plain {
-        Cow::Borrowed(name)
-    } else {
-        Cow::Owned(format!("\"{}\"", name.replace('"', "\"\"")))
-    }
-}
-
-pub fn qualified_name(schema: &str, name: &str) -> String {
-    format!("{}.{}", display_ident(schema), display_ident(name))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plain_names_stay_unquoted_and_others_are_quoted() {
-        assert_eq!(qualified_name("APP", "EMPLOYEES"), "APP.EMPLOYEES");
-        assert_eq!(qualified_name("APP", "AuditLog"), "APP.\"AuditLog\"");
-        assert_eq!(display_ident("1ABC"), "\"1ABC\"");
-        assert_eq!(display_ident("A\"B"), "\"A\"\"B\"");
-    }
 
     #[test]
     fn optional_fields_are_left_out_of_json() {
