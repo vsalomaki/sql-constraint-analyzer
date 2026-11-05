@@ -2,7 +2,7 @@
 //! given type family under the dialect's rules. Keys are compared by these canonical forms.
 
 use crate::dialect::Rules;
-use crate::statement::TypeFamily;
+use crate::statement::{DataType, Decimal, TypeFamily};
 
 /// A value after the dialect evaluated it. Text is decoded by then.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,15 +37,15 @@ pub enum Canonical {
 /// fraction digits. A value the column couldn't hold, such as text that isn't a number in a number column, is
 /// unknown: the database would have refused the row, which is not a key question. Text in a date column is read as
 /// ISO, an assumption [`assumption`] reports.
-pub fn canonical(literal: &Literal, family: TypeFamily, rules: &Rules) -> Canonical {
+pub fn canonical(literal: &Literal, column: &DataType, rules: &Rules) -> Canonical {
     let value = match literal {
         Literal::Null => return Canonical::Null,
         Literal::Unknown(_) => return Canonical::Unknown,
         Literal::Text(text) if text.is_empty() && rules.empty_string_is_null => {
             return Canonical::Null;
         }
-        _ => match family {
-            TypeFamily::Number => number_value(literal),
+        _ => match column.family {
+            TypeFamily::Number => number_value(literal).and_then(|n| stored(&n, column.decimal)),
             // Blank-padded comparison: `'FI'` and `'FI '` are equal, and `' '` is a value, not NULL.
             TypeFamily::FixedText if rules.char_ignores_trailing_spaces => {
                 text_value(literal).map(|text| text.trim_end_matches(' ').to_owned())
@@ -77,6 +77,79 @@ pub fn assumption(literal: &Literal, family: TypeFamily) -> Option<Assumption> {
         Literal::Text(_) if instant(literal, timestamp).is_some() => Some(Assumption::DateFormat),
         _ => None,
     }
+}
+
+/// A canonical number as a decimal column stores it: rounded half away from zero to its scale; `None` when it has
+/// more digits than the precision allows, which the database refuses.
+fn stored(number: &str, decimal: Option<Decimal>) -> Option<String> {
+    let Some(Decimal { precision, scale }) = decimal else {
+        return Some(number.to_owned());
+    };
+    let rounded = round(number, scale)?;
+    let unsigned = rounded.strip_prefix('-').unwrap_or(&rounded);
+    let (int, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    // The position of the first significant digit: 3 for 123, 0 for 0.5, -2 for 0.004.
+    let magnitude = if int == "0" {
+        -i64::try_from(fraction.bytes().take_while(|&b| b == b'0').count()).ok()?
+    } else {
+        i64::try_from(int.len()).ok()?
+    };
+    let fits = rounded == "0"
+        || precision.is_none_or(|precision| magnitude <= i64::from(precision) - i64::from(scale));
+    fits.then_some(rounded)
+}
+
+/// A canonical number rounded half away from zero to `scale` digits after the point (before it when negative).
+fn round(number: &str, scale: i16) -> Option<String> {
+    let (negative, unsigned) = match number.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, number),
+    };
+    let (int, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let mut digits: Vec<u8> = int
+        .bytes()
+        .chain(fraction.bytes())
+        .map(|b| b - b'0')
+        .collect();
+    let mut point = i64::try_from(int.len()).ok()?;
+    let keep = point + i64::from(scale);
+    let Ok(keep_digits) = usize::try_from(keep) else {
+        return Some("0".to_owned());
+    };
+    if keep_digits >= digits.len() {
+        return Some(number.to_owned());
+    }
+    let up = digits.get(keep_digits).is_some_and(|&d| d >= 5);
+    digits.truncate(keep_digits);
+    if up {
+        let mut carry = true;
+        for digit in digits.iter_mut().rev() {
+            if *digit == 9 {
+                *digit = 0;
+            } else {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+        }
+        if carry {
+            digits.insert(0, 1);
+            point += 1;
+        }
+    }
+    let point = usize::try_from(point).ok()?;
+    let text: String = digits.iter().map(|d| char::from(b'0' + d)).collect();
+    let (whole, part) = if text.len() >= point {
+        let (whole, part) = text.split_at_checked(point)?;
+        (whole.to_owned(), part.to_owned())
+    } else {
+        (
+            format!("{text}{}", "0".repeat(point - text.len())),
+            String::new(),
+        )
+    };
+    let sign = if negative { "-" } else { "" };
+    normalize_number(&format!("{sign}{whole}.{part}"))
 }
 
 fn number_value(literal: &Literal) -> Option<String> {
@@ -343,17 +416,21 @@ mod tests {
             Literal::Text("100.0".into()),
         ] {
             assert_eq!(
-                canonical(&literal, TypeFamily::Number, rules),
+                canonical(&literal, &DataType::of(TypeFamily::Number), rules),
                 value("100"),
                 "{literal:?}"
             );
         }
         assert_eq!(
-            canonical(&Literal::Text("abc".into()), TypeFamily::Number, rules),
+            canonical(
+                &Literal::Text("abc".into()),
+                &DataType::of(TypeFamily::Number),
+                rules
+            ),
             Canonical::Unknown
         );
         assert_eq!(
-            canonical(&Literal::Date(0), TypeFamily::Number, rules),
+            canonical(&Literal::Date(0), &DataType::of(TypeFamily::Number), rules),
             Canonical::Unknown
         );
     }
@@ -368,16 +445,22 @@ mod tests {
             TypeFamily::Number,
             TypeFamily::Date,
         ] {
-            assert_eq!(canonical(&empty, family, rules), Canonical::Null);
+            assert_eq!(
+                canonical(&empty, &DataType::of(family), rules),
+                Canonical::Null
+            );
         }
         let strict = Rules {
             empty_string_is_null: false,
             char_ignores_trailing_spaces: false,
             ..*rules
         };
-        assert_eq!(canonical(&empty, TypeFamily::Text, &strict), value(""));
         assert_eq!(
-            canonical(&Literal::Null, TypeFamily::Text, &strict),
+            canonical(&empty, &DataType::of(TypeFamily::Text), &strict),
+            value("")
+        );
+        assert_eq!(
+            canonical(&Literal::Null, &DataType::of(TypeFamily::Text), &strict),
             Canonical::Null
         );
     }
@@ -387,13 +470,20 @@ mod tests {
         let rules = oracle();
         let padded = Literal::Text("FI ".into());
         assert_eq!(
-            canonical(&padded, TypeFamily::FixedText, rules),
+            canonical(&padded, &DataType::of(TypeFamily::FixedText), rules),
             value("FI")
         );
-        assert_eq!(canonical(&padded, TypeFamily::Text, rules), value("FI "));
+        assert_eq!(
+            canonical(&padded, &DataType::of(TypeFamily::Text), rules),
+            value("FI ")
+        );
         // A blank is a value, not NULL: only the empty string is.
         assert_eq!(
-            canonical(&Literal::Text("  ".into()), TypeFamily::FixedText, rules),
+            canonical(
+                &Literal::Text("  ".into()),
+                &DataType::of(TypeFamily::FixedText),
+                rules
+            ),
             value("")
         );
         let strict = Rules {
@@ -401,7 +491,7 @@ mod tests {
             ..*rules
         };
         assert_eq!(
-            canonical(&padded, TypeFamily::FixedText, &strict),
+            canonical(&padded, &DataType::of(TypeFamily::FixedText), &strict),
             value("FI ")
         );
     }
@@ -409,7 +499,13 @@ mod tests {
     #[test]
     fn numbers_in_text_columns_read_as_converted_text() {
         let rules = oracle();
-        let text = |n: &str| canonical(&Literal::Number(n.into()), TypeFamily::Text, rules);
+        let text = |n: &str| {
+            canonical(
+                &Literal::Number(n.into()),
+                &DataType::of(TypeFamily::Text),
+                rules,
+            )
+        };
         assert_eq!(text("100"), value("100"));
         assert_eq!(text("1.0E2"), value("100"));
         assert_eq!(text("0.5"), value(".5"));
@@ -431,31 +527,31 @@ mod tests {
             nanos: 916_140_000,
         };
         assert_eq!(
-            canonical(&date, TypeFamily::Date, rules),
+            canonical(&date, &DataType::of(TypeFamily::Date), rules),
             value("2003-06-17 00:00:00")
         );
         assert_eq!(
-            canonical(&date, TypeFamily::Timestamp, rules),
+            canonical(&date, &DataType::of(TypeFamily::Timestamp), rules),
             value("2003-06-17 00:00:00.000000000")
         );
         assert_eq!(
-            canonical(&noon, TypeFamily::Date, rules),
+            canonical(&noon, &DataType::of(TypeFamily::Date), rules),
             value("2003-06-17 12:00:05")
         );
         assert_eq!(
-            canonical(&fraction, TypeFamily::Timestamp, rules),
+            canonical(&fraction, &DataType::of(TypeFamily::Timestamp), rules),
             value("2003-06-17 00:00:00.916140000")
         );
         assert_eq!(
-            canonical(&fraction, TypeFamily::Date, rules),
+            canonical(&fraction, &DataType::of(TypeFamily::Date), rules),
             Canonical::Unknown
         );
         assert_eq!(
-            canonical(&Literal::Date(-1), TypeFamily::Date, rules),
+            canonical(&Literal::Date(-1), &DataType::of(TypeFamily::Date), rules),
             value("1969-12-31 00:00:00")
         );
         assert_eq!(
-            canonical(&date, TypeFamily::Text, rules),
+            canonical(&date, &DataType::of(TypeFamily::Text), rules),
             Canonical::Unknown
         );
     }
@@ -463,8 +559,20 @@ mod tests {
     #[test]
     fn text_in_a_date_column_is_known_only_in_iso_form() {
         let rules = oracle();
-        let date = |t: &str| canonical(&Literal::Text(t.into()), TypeFamily::Date, rules);
-        let timestamp = |t: &str| canonical(&Literal::Text(t.into()), TypeFamily::Timestamp, rules);
+        let date = |t: &str| {
+            canonical(
+                &Literal::Text(t.into()),
+                &DataType::of(TypeFamily::Date),
+                rules,
+            )
+        };
+        let timestamp = |t: &str| {
+            canonical(
+                &Literal::Text(t.into()),
+                &DataType::of(TypeFamily::Timestamp),
+                rules,
+            )
+        };
         assert_eq!(date("2024-02-29"), value("2024-02-29 00:00:00"));
         assert_eq!(date("2024-02-29 23:59:59"), value("2024-02-29 23:59:59"));
         assert_eq!(
@@ -517,7 +625,7 @@ mod tests {
         );
         let other = Literal::Text("31-JAN-24".into());
         assert_eq!(
-            canonical(&other, TypeFamily::Date, oracle()),
+            canonical(&other, &DataType::of(TypeFamily::Date), oracle()),
             Canonical::Unknown
         );
         assert_eq!(assumption(&other, TypeFamily::Date), None);
@@ -530,15 +638,23 @@ mod tests {
     fn unknown_and_untyped_columns_are_unknown() {
         let rules = oracle();
         assert_eq!(
-            canonical(&Literal::Unknown("x".into()), TypeFamily::Text, rules),
+            canonical(
+                &Literal::Unknown("x".into()),
+                &DataType::of(TypeFamily::Text),
+                rules
+            ),
             Canonical::Unknown
         );
         assert_eq!(
-            canonical(&Literal::Text("ab".into()), TypeFamily::Binary, rules),
+            canonical(
+                &Literal::Text("ab".into()),
+                &DataType::of(TypeFamily::Binary),
+                rules
+            ),
             Canonical::Unknown
         );
         assert_eq!(
-            canonical(&Literal::Null, TypeFamily::Other, rules),
+            canonical(&Literal::Null, &DataType::of(TypeFamily::Other), rules),
             Canonical::Null
         );
     }
@@ -556,5 +672,59 @@ mod tests {
         assert_eq!(days_from_date(2001, 0, 1), None);
         assert_eq!(fraction_nanos("5"), Some(500_000_000));
         assert_eq!(fraction_nanos("000000001"), Some(1));
+    }
+
+    #[test]
+    fn decimal_columns_round_half_away_from_zero_and_refuse_too_many_digits() {
+        let stored = |number: &str, precision: Option<u8>, scale: i16| {
+            let column = DataType {
+                decimal: Some(Decimal { precision, scale }),
+                ..DataType::of(TypeFamily::Number)
+            };
+            canonical(&Literal::Number(number.into()), &column, oracle())
+        };
+        let cases: [(&str, u8, i16, Option<&str>); 16] = [
+            ("1.1", 5, 0, Some("1")),
+            ("1.5", 5, 0, Some("2")),
+            ("-1.5", 5, 0, Some("-2")),
+            ("2.45", 5, 1, Some("2.5")),
+            ("0.4", 5, 0, Some("0")),
+            ("-0.4", 5, 0, Some("0")),
+            ("9.99", 5, 1, Some("10")),
+            ("12345", 5, 0, Some("12345")),
+            ("123456", 5, 0, None),
+            ("99999.5", 5, 0, None),
+            ("1250", 2, -2, Some("1300")),
+            ("1249", 2, -2, Some("1200")),
+            ("0.00099", 2, 5, Some("0.00099")),
+            ("0.001", 2, 5, None),
+            ("0.000004", 2, 5, Some("0")),
+            ("1E2", 3, 0, Some("100")),
+        ];
+        for (number, precision, scale, expected) in cases {
+            let expected = expected.map_or(Canonical::Unknown, |v| Canonical::Value(v.into()));
+            assert_eq!(
+                stored(number, Some(precision), scale),
+                expected,
+                "{number} as NUMBER({precision},{scale})"
+            );
+        }
+        // NUMBER(*,0), INTEGER and DECIMAL round to their scale but have no precision of their own.
+        assert_eq!(stored("1E38", Some(38), 0), Canonical::Unknown);
+        assert_eq!(
+            stored("1E38", None, 0),
+            Canonical::Value(format!("1{}", "0".repeat(38)))
+        );
+        assert_eq!(stored("1.5", None, 0), Canonical::Value("2".into()));
+        let any = canonical(
+            &Literal::Number("1.1".into()),
+            &DataType::of(TypeFamily::Number),
+            oracle(),
+        );
+        assert_eq!(
+            any,
+            Canonical::Value("1.1".into()),
+            "NUMBER without a precision keeps every digit"
+        );
     }
 }

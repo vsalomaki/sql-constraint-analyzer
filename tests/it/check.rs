@@ -375,3 +375,37 @@ fn a_parent_found_later_is_no_load_order_finding_when_an_earlier_parent_key_was_
     );
     assert_eq!(findings, []);
 }
+
+#[test]
+fn keys_compare_as_a_decimal_column_stores_them() {
+    let (_, findings) = check_sql(
+        "CREATE TABLE T (ID NUMBER(5,0) PRIMARY KEY);\nINSERT INTO T VALUES (1.1);\nINSERT INTO T VALUES (1.2);\n",
+        false,
+    );
+    assert_eq!(findings, [(FindingKind::DuplicateKey, 3, false)]);
+    // The child column stores 1.4 as 1 in NUMBER(5,0), which matches; NUMBER(5,1) keeps 1.4, which doesn't.
+    let (_, findings) = check_sql(
+        "CREATE TABLE P (ID NUMBER(5,0) PRIMARY KEY);\nCREATE TABLE A (P_ID NUMBER(5,0) REFERENCES P);\n\
+         CREATE TABLE B (P_ID NUMBER(5,1) REFERENCES P);\nINSERT INTO P VALUES (1);\n\
+         INSERT INTO A VALUES (1.4);\nINSERT INTO B VALUES (1.4);\n",
+        false,
+    );
+    assert_eq!(findings, [(FindingKind::FkMissingParent, 6, false)]);
+}
+
+#[test]
+fn a_wildcard_or_integer_number_has_no_precision_limit() {
+    for column in ["NUMBER(*,0)", "INTEGER"] {
+        let (_, findings) = check_sql(
+            &format!(
+                "CREATE TABLE T (ID {column} PRIMARY KEY);\nINSERT INTO T VALUES (1E38);\nINSERT INTO T VALUES (1E38);\n"
+            ),
+            false,
+        );
+        assert_eq!(
+            findings,
+            [(FindingKind::DuplicateKey, 3, false)],
+            "{column}"
+        );
+    }
+}

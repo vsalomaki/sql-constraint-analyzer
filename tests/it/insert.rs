@@ -9,7 +9,7 @@ use serde::Deserialize;
 use sqlca::dialect::oracle::{RULES, eval, insert};
 use sqlca::finding::{Finding, FindingKind};
 use sqlca::source::Encoding;
-use sqlca::statement::{InsertRow, Skip, Statement, TypeFamily};
+use sqlca::statement::{DataType, InsertRow, Skip, Statement, TypeFamily};
 use sqlca::value::{self, Canonical};
 
 /// The parts of a generator manifest (`expected.json`) these tests read.
@@ -171,7 +171,7 @@ fn key(row: &InsertRow, names: &[String], encoding: Encoding) -> Option<Vec<Opti
             }?;
             let (_, family) = table.iter().find(|(c, _)| c == name)?;
             let literal = eval::evaluate(&row.values.get(index)?.expr, encoding);
-            match value::canonical(&literal, *family, &RULES) {
+            match value::canonical(&literal, &DataType::of(*family), &RULES) {
                 Canonical::Null => Some(None),
                 Canonical::Value(v) => Some(Some(v)),
                 Canonical::Unknown => None,
