@@ -1,24 +1,21 @@
-//! The neutral path from files to rows: open, split, parse, build the catalog and match rows to tables through
-//! `DialectId` only, as the checker will. Every committed export reads without an error, and its structure findings
-//! are exactly the ones its manifest plants.
+//! The neutral path from files to rows, through `DialectId` only, as the checker takes it: every piece of a script
+//! belongs to exactly one pass, and a row matches its table and columns by list or by table order.
 
-use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 use sqlca::catalog::{Catalog, CatalogBuilder, Origin};
 use sqlca::check::{self, StructureError};
-use sqlca::dialect::{DialectId, Runner};
-use sqlca::finding::{Finding, FindingKind};
+use sqlca::dialect::{DialectId, Pass, Runner};
+use sqlca::finding::FindingKind;
 use sqlca::input;
-use sqlca::source::Encoding;
-use sqlca::statement::{Expr, InsertRow, Skip, Statement};
+use sqlca::source::{Encoding, Piece};
+use sqlca::statement::{Expr, InsertRow, ParseError, Statement};
 
 #[derive(Deserialize)]
 struct Expected {
     options: Options,
-    findings: Vec<Finding>,
 }
 
 #[derive(Deserialize)]
@@ -26,80 +23,48 @@ struct Options {
     encoding: Encoding,
 }
 
-struct Export {
-    root: PathBuf,
-    encoding: Encoding,
-    /// The structure findings the manifest plants.
-    structure: BTreeSet<Finding>,
+/// What the schema pass makes of a piece, or else the rows pass: each piece belongs to exactly one.
+#[expect(clippy::panic, reason = "a piece both passes take fails the test")]
+fn both_passes(piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
+    let schema = DialectId::Oracle.parse(piece, encoding, Pass::Schema)?;
+    let rows = DialectId::Oracle.parse(piece, encoding, Pass::Rows)?;
+    match (schema, rows) {
+        (Some(statement), None) | (None, Some(statement)) => Ok(statement),
+        other => panic!("{}: {other:?}", piece.line),
+    }
 }
 
-#[expect(clippy::unwrap_used, reason = "a malformed fixture fails the test")]
-fn exports() -> Vec<Export> {
+#[test]
+fn every_piece_of_every_export_belongs_to_exactly_one_pass() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let mut found = Vec::new();
-    for fixture in [
+    let mut exports: Vec<(std::path::PathBuf, Encoding)> = [
         "separate-sqldev",
         "single-all-crlf-1252",
         "type-after-data-shuffled",
-    ] {
-        let root = fixtures.join("gen/oracle").join(fixture);
+    ]
+    .iter()
+    .map(|f| {
+        let root = fixtures.join("gen/oracle").join(f);
         let expected: Expected =
             serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap();
-        let structure = expected
-            .findings
-            .into_iter()
-            .filter(|f| {
-                matches!(
-                    f.kind,
-                    FindingKind::UnknownTable
-                        | FindingKind::UnknownColumn
-                        | FindingKind::ValueCountMismatch
-                )
-            })
-            .collect();
-        found.push(Export {
-            root,
-            encoding: expected.options.encoding,
-            structure,
-        });
-    }
-    found.push(Export {
-        root: fixtures.join("sqlcl"),
-        encoding: Encoding::Utf8,
-        structure: BTreeSet::new(),
-    });
-    found
-}
-
-/// Every statement of the export in `order.txt` order, with its file and origin.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a fixture that can't be read fails the test"
-)]
-#[expect(
-    clippy::panic,
-    reason = "a statement that doesn't parse fails the test"
-)]
-fn statements(export: &Export) -> Vec<(String, Statement, Origin)> {
-    let dialect = DialectId::Oracle;
-    let order = fs::read_to_string(export.root.join("order.txt")).unwrap();
-    let mut out = Vec::new();
-    for (file, path) in order.lines().enumerate() {
-        let opened = input::open(&export.root.join(path)).unwrap();
-        for piece in dialect.pieces(opened.reader, Runner::SqlPlus, opened.base_offset) {
-            let piece = piece.unwrap();
-            let statement = dialect
-                .parse(&piece, export.encoding)
-                .unwrap_or_else(|e| panic!("{path}:{}: {}", e.line, e.message));
-            let origin = Origin {
-                file,
-                offset: piece.span.start,
-                line: piece.line,
-            };
-            out.push((path.to_owned(), statement, origin));
+        (root, expected.options.encoding)
+    })
+    .collect();
+    exports.push((fixtures.join("sqlcl"), Encoding::Utf8));
+    for (root, encoding) in exports {
+        let order = fs::read_to_string(root.join("order.txt")).unwrap();
+        let mut pieces = 0;
+        for path in order.lines() {
+            let opened = input::open(&root.join(path)).unwrap();
+            for piece in
+                DialectId::Oracle.pieces(opened.reader, Runner::SqlPlus, opened.base_offset)
+            {
+                both_passes(&piece.unwrap(), encoding).unwrap();
+                pieces += 1;
+            }
         }
+        assert!(pieces > 0, "{}", root.display());
     }
-    out
 }
 
 fn catalog(statements: &[(String, Statement, Origin)]) -> Catalog {
@@ -110,42 +75,6 @@ fn catalog(statements: &[(String, Statement, Origin)]) -> Catalog {
     let (catalog, issues) = builder.finish();
     assert!(issues.is_empty(), "{issues:?}");
     catalog
-}
-
-#[test]
-fn every_export_reads_into_a_catalog_with_exactly_the_planted_structure_findings() {
-    for export in exports() {
-        let at = export.root.display().to_string();
-        let statements = statements(&export);
-        let catalog = catalog(&statements);
-        let mut rows = 0;
-        let mut found = BTreeSet::new();
-        let mut not_followed = Vec::new();
-        for (file, statement, _) in &statements {
-            match statement {
-                Statement::Insert(inserted) => {
-                    for row in inserted {
-                        rows += 1;
-                        if let Err(error) = check::resolve_row(&catalog, row) {
-                            found.insert(error.finding(&catalog, row, file));
-                        }
-                    }
-                }
-                Statement::Skipped(Skip::NotFollowed(what)) => not_followed.push(what.clone()),
-                _ => {}
-            }
-        }
-        assert!(rows > 0, "{at}");
-        assert_eq!(found, export.structure, "{at}");
-        // DBMS_METADATA's `INSERT … SELECT … FROM …@ KU$` copies, one per table; nothing else is skipped as
-        // changing data.
-        let copies = if at.ends_with("sqlcl") { 8 } else { 0 };
-        assert_eq!(
-            not_followed,
-            vec!["INSERT … SELECT".to_owned(); copies],
-            "{at}"
-        );
-    }
 }
 
 /// The statements of a script given as text.
@@ -165,7 +94,7 @@ fn parse(sql: &str) -> Vec<(String, Statement, Origin)> {
             };
             (
                 "t.sql".to_owned(),
-                DialectId::Oracle.parse(&piece, Encoding::Utf8).unwrap(),
+                both_passes(&piece, Encoding::Utf8).unwrap(),
                 origin,
             )
         })

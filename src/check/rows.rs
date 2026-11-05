@@ -1,0 +1,609 @@
+//! The checks a matched row goes through: NOT NULL, primary and unique keys, then foreign keys, and what is left to
+//! resolve once every row is in. Keys are compared by a 128-bit hash of their canonical values.
+
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+use xxhash_rust::xxh3::Xxh3;
+
+use super::Warning;
+use super::structure::Row;
+use crate::catalog::{Catalog, Column, Constraint, Kind, Origin, Parent, Table, TableId};
+use crate::dialect::{DialectId, Rules, UniqueNulls};
+use crate::finding::{Finding, FindingKind, Location};
+use crate::source::Encoding;
+use crate::statement::{ColumnDefault, Expr, InsertRow};
+use crate::value::{self, Canonical, Literal};
+
+/// Where a row is: its file's position in the run, its offset there, and its line.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct At {
+    pub file: usize,
+    pub offset: u64,
+    pub line: u64,
+}
+
+impl At {
+    /// Whether the row comes after `origin` in the order the files are run.
+    fn after(self, origin: Origin) -> bool {
+        (self.file, self.offset) > (origin.file, origin.offset)
+    }
+}
+
+/// A foreign key value with no parent row yet.
+struct Pending {
+    table: TableId,
+    constraint: usize,
+    parent: (TableId, usize),
+    hash: u128,
+    at: At,
+    key: Vec<Option<String>>,
+    /// A parent found later is a load-order finding: `--load-order`, an immediate foreign key, declared before the row.
+    load_order: bool,
+    assumed: bool,
+}
+
+/// Why a key map may not say exactly which keys exist.
+#[derive(Debug, Clone, Copy, Default)]
+struct Doubt {
+    /// Some rows' keys couldn't be known, so a key missing from the map may still exist.
+    unknown: bool,
+    /// Some keys rest on an assumption, so whether a key matches does too.
+    assumed: bool,
+}
+
+/// Rows of one constraint the checker couldn't decide, and a reason for one of them.
+#[derive(Default)]
+struct Undecided {
+    count: u64,
+    reason: String,
+}
+
+pub(super) struct Checker<'a> {
+    catalog: &'a Catalog,
+    dialect: DialectId,
+    rules: &'static Rules,
+    load_order: bool,
+    /// File names by position, as findings show them.
+    files: &'a [String],
+    /// Each key's first row, and whether its value rests on an assumption.
+    keys: HashMap<(TableId, usize), HashMap<u128, (At, bool)>>,
+    /// What makes a key map less than certain, by key; lookups against it inherit the doubt.
+    doubt: HashMap<(TableId, usize), Doubt>,
+    rows: HashMap<TableId, u64>,
+    pending: Vec<Pending>,
+    findings: Vec<Finding>,
+    unverifiable: HashMap<(TableId, usize), Undecided>,
+    no_parent: HashMap<(TableId, usize), u64>,
+    dates: HashMap<(TableId, usize), u64>,
+}
+
+impl<'a> Checker<'a> {
+    pub(super) fn new(
+        catalog: &'a Catalog,
+        dialect: DialectId,
+        load_order: bool,
+        files: &'a [String],
+    ) -> Self {
+        Self {
+            catalog,
+            dialect,
+            rules: dialect.rules(),
+            load_order,
+            files,
+            keys: HashMap::new(),
+            doubt: HashMap::new(),
+            rows: HashMap::new(),
+            pending: Vec::new(),
+            findings: Vec::new(),
+            unverifiable: HashMap::new(),
+            no_parent: HashMap::new(),
+            dates: HashMap::new(),
+        }
+    }
+
+    fn file(&self, index: usize) -> String {
+        self.files.get(index).cloned().unwrap_or_default()
+    }
+
+    fn constraint_name(&self, table: &Table, constraint: &Constraint) -> Option<String> {
+        let name = constraint.name.as_deref()?;
+        Some(match &table.name.schema {
+            Some(schema) => self.rules.qualified(schema, name),
+            None => self.rules.display_ident(name).into_owned(),
+        })
+    }
+
+    fn finding(
+        &self,
+        kind: FindingKind,
+        table: &Table,
+        constraint: &Constraint,
+        columns: &[usize],
+    ) -> Finding {
+        Finding {
+            kind,
+            constraint: self.constraint_name(table, constraint),
+            table: self.catalog.display(&table.name),
+            columns: columns
+                .iter()
+                .filter_map(|&c| table.columns.get(c))
+                .map(|c| c.name.clone())
+                .collect(),
+            file: None,
+            line: None,
+            key: Vec::new(),
+            first: None,
+            count: None,
+            assumed: false,
+        }
+    }
+
+    /// A structure finding, or nothing for a reference row.
+    pub(super) fn structure(&mut self, finding: Finding, reference: bool) {
+        if !reference {
+            self.findings.push(finding);
+        }
+    }
+
+    /// Checks one statement's matched rows. All its keys go in before any of its foreign keys are looked up, since
+    /// the database checks immediate constraints once the whole statement has run. A reference row only fills the
+    /// key maps, so other rows can find their parents.
+    pub(super) fn statement(
+        &mut self,
+        rows: &[(Row, &InsertRow, At)],
+        encoding: Encoding,
+        reference: bool,
+    ) {
+        let literals: Vec<Vec<Literal>> = rows
+            .iter()
+            .map(|(matched, row, at)| self.own_checks(matched, row, *at, encoding, reference))
+            .collect();
+        if reference {
+            return;
+        }
+        let catalog = self.catalog;
+        for ((matched, row, at), literals) in rows.iter().zip(&literals) {
+            if let Some(table) = catalog.table(matched.table) {
+                self.foreign_keys(matched.table, table, literals, row, *at);
+            }
+        }
+    }
+
+    /// A row's NOT NULL and key checks; returns its columns' values for the foreign key checks.
+    fn own_checks(
+        &mut self,
+        matched: &Row,
+        row: &InsertRow,
+        at: At,
+        encoding: Encoding,
+        reference: bool,
+    ) -> Vec<Literal> {
+        let catalog = self.catalog;
+        let Some(table) = catalog.table(matched.table) else {
+            return Vec::new();
+        };
+        *self.rows.entry(matched.table).or_default() += 1;
+        let literals: Vec<Literal> = table
+            .columns
+            .iter()
+            .zip(&matched.values)
+            .map(|(column, value)| self.literal(column, value.map(|v| &v.expr), encoding))
+            .collect();
+        let own: Vec<Canonical> = table
+            .columns
+            .iter()
+            .zip(&literals)
+            .map(|(column, literal)| value::canonical(literal, column.data_type.family, self.rules))
+            .collect();
+        let assumed: Vec<bool> = table
+            .columns
+            .iter()
+            .zip(&literals)
+            .map(|(column, literal)| value::assumption(literal, column.data_type.family).is_some())
+            .collect();
+        if !reference {
+            for (position, _) in assumed.iter().enumerate().filter(|(_, a)| **a) {
+                *self.dates.entry((matched.table, position)).or_default() += 1;
+            }
+            self.not_null(table, &own, row, at);
+        }
+        self.keys_of(
+            matched.table,
+            table,
+            &own,
+            &literals,
+            &assumed,
+            row,
+            at,
+            reference,
+        );
+        literals
+    }
+
+    /// The value a column gets: the row's, or the column's default where the row leaves it out, writes `DEFAULT`, or
+    /// writes NULL into a `DEFAULT ON NULL` column.
+    fn literal(&self, column: &Column, expr: Option<&Expr>, encoding: Encoding) -> Literal {
+        let default = || match &column.default {
+            Some(ColumnDefault::Value(expr)) => self.dialect.evaluate(expr, encoding),
+            Some(ColumnDefault::Opaque(text)) => Literal::Unknown(format!("the default {text}")),
+            None if column.identity => {
+                Literal::Unknown("an identity column's generated value".to_owned())
+            }
+            None => Literal::Null,
+        };
+        match expr {
+            None | Some(Expr::Default) => default(),
+            Some(expr) => match self.dialect.evaluate(expr, encoding) {
+                literal if column.default_on_null && self.is_null(&literal) => default(),
+                literal => literal,
+            },
+        }
+    }
+
+    fn is_null(&self, literal: &Literal) -> bool {
+        match literal {
+            Literal::Null => true,
+            Literal::Text(text) => text.is_empty() && self.rules.empty_string_is_null,
+            _ => false,
+        }
+    }
+
+    /// Whether a constraint judges a row: enabled, and either enabled before the row or validating the rows that
+    /// were there when it was enabled.
+    fn applies(constraint: &Constraint, at: At) -> bool {
+        constraint.state.enabled && (at.after(constraint.enabled_at) || constraint.state.validated)
+    }
+
+    /// NULL in a NOT NULL column or a primary key column: one finding per column.
+    fn not_null(&mut self, table: &Table, own: &[Canonical], row: &InsertRow, at: At) {
+        let mut reported: Vec<usize> = Vec::new();
+        let not_nulls = table.constraints.iter().filter_map(|c| match &c.kind {
+            Kind::NotNull { column } => Some((c, std::slice::from_ref(column))),
+            _ => None,
+        });
+        let primary = table.constraints.iter().filter_map(|c| match &c.kind {
+            Kind::PrimaryKey { columns } => Some((c, columns.as_slice())),
+            _ => None,
+        });
+        for (constraint, columns) in not_nulls.chain(primary) {
+            if !Self::applies(constraint, at) {
+                continue;
+            }
+            for &column in columns {
+                if own.get(column) == Some(&Canonical::Null) && !reported.contains(&column) {
+                    reported.push(column);
+                    let mut finding =
+                        self.finding(FindingKind::NotNull, table, constraint, &[column]);
+                    finding.file = Some(self.file(at.file));
+                    finding.line = Some(row.line);
+                    self.findings.push(finding);
+                }
+            }
+        }
+    }
+
+    /// Puts the row's primary and unique keys into their maps, reporting a key that is already there.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one row's views, computed once by `row`"
+    )]
+    fn keys_of(
+        &mut self,
+        id: TableId,
+        table: &Table,
+        own: &[Canonical],
+        literals: &[Literal],
+        assumed: &[bool],
+        row: &InsertRow,
+        at: At,
+        reference: bool,
+    ) {
+        for (position, constraint) in table.constraints.iter().enumerate() {
+            let (columns, primary) = match &constraint.kind {
+                Kind::PrimaryKey { columns } => (columns, true),
+                Kind::Unique { columns, .. } => (columns, false),
+                _ => continue,
+            };
+            let parts: Vec<&Canonical> = columns.iter().filter_map(|&c| own.get(c)).collect();
+            if parts.contains(&&Canonical::Unknown) {
+                self.doubt.entry((id, position)).or_default().unknown = true;
+                if !reference && Self::applies(constraint, at) {
+                    self.undecided((id, position), columns, literals);
+                }
+                continue;
+            }
+            let nulls = parts.iter().filter(|p| ***p == Canonical::Null).count();
+            let skip = if primary {
+                nulls > 0
+            } else {
+                nulls == parts.len()
+                    || (nulls > 0 && self.rules.unique_nulls == UniqueNulls::NeverConflict)
+            };
+            if skip {
+                continue;
+            }
+            let hash = hash(&parts);
+            let assumed = columns.iter().any(|&c| assumed.get(c) == Some(&true));
+            if assumed {
+                self.doubt.entry((id, position)).or_default().assumed = true;
+            }
+            let (first, first_assumed) =
+                match self.keys.entry((id, position)).or_default().entry(hash) {
+                    Entry::Occupied(first) => *first.get(),
+                    Entry::Vacant(slot) => {
+                        slot.insert((at, assumed));
+                        continue;
+                    }
+                };
+            if reference || !Self::applies(constraint, at) {
+                continue;
+            }
+            let mut finding = self.finding(FindingKind::DuplicateKey, table, constraint, columns);
+            finding.file = Some(self.file(at.file));
+            finding.line = Some(row.line);
+            finding.key = parts.iter().map(|p| shown(p)).collect();
+            finding.first = Some(Location {
+                file: self.file(first.file),
+                line: first.line,
+            });
+            finding.assumed = assumed || first_assumed;
+            self.findings.push(finding);
+        }
+    }
+
+    fn undecided(&mut self, key: (TableId, usize), columns: &[usize], literals: &[Literal]) {
+        self.count_unverifiable(key, || {
+            columns
+                .iter()
+                .filter_map(|&c| literals.get(c))
+                .find_map(|l| match l {
+                    Literal::Unknown(reason) => Some(reason.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "a value its column's type can't hold".to_owned())
+        });
+    }
+
+    fn count_unverifiable(&mut self, key: (TableId, usize), reason: impl FnOnce() -> String) {
+        let entry = self.unverifiable.entry(key).or_default();
+        entry.count += 1;
+        if entry.reason.is_empty() {
+            entry.reason = reason();
+        }
+    }
+
+    /// Looks the row's foreign keys up in their parents' key maps; a miss waits for the end of the input.
+    fn foreign_keys(
+        &mut self,
+        id: TableId,
+        table: &Table,
+        literals: &[Literal],
+        row: &InsertRow,
+        at: At,
+    ) {
+        for (position, constraint) in table.constraints.iter().enumerate() {
+            let Kind::ForeignKey { columns, parent } = &constraint.kind else {
+                continue;
+            };
+            if !Self::applies(constraint, at) {
+                continue;
+            }
+            let (parent_id, parent_key) = match parent {
+                Parent::Key { table, constraint } => (*table, *constraint),
+                Parent::Missing(_) => {
+                    *self.no_parent.entry((id, position)).or_default() += 1;
+                    continue;
+                }
+            };
+            let Some(parent_columns) = self.catalog.table(parent_id).and_then(|p| {
+                let key = p.constraints.get(parent_key)?;
+                let (Kind::PrimaryKey { columns } | Kind::Unique { columns, .. }) = &key.kind
+                else {
+                    return None;
+                };
+                Some(
+                    columns
+                        .iter()
+                        .filter_map(|&c| p.columns.get(c))
+                        .collect::<Vec<_>>(),
+                )
+            }) else {
+                continue;
+            };
+            // A child value compares as the parent column's type would store it.
+            let parts: Vec<(Canonical, bool)> = columns
+                .iter()
+                .zip(&parent_columns)
+                .map(|(&child, parent)| {
+                    let literal = literals.get(child).unwrap_or(&Literal::Null);
+                    let family = parent.data_type.family;
+                    (
+                        value::canonical(literal, family, self.rules),
+                        value::assumption(literal, family).is_some(),
+                    )
+                })
+                .collect();
+            if parts.iter().any(|(p, _)| *p == Canonical::Null) {
+                continue;
+            }
+            if parts.iter().any(|(p, _)| *p == Canonical::Unknown) {
+                self.undecided((id, position), columns, literals);
+                continue;
+            }
+            let canonical: Vec<&Canonical> = parts.iter().map(|(p, _)| p).collect();
+            let hash = hash(&canonical);
+            let found = self
+                .keys
+                .get(&(parent_id, parent_key))
+                .is_some_and(|keys| keys.contains_key(&hash));
+            if !found {
+                self.pending.push(Pending {
+                    table: id,
+                    constraint: position,
+                    parent: (parent_id, parent_key),
+                    hash,
+                    at: At {
+                        line: row.line,
+                        ..at
+                    },
+                    key: canonical.iter().map(|p| shown(p)).collect(),
+                    load_order: self.load_order
+                        && at.after(constraint.enabled_at)
+                        && !constraint.state.initially_deferred,
+                    assumed: parts.iter().any(|(_, a)| *a),
+                });
+            }
+        }
+    }
+
+    /// Resolves what waited for the end of the input, and returns the findings and warnings.
+    pub(super) fn finish(mut self) -> (Vec<Finding>, Vec<Warning>) {
+        let mut empty: HashMap<(TableId, usize), u64> = HashMap::new();
+        for pending in std::mem::take(&mut self.pending) {
+            let found = self
+                .keys
+                .get(&pending.parent)
+                .is_some_and(|keys| keys.contains_key(&pending.hash));
+            if found && !pending.load_order {
+                continue;
+            }
+            let doubt = self.doubt.get(&pending.parent).copied().unwrap_or_default();
+            if doubt.unknown {
+                // The parent key may be one of the values the checker couldn't know, or have been one earlier.
+                self.count_unverifiable((pending.table, pending.constraint), || {
+                    "parent keys the checker can't know".to_owned()
+                });
+                continue;
+            }
+            let kind = if found {
+                FindingKind::FkLoadOrder
+            } else if self.rows.get(&pending.parent.0).copied().unwrap_or(0) == 0 {
+                *empty
+                    .entry((pending.table, pending.constraint))
+                    .or_default() += 1;
+                continue;
+            } else {
+                FindingKind::FkMissingParent
+            };
+            let Some((table, constraint, columns)) =
+                self.foreign_key(pending.table, pending.constraint)
+            else {
+                continue;
+            };
+            let mut finding = self.finding(kind, table, constraint, columns);
+            finding.file = Some(self.file(pending.at.file));
+            finding.line = Some(pending.at.line);
+            finding.key = pending.key;
+            finding.assumed = pending.assumed || doubt.assumed;
+            self.findings.push(finding);
+        }
+        for ((table, constraint), count) in empty {
+            let Some((table, constraint, columns)) = self.foreign_key(table, constraint) else {
+                continue;
+            };
+            let mut finding =
+                self.finding(FindingKind::ParentTableEmpty, table, constraint, columns);
+            finding.count = Some(count);
+            self.findings.push(finding);
+        }
+        let warnings = self.warnings();
+        (self.findings, warnings)
+    }
+
+    fn foreign_key(
+        &self,
+        table: TableId,
+        constraint: usize,
+    ) -> Option<(&'a Table, &'a Constraint, &'a [usize])> {
+        let table = self.catalog.table(table)?;
+        let constraint = table.constraints.get(constraint)?;
+        let Kind::ForeignKey { columns, .. } = &constraint.kind else {
+            return None;
+        };
+        Some((table, constraint, columns))
+    }
+
+    fn warnings(&self) -> Vec<Warning> {
+        let catalog = self.catalog;
+        let constraint = |(table, position): (TableId, usize)| {
+            let table = catalog.table(table)?;
+            let constraint = table.constraints.get(position)?;
+            Some((
+                catalog.display(&table.name),
+                self.constraint_name(table, constraint),
+                constraint,
+            ))
+        };
+        let mut warnings = Vec::new();
+        for (&key, undecided) in &self.unverifiable {
+            if let Some((table, name, _)) = constraint(key) {
+                warnings.push(Warning::Unverifiable {
+                    table,
+                    constraint: name,
+                    count: undecided.count,
+                    reason: undecided.reason.clone(),
+                });
+            }
+        }
+        for (&key, &count) in &self.no_parent {
+            if let Some((
+                table,
+                name,
+                Constraint {
+                    kind:
+                        Kind::ForeignKey {
+                            parent: Parent::Missing(parent),
+                            ..
+                        },
+                    ..
+                },
+            )) = constraint(key)
+            {
+                warnings.push(Warning::ParentNotInInput {
+                    table,
+                    constraint: name,
+                    parent: parent.clone(),
+                    count,
+                });
+            }
+        }
+        for (&(table, position), &count) in &self.dates {
+            if let Some(t) = catalog.table(table)
+                && let Some(column) = t.columns.get(position)
+            {
+                warnings.push(Warning::DateAssumed {
+                    table: catalog.display(&t.name),
+                    column: column.name.clone(),
+                    count,
+                });
+            }
+        }
+        warnings.sort();
+        warnings
+    }
+}
+
+/// A key's canonical values as a finding shows them; `None` is NULL.
+fn shown(part: &Canonical) -> Option<String> {
+    match part {
+        Canonical::Value(text) => Some(text.clone()),
+        Canonical::Null | Canonical::Unknown => None,
+    }
+}
+
+/// The 128-bit hash of a key's canonical values, each one tagged and length-prefixed so no two keys run together.
+fn hash(parts: &[&Canonical]) -> u128 {
+    let mut hasher = Xxh3::new();
+    for part in parts {
+        match part {
+            Canonical::Value(text) => {
+                hasher.update(&[1]);
+                hasher.update(&u64::try_from(text.len()).unwrap_or(u64::MAX).to_le_bytes());
+                hasher.update(text.as_bytes());
+            }
+            Canonical::Null | Canonical::Unknown => hasher.update(&[0]),
+        }
+    }
+    hasher.digest128()
+}

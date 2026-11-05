@@ -1,7 +1,7 @@
 //! Oracle DDL into neutral statements: `CREATE TABLE`, `ALTER TABLE` and `CREATE INDEX`, as far as the catalog needs
 //! them. Physical attributes (storage, tablespaces, partitions, LOB clauses) are skipped by balancing parentheses.
 
-use super::cursor::{Cursor, first_word};
+use super::cursor::{Cursor, leading_words};
 use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
@@ -11,9 +11,7 @@ use crate::statement::{
 
 /// The statement a table or index DDL piece makes, or `None` when the piece is something else.
 pub fn parse_ddl(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>, ParseError> {
-    if piece.kind != PieceKind::Sql
-        || !matches!(first_word(&piece.text).as_deref(), Some("CREATE" | "ALTER"))
-    {
+    if piece.kind != PieceKind::Sql || !is_table_ddl(&piece.text) {
         return Ok(None);
     }
     let mut c = Cursor::new(piece, encoding)?;
@@ -26,7 +24,7 @@ pub fn parse_ddl(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>,
     if c.eat_word("UNIQUE") {
         return create_index(&mut c, true).map(Some);
     }
-    c.eat_any_word(&["BITMAP", "MULTIVALUE"]);
+    c.eat_any_word(INDEX_MODIFIERS);
     if c.at_word("INDEX") {
         return create_index(&mut c, false).map(Some);
     }
@@ -36,6 +34,21 @@ pub fn parse_ddl(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>,
     }
     Ok(None)
 }
+
+/// Whether a statement is table or index DDL, by its first words, without lexing it.
+pub(crate) fn is_table_ddl(text: &[u8]) -> bool {
+    let words = leading_words(text, 4);
+    let mut words = words.iter().map(String::as_str);
+    match words.next() {
+        Some("ALTER") => words.next() == Some("TABLE"),
+        Some("CREATE") => words
+            .find(|w| !TABLE_MODIFIERS.contains(w) && !INDEX_MODIFIERS.contains(w))
+            .is_some_and(|w| w == "TABLE" || w == "INDEX"),
+        _ => false,
+    }
+}
+
+const INDEX_MODIFIERS: &[&str] = &["UNIQUE", "BITMAP", "MULTIVALUE"];
 
 const TABLE_MODIFIERS: &[&str] = &[
     "GLOBAL",
@@ -149,8 +162,9 @@ fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
             }
             column.default = Some(default_value(c)?);
         } else if c.eat_word("GENERATED") {
+            // `BY DEFAULT ON NULL`: an explicit NULL takes a generated value, like `DEFAULT ON NULL`.
             if !c.eat_word("ALWAYS") && c.eat_words(&["BY", "DEFAULT"]) {
-                c.eat_words(&["ON", "NULL"]);
+                column.default_on_null = c.eat_words(&["ON", "NULL"]);
             }
             c.expect_word("AS")?;
             if c.eat_word("IDENTITY") {
@@ -981,12 +995,13 @@ mod tests {
         ) else {
             panic!("not a CREATE TABLE");
         };
-        let flags: Vec<(&str, bool, bool, usize)> = columns
+        let flags: Vec<(&str, bool, bool, bool, usize)> = columns
             .iter()
             .map(|c| {
                 (
                     c.name.value.as_str(),
                     c.identity,
+                    c.default_on_null,
                     c.invisible,
                     c.constraints.len(),
                 )
@@ -995,10 +1010,10 @@ mod tests {
         assert_eq!(
             flags,
             [
-                ("ID", true, false, 1),
-                ("H", false, true, 0),
-                ("V", false, false, 0),
-                ("W", false, false, 0)
+                ("ID", true, true, false, 1),
+                ("H", false, false, true, 0),
+                ("V", false, false, false, 0),
+                ("W", false, false, false, 0)
             ]
         );
     }

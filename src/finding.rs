@@ -51,6 +51,10 @@ pub struct Finding {
     /// For a summary finding, the number of rows it stands for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u64>,
+    /// The key rests on an assumption the input doesn't settle, such as a date written as plain text; `fix` leaves
+    /// such a finding for review unless told otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assumed: bool,
 }
 
 #[cfg(test)]
@@ -69,6 +73,7 @@ mod tests {
             key: vec![],
             first: None,
             count: None,
+            assumed: false,
         };
         let json = serde_json::to_string(&finding).unwrap();
         assert_eq!(
