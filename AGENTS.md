@@ -38,13 +38,15 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 
 - `src/dialect/mod.rs` holds `DialectId` and `Rules`: identifier folding and quoting, whether `''` is NULL, `CHAR`
   padding, how partially NULL unique keys compare, deferrable foreign keys. Semantics differ through `Rules`, never
-  through `if oracle` in neutral code.
+  through `if oracle` in neutral code. Neutral code reaches a dialect only through `DialectId`'s methods
+  (`pieces`, `parse`, `evaluate`, `script_includes`, `rules`), each a `match` on the dialect.
 - `src/dialect/<name>/` holds the syntax. For Oracle: `split.rs` (script into pieces, on bytes, by SQL\*Plus or
   SQLcl rules: `Runner`, default SQL\*Plus), `lex.rs` (one statement into tokens), and `synth.rs` (the
   generator's DDL, literals, `INSERT` shapes, SQL\*Plus headers, `load.sql`, and how many statements each wrote)
-  behind the `synth::Render` trait. `ddl.rs` parses `CREATE TABLE`, `ALTER TABLE` and `CREATE INDEX` into the
-  neutral statements of `src/statement.rs`, over the token cursor in `cursor.rs`. `src/source.rs` holds the
-  neutral `Piece` and `Span` the splitter produces.
+  behind the `synth::Render` trait. `parse.rs` sends each piece to `insert.rs` (`INSERT` rows) or `ddl.rs`
+  (`CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`), both over the token cursor in `cursor.rs`, or names it as
+  skipped; `eval.rs` says what a value expression means. `src/source.rs` holds the neutral `Piece` and `Span` the
+  splitter produces, `src/statement.rs` the statements, and `src/value.rs` canonical values.
 - `src/catalog.rs` (neutral) builds tables, ordered columns and resolved constraints from the DDL statements. It
   applies every `CREATE TABLE` before the rest, since a version-sorted glob reads `ref_constraints/` before
   `tables/`.

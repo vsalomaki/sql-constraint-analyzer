@@ -8,6 +8,7 @@ pub mod ddl;
 pub mod eval;
 pub mod insert;
 pub mod lex;
+pub mod parse;
 pub mod script;
 pub mod split;
 #[cfg(feature = "gen")]

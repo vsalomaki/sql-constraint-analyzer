@@ -2,9 +2,9 @@
 //! or several (`INSERT ALL INTO … VALUES (…) … SELECT … FROM DUAL`). An insert whose rows come from a query is
 //! skipped as not followed. Values are kept as written; [`super::eval`] says what they mean.
 
-use super::RULES;
-use super::lex::{self, Token, TokenKind};
-use crate::source::{Encoding, Piece, Span};
+use super::cursor::{Cursor, first_word};
+use super::lex::{Token, TokenKind};
+use crate::source::{Encoding, Piece};
 use crate::statement::{Expr, Ident, InsertRow, Name, ParseError, Skip, Statement, Value};
 
 /// Calls and negations nested deeper than this are kept as written, so no input can exhaust the stack.
@@ -15,33 +15,14 @@ const STOP_WORDS: [&str; 4] = ["INSERT", "INTO", "VALUES", "SELECT"];
 
 /// The insert `piece` holds, or `None` when it isn't an `INSERT`.
 pub fn parse_insert(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>, ParseError> {
-    let text = piece.text.as_slice();
+    if first_word(&piece.text).as_deref() != Some("INSERT") {
+        return Ok(None);
+    }
     let mut parser = Parser {
         piece,
-        text,
-        encoding,
-        tokens: Vec::new(),
-        pos: 0,
-        counted: (0, piece.line),
+        c: Cursor::new(piece, encoding)?,
     };
-    match lex::lex(text) {
-        Ok(tokens) if parser.starts_insert(&tokens) => {
-            parser.tokens = tokens;
-            parser.insert().map(Some)
-        }
-        Ok(_) => Ok(None),
-        Err(error) => {
-            let head = text
-                .get(..error.offset)
-                .and_then(|head| lex::lex(head).ok())
-                .unwrap_or_default();
-            if parser.starts_insert(&head) {
-                Err(parser.error_at(error.offset, error.message.to_owned()))
-            } else {
-                Ok(None)
-            }
-        }
-    }
+    parser.insert().map(Some)
 }
 
 fn not_followed(what: &str) -> Statement {
@@ -50,47 +31,40 @@ fn not_followed(what: &str) -> Statement {
 
 struct Parser<'a> {
     piece: &'a Piece,
-    text: &'a [u8],
-    encoding: Encoding,
-    tokens: Vec<Token>,
-    pos: usize,
-    /// An offset in `text` and its line, so a statement's lines are counted once however many rows it has.
-    counted: (usize, u64),
+    c: Cursor<'a>,
 }
 
 impl Parser<'_> {
-    fn starts_insert(&self, tokens: &[Token]) -> bool {
-        tokens.first().is_some_and(|&t| self.is_word(t, "INSERT"))
-    }
-
     fn insert(&mut self) -> Result<Statement, ParseError> {
-        self.pos = 1;
-        if self.eat_word("INTO") {
+        self.c.expect_word("INSERT")?;
+        if self.c.eat_word("INTO") {
             self.single()
-        } else if self.eat_word("ALL") {
+        } else if self.c.eat_word("ALL") {
             self.multi()
-        } else if self.peek_word("FIRST") {
+        } else if self.c.at_word("FIRST") {
             Ok(not_followed("INSERT FIRST"))
         } else {
-            Err(self.expected("INTO, ALL or FIRST after INSERT"))
+            Err(self.c.expected("INTO, ALL or FIRST after INSERT"))
         }
     }
 
     fn single(&mut self) -> Result<Statement, ParseError> {
-        if self.peek_punct(b'(') {
+        if self.c.at_punct(b'(') {
             return Ok(not_followed("INSERT INTO a subquery"));
         }
         let (table, columns) = self.target()?;
-        if !self.eat_word("VALUES") {
-            return if self.at_query(self.pos) {
+        if !self.c.eat_word("VALUES") {
+            return if self.at_query(0) {
                 Ok(not_followed("INSERT … SELECT"))
             } else {
-                Err(self.expected("VALUES or a query after the table"))
+                Err(self.c.expected("VALUES or a query after the table"))
             };
         }
         let (values, _) = self.values()?;
-        if self.peek().is_some() {
-            return Err(self.expected("the end of the statement after the value list"));
+        if !self.c.at_end() {
+            return Err(self
+                .c
+                .expected("the end of the statement after the value list"));
         }
         Ok(Statement::Insert(vec![InsertRow {
             table,
@@ -103,10 +77,10 @@ impl Parser<'_> {
 
     fn multi(&mut self) -> Result<Statement, ParseError> {
         let mut rows = Vec::new();
-        while let Some(into) = self.peek().filter(|&t| self.is_word(t, "INTO")) {
-            self.pos += 1;
+        while let Some(into) = self.c.peek().filter(|&t| self.c.is_word(t, "INTO")) {
+            self.c.bump();
             let (table, columns) = self.target()?;
-            if !self.eat_word("VALUES") {
+            if !self.c.eat_word("VALUES") {
                 // Without VALUES the row is the query's select list.
                 return Ok(not_followed("INSERT ALL … SELECT"));
             }
@@ -115,22 +89,22 @@ impl Parser<'_> {
                 table,
                 columns,
                 values,
-                span: self.span(into.start, end),
-                line: self.line_at(into.start),
+                span: self.c.span(into.start, end),
+                line: self.c.line_at(into.start),
             });
         }
         if rows.is_empty() {
-            return if self.peek_word("WHEN") {
+            return if self.c.at_word("WHEN") {
                 Ok(not_followed("INSERT ALL WHEN"))
             } else {
-                Err(self.expected("INTO after INSERT ALL"))
+                Err(self.c.expected("INTO after INSERT ALL"))
             };
         }
-        if !self.eat_word("SELECT") {
-            return if self.at_query(self.pos) {
+        if !self.c.eat_word("SELECT") {
+            return if self.at_query(0) {
                 Ok(not_followed("INSERT ALL … SELECT"))
             } else {
-                Err(self.expected("INTO or a query after the INTO clauses"))
+                Err(self.c.expected("INTO or a query after the INTO clauses"))
             };
         }
         Ok(if self.selects_from_dual() {
@@ -144,28 +118,28 @@ impl Parser<'_> {
     /// Any other query, a set operator among them, may give another number of rows.
     fn selects_from_dual(&self) -> bool {
         matches!(
-            self.tokens.get(self.pos..),
-            Some(&[_, from, dual]) if self.is_word(from, "FROM") && self.is_word(dual, "DUAL")
+            self.c.tokens().get(self.c.pos()..),
+            Some(&[_, from, dual]) if self.c.is_word(from, "FROM") && self.c.is_word(dual, "DUAL")
         )
     }
 
     /// `name [alias] [(columns)]`.
     fn target(&mut self) -> Result<(Name, Option<Vec<Ident>>), ParseError> {
-        let table = self.name()?;
+        let table = self.c.name("a table name")?;
         // DBMS_METADATA aliases its target: `INTO "APP"."EMPLOYEES" KUT$ (…)`.
-        if let Some(token) = self.peek() {
+        if let Some(token) = self.c.peek() {
             let alias = match token.kind {
                 TokenKind::QuotedIdent => true,
                 TokenKind::Word => !["VALUES", "SELECT", "WITH", "INTO"]
                     .iter()
-                    .any(|w| self.is_word(token, w)),
+                    .any(|w| self.c.is_word(token, w)),
                 _ => false,
             };
             if alias {
-                self.pos += 1;
+                self.c.bump();
             }
         }
-        let columns = if self.peek_punct(b'(') && !self.at_query(self.pos + 1) {
+        let columns = if self.c.at_punct(b'(') && !self.at_query(1) {
             Some(self.columns()?)
         } else {
             None
@@ -173,90 +147,82 @@ impl Parser<'_> {
         Ok((table, columns))
     }
 
-    fn name(&mut self) -> Result<Name, ParseError> {
-        let first = self.ident().ok_or_else(|| self.expected("a table name"))?;
-        if !self.eat_punct(b'.') {
-            return Ok(Name {
-                schema: None,
-                name: first,
-            });
-        }
-        let name = self
-            .ident()
-            .ok_or_else(|| self.expected("a table name after the schema"))?;
-        Ok(Name {
-            schema: Some(first),
-            name,
-        })
-    }
-
     fn columns(&mut self) -> Result<Vec<Ident>, ParseError> {
-        self.pos += 1;
+        self.c.bump();
         let mut columns = Vec::new();
         loop {
-            columns.push(self.ident().ok_or_else(|| self.expected("a column name"))?);
-            if self.eat_punct(b')') {
+            columns.push(self.c.ident("a column name")?);
+            if self.c.eat_punct(b')') {
                 return Ok(columns);
             }
-            if !self.eat_punct(b',') {
-                return Err(self.expected("`)` or `,` in the column list"));
+            if !self.c.eat_punct(b',') {
+                return Err(self.c.expected("`)` or `,` in the column list"));
             }
         }
     }
 
     /// `(value, …)`, and the offset after its `)`.
     fn values(&mut self) -> Result<(Vec<Value>, usize), ParseError> {
-        if !self.eat_punct(b'(') {
-            return Err(self.expected("`(` after VALUES"));
+        if !self.c.eat_punct(b'(') {
+            return Err(self.c.expected("`(` after VALUES"));
         }
         let mut values = Vec::new();
         loop {
             let run = self.run();
-            let tokens = self.tokens.get(run).unwrap_or_default();
+            let tokens = self.c.tokens().get(run).unwrap_or_default();
             let (Some(first), Some(last)) = (tokens.first(), tokens.last()) else {
-                return Err(self.expected("a value"));
+                return Err(self.c.expected("a value"));
             };
             values.push(Value {
                 expr: self.expr(tokens, 0),
-                span: self.span(first.start, last.end),
+                span: self.c.span(first.start, last.end),
             });
-            match self.peek() {
-                Some(t) if self.is_punct(t, b',') => self.pos += 1,
-                Some(t) if self.is_punct(t, b')') => {
-                    self.pos += 1;
+            match self.c.peek() {
+                Some(t) if self.c.is_punct(t, b',') => {
+                    self.c.bump();
+                }
+                Some(t) if self.c.is_punct(t, b')') => {
+                    self.c.bump();
                     return Ok((values, t.end));
                 }
-                _ => return Err(self.expected("`)` or `,` in the value list")),
+                _ => return Err(self.c.expected("`)` or `,` in the value list")),
             }
         }
     }
 
     /// The tokens of one value: up to a `,` or `)` outside parentheses.
     fn run(&mut self) -> std::ops::Range<usize> {
-        let start = self.pos;
+        let start = self.c.pos();
         let mut depth = 0_usize;
-        while let Some(token) = self.peek() {
-            if self.is_punct(token, b'(') {
+        while let Some(token) = self.c.peek() {
+            if self.c.is_punct(token, b'(') {
                 depth += 1;
             } else if depth == 0
-                && (self.is_punct(token, b',')
-                    || self.is_punct(token, b')')
-                    || self.is_punct(token, b';')
-                    || STOP_WORDS.iter().any(|w| self.is_word(token, w)))
+                && (self.c.is_punct(token, b',')
+                    || self.c.is_punct(token, b')')
+                    || self.c.is_punct(token, b';')
+                    || STOP_WORDS.iter().any(|w| self.c.is_word(token, w)))
             {
                 break;
-            } else if self.is_punct(token, b')') {
+            } else if self.c.is_punct(token, b')') {
                 depth -= 1;
             }
-            self.pos += 1;
+            self.c.bump();
         }
-        start..self.pos
+        start..self.c.pos()
+    }
+
+    /// Whether a query starts `ahead` tokens from the cursor.
+    fn at_query(&self, ahead: usize) -> bool {
+        self.c.word_at(ahead, "SELECT")
+            || self.c.word_at(ahead, "WITH")
+            || self.c.punct_at(ahead, b'(')
     }
 
     /// A value by its shape; anything without one of the shapes below is kept as written.
     fn expr(&self, tokens: &[Token], depth: usize) -> Expr {
         self.shaped(tokens, depth)
-            .unwrap_or_else(|| Expr::Other(self.source(tokens)))
+            .unwrap_or_else(|| Expr::Other(self.c.text_of(tokens)))
     }
 
     fn shaped(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
@@ -265,44 +231,41 @@ impl Parser<'_> {
         }
         match *tokens {
             [token] => self.literal(token),
-            [minus, ref rest @ ..] if self.is_punct(minus, b'-') => {
+            [minus, ref rest @ ..] if self.c.is_punct(minus, b'-') => {
                 Some(Expr::Negate(Box::new(self.shaped(rest, depth + 1)?)))
             }
             [keyword, string]
-                if (self.is_word(keyword, "DATE") || self.is_word(keyword, "TIMESTAMP"))
+                if (self.c.is_word(keyword, "DATE") || self.c.is_word(keyword, "TIMESTAMP"))
                     && string.kind == (TokenKind::String { national: false }) =>
             {
                 Some(Expr::Typed {
-                    type_name: self.word(keyword).to_ascii_uppercase(),
-                    text: self
-                        .encoding
-                        .decode(&string.content(self.text))
-                        .into_owned(),
+                    type_name: self.c.token_text(keyword).to_ascii_uppercase(),
+                    text: self.c.decode(&self.c.content(string)),
                 })
             }
-            [.., last] if self.is_punct(last, b')') => self.call(tokens, depth),
+            [.., last] if self.c.is_punct(last, b')') => self.call(tokens, depth),
             _ => self.next_value(tokens),
         }
     }
 
     fn literal(&self, token: Token) -> Option<Expr> {
         match token.kind {
-            TokenKind::Number => Some(Expr::Number(self.word(token))),
+            TokenKind::Number => Some(Expr::Number(self.c.token_text(token))),
             TokenKind::String { national } | TokenKind::AltString { national } => {
                 Some(Expr::String {
-                    bytes: token.content(self.text),
+                    bytes: self.c.content(token),
                     national,
                 })
             }
-            _ if self.is_word(token, "NULL") => Some(Expr::Null),
-            _ if self.is_word(token, "DEFAULT") => Some(Expr::Default),
+            _ if self.c.is_word(token, "NULL") => Some(Expr::Null),
+            _ if self.c.is_word(token, "DEFAULT") => Some(Expr::Default),
             _ => None,
         }
     }
 
     /// `name(args)`, where the `(` after the name closes at the last token.
     fn call(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
-        let open = tokens.iter().position(|&t| self.is_punct(t, b'('))?;
+        let open = tokens.iter().position(|&t| self.c.is_punct(t, b'('))?;
         let (head, rest) = tokens.split_at_checked(open)?;
         let function = self
             .dotted(head)?
@@ -327,11 +290,11 @@ impl Parser<'_> {
         let mut args = Vec::new();
         let (mut start, mut depth) = (0, 0_usize);
         for (i, &token) in inner.iter().enumerate() {
-            if self.is_punct(token, b'(') {
+            if self.c.is_punct(token, b'(') {
                 depth += 1;
-            } else if self.is_punct(token, b')') {
+            } else if self.c.is_punct(token, b')') {
                 depth = depth.checked_sub(1)?;
-            } else if depth == 0 && self.is_punct(token, b',') {
+            } else if depth == 0 && self.c.is_punct(token, b',') {
                 args.push(inner.get(start..i)?);
                 start = i + 1;
             }
@@ -359,149 +322,24 @@ impl Parser<'_> {
         let mut parts = Vec::new();
         let mut iter = tokens.iter();
         loop {
-            parts.push(self.ident_of(*iter.next()?)?);
+            parts.push(self.c.ident_of(*iter.next()?)?);
             match iter.next() {
                 None => return Some(parts),
-                Some(&dot) if self.is_punct(dot, b'.') => {}
+                Some(&dot) if self.c.is_punct(dot, b'.') => {}
                 Some(_) => return None,
             }
         }
     }
-
-    fn ident(&mut self) -> Option<Ident> {
-        let ident = self.ident_of(self.peek()?)?;
-        self.pos += 1;
-        Some(ident)
-    }
-
-    fn ident_of(&self, token: Token) -> Option<Ident> {
-        match token.kind {
-            TokenKind::Word => Some(Ident {
-                value: RULES.fold(&self.word(token)),
-                quoted: false,
-            }),
-            TokenKind::QuotedIdent => Some(Ident {
-                value: self.encoding.decode(&token.content(self.text)).into_owned(),
-                quoted: true,
-            }),
-            _ => None,
-        }
-    }
-
-    fn word(&self, token: Token) -> String {
-        self.encoding.decode(token.text(self.text)).into_owned()
-    }
-
-    /// The text of `tokens` as written, from the first one's start to the last one's end.
-    fn source(&self, tokens: &[Token]) -> String {
-        let (Some(first), Some(last)) = (tokens.first(), tokens.last()) else {
-            return String::new();
-        };
-        self.encoding
-            .decode(self.text.get(first.start..last.end).unwrap_or_default())
-            .into_owned()
-    }
-
-    fn peek(&self) -> Option<Token> {
-        self.tokens.get(self.pos).copied()
-    }
-
-    fn is_word(&self, token: Token, word: &str) -> bool {
-        token.kind == TokenKind::Word && token.text(self.text).eq_ignore_ascii_case(word.as_bytes())
-    }
-
-    fn is_punct(&self, token: Token, c: u8) -> bool {
-        token.kind == TokenKind::Punct && token.text(self.text) == [c]
-    }
-
-    fn peek_word(&self, word: &str) -> bool {
-        self.peek().is_some_and(|t| self.is_word(t, word))
-    }
-
-    fn peek_punct(&self, c: u8) -> bool {
-        self.peek().is_some_and(|t| self.is_punct(t, c))
-    }
-
-    /// Whether a query starts at token `at`.
-    fn at_query(&self, at: usize) -> bool {
-        self.tokens.get(at).is_some_and(|&t| {
-            self.is_word(t, "SELECT") || self.is_word(t, "WITH") || self.is_punct(t, b'(')
-        })
-    }
-
-    fn eat_word(&mut self, word: &str) -> bool {
-        let found = self.peek_word(word);
-        self.pos += usize::from(found);
-        found
-    }
-
-    fn eat_punct(&mut self, c: u8) -> bool {
-        let found = self.peek_punct(c);
-        self.pos += usize::from(found);
-        found
-    }
-
-    fn span(&self, start: usize, end: usize) -> Span {
-        Span {
-            start: self.piece.span.start + to_u64(start),
-            end: self.piece.span.start + to_u64(end),
-        }
-    }
-
-    /// The line `offset` in the piece's text is on.
-    #[expect(
-        clippy::naive_bytecount,
-        reason = "one statement's text; not worth a dependency"
-    )]
-    fn line_at(&mut self, offset: usize) -> u64 {
-        let (from, line) = if offset >= self.counted.0 {
-            self.counted
-        } else {
-            (0, self.piece.line)
-        };
-        let newlines = self
-            .text
-            .get(from..offset)
-            .unwrap_or_default()
-            .iter()
-            .filter(|&&b| b == b'\n')
-            .count();
-        let line = line + to_u64(newlines);
-        self.counted = (offset, line);
-        line
-    }
-
-    fn error_at(&mut self, offset: usize, message: String) -> ParseError {
-        ParseError {
-            offset: self.piece.span.start + to_u64(offset),
-            line: self.line_at(offset),
-            message,
-        }
-    }
-
-    /// An error at the next token: "expected `what`, found …".
-    fn expected(&mut self, what: &str) -> ParseError {
-        let (offset, found) = match self.peek() {
-            Some(token) => {
-                let text = self.word(token);
-                let short: String = text.chars().take(40).collect();
-                let ellipsis = if short.len() < text.len() { "…" } else { "" };
-                (token.start, format!("`{short}{ellipsis}`"))
-            }
-            None => (self.text.len(), "the end of the statement".to_owned()),
-        };
-        self.error_at(offset, format!("expected {what}, found {found}"))
-    }
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::PieceKind;
+    use crate::source::{PieceKind, Span};
+
+    fn to_u64(n: usize) -> u64 {
+        u64::try_from(n).unwrap()
+    }
 
     /// A piece that starts at offset 100 on line 10, so offsets and lines are visibly absolute.
     fn piece(text: &str) -> Piece {
@@ -917,7 +755,7 @@ mod tests {
             ),
             (
                 "INSERT INTO s.",
-                "expected a table name after the schema, found the end of the statement",
+                "expected a table name, found the end of the statement",
             ),
             (
                 "INSERT INTO t (a b) VALUES (1)",
