@@ -2,6 +2,7 @@
 //! constraints, and writes fixed copies.
 
 pub mod catalog;
+pub mod check;
 pub mod dialect;
 pub mod finding;
 pub mod input;

@@ -14,6 +14,8 @@ pub enum FindingKind {
     /// NULL, or `''`, in a NOT NULL column.
     NotNull,
     UnknownTable,
+    /// An unqualified table name that several schemas have, with no default schema to choose one.
+    AmbiguousTable,
     UnknownColumn,
     ValueCountMismatch,
     /// The foreign key's parent table is defined but has no rows; one finding per foreign key, with a row count.

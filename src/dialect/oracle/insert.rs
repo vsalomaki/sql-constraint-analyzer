@@ -151,7 +151,14 @@ impl Parser<'_> {
         self.c.bump();
         let mut columns = Vec::new();
         loop {
-            columns.push(self.c.ident("a column name")?);
+            let at = self.c.peek().map_or(0, |t| t.start);
+            let column = self.c.ident("a column name")?;
+            // Oracle refuses the statement (ORA-00957); `A` and `"A"` are one column.
+            if columns.iter().any(|c: &Ident| c.value == column.value) {
+                let message = format!("column {} is listed twice", column.value);
+                return Err(self.c.error_at(at, message));
+            }
+            columns.push(column);
             if self.c.eat_punct(b')') {
                 return Ok(columns);
             }
@@ -714,6 +721,14 @@ mod tests {
         ] {
             assert_eq!(parse(text), Ok(None), "{text}");
         }
+    }
+
+    #[test]
+    fn a_column_listed_twice_is_an_error_at_its_second_mention() {
+        let text = "INSERT INTO T (A, \"A\") VALUES (1, 2)";
+        let e = error(text);
+        assert_eq!(e.message, "column A is listed twice");
+        assert_eq!(e.offset, 100 + to_u64(text.find("\"A\"").unwrap()));
     }
 
     #[test]

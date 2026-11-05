@@ -240,7 +240,9 @@ fn expected_row(finding: &Finding) -> (&'static str, String) {
             format!("{}.{}", unquote(&finding.table), column()),
         ),
         FindingKind::UnknownColumn => ("unknown column", column()),
-        FindingKind::UnknownTable => ("unknown table", unquote(&finding.table)),
+        FindingKind::UnknownTable | FindingKind::AmbiguousTable => {
+            ("unknown table", unquote(&finding.table))
+        }
         FindingKind::ValueCountMismatch => ("value count", String::new()),
         FindingKind::ParentTableEmpty => ("parent table empty", constraint()),
     }
