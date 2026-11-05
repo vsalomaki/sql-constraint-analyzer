@@ -52,7 +52,6 @@ impl Token {
                     .unwrap_or_default(),
                 b'"',
             ),
-            // `q'[` … `]'`: the prefix, quote and delimiter at the start, delimiter and quote at the end.
             // `q'[` … `]'`: the prefix, quote and opening delimiter, then the closing delimiter and quote.
             TokenKind::AltString { national } => {
                 let quote = usize::from(national) + 1;

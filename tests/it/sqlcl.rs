@@ -6,8 +6,21 @@ use std::path::{Path, PathBuf};
 
 use sqlca::source::PieceKind;
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sqlcl")
+}
+
+/// The data file of `SCHEMA.TABLE`.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a malformed fixture fails the test that reads it"
+)]
+pub(crate) fn data_file(table: &str) -> PathBuf {
+    let (schema, name) = table.split_once('.').unwrap();
+    root()
+        .join(schema.to_ascii_lowercase())
+        .join("data")
+        .join(format!("{}.sql", name.replace('"', "")))
 }
 
 /// `counts.csv` as (`SCHEMA.TABLE`, rows), with SQLcl's CSV quoting removed.
@@ -15,7 +28,7 @@ fn root() -> PathBuf {
     clippy::unwrap_used,
     reason = "a malformed fixture fails the test that reads it"
 )]
-fn counts() -> Vec<(String, usize)> {
+pub(crate) fn counts() -> Vec<(String, usize)> {
     let csv = fs::read_to_string(root().join("counts.csv")).unwrap();
     csv.lines()
         .skip(1)
@@ -47,11 +60,7 @@ fn each_data_file_has_one_insert_per_row_oracle_counted() {
     let counts = counts();
     assert_eq!(counts.len(), 8, "{counts:?}");
     for (table, rows) in counts {
-        let (schema, name) = table.split_once('.').unwrap();
-        let file = root()
-            .join(schema.to_ascii_lowercase())
-            .join("data")
-            .join(format!("{}.sql", name.replace('"', "")));
+        let file = data_file(&table);
         let text = fs::read_to_string(&file).unwrap();
         let inserts = text
             .lines()
@@ -93,11 +102,7 @@ fn every_fixture_file_splits_cleanly_and_data_files_into_one_statement_per_row()
         );
     }
     for (table, rows) in counts() {
-        let (schema, name) = table.split_once('.').unwrap();
-        let path = root()
-            .join(schema.to_ascii_lowercase())
-            .join("data")
-            .join(format!("{}.sql", name.replace('"', "")));
+        let path = data_file(&table);
         let pieces = crate::split::pieces(&path);
         let of = |kind| pieces.iter().filter(|p| p.kind == kind).count();
         assert_eq!(
