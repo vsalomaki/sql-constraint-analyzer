@@ -1,8 +1,9 @@
-//! One piece of an Oracle script as a neutral statement: an insert, table or index DDL, or a skip saying why the
-//! checker has no use for it.
+//! One piece of an Oracle script as a neutral statement. The schema pass takes table and index DDL; the rows pass
+//! takes inserts and names everything else as skipped, saying why the checker has no use for it.
 
 use super::cursor::leading_words;
 use super::{ddl, insert};
+use crate::dialect::Pass;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{ParseError, Skip, Statement};
 
@@ -19,7 +20,19 @@ const MODIFIERS: [&str; 6] = [
     "NOFORCE",
 ];
 
-pub fn parse(piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
+pub fn parse(
+    piece: &Piece,
+    encoding: Encoding,
+    pass: Pass,
+) -> Result<Option<Statement>, ParseError> {
+    match pass {
+        Pass::Schema => ddl::parse_ddl(piece, encoding),
+        Pass::Rows if piece.kind == PieceKind::Sql && ddl::is_table_ddl(&piece.text) => Ok(None),
+        Pass::Rows => rows(piece, encoding).map(Some),
+    }
+}
+
+fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
     if piece.kind == PieceKind::Unterminated {
         return Err(ParseError {
             offset: piece.span.start,
@@ -29,13 +42,10 @@ pub fn parse(piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError>
                     .to_owned(),
         });
     }
-    if piece.kind == PieceKind::Sql {
-        if let Some(statement) = insert::parse_insert(piece, encoding)? {
-            return Ok(statement);
-        }
-        if let Some(statement) = ddl::parse_ddl(piece, encoding)? {
-            return Ok(statement);
-        }
+    if piece.kind == PieceKind::Sql
+        && let Some(statement) = insert::parse_insert(piece, encoding)?
+    {
+        return Ok(statement);
     }
     let words: Vec<String> = leading_words(&piece.text, 6)
         .into_iter()
@@ -82,8 +92,18 @@ mod tests {
         }
     }
 
+    /// What the schema pass makes of a piece, or else the rows pass; exactly one of them takes it.
+    fn read(piece: &Piece) -> Result<Statement, ParseError> {
+        let schema = parse(piece, Encoding::Utf8, Pass::Schema)?;
+        let rows = parse(piece, Encoding::Utf8, Pass::Rows)?;
+        match (schema, rows) {
+            (Some(s), None) | (None, Some(s)) => Ok(s),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn sql(text: &str) -> Statement {
-        parse(&piece(PieceKind::Sql, text), Encoding::Utf8).unwrap()
+        read(&piece(PieceKind::Sql, text)).unwrap()
     }
 
     #[test]
@@ -108,7 +128,7 @@ mod tests {
 
     #[test]
     fn the_rest_is_skipped_by_whether_it_changes_data() {
-        let skip = |kind, text| match parse(&piece(kind, text), Encoding::Utf8).unwrap() {
+        let skip = |kind, text| match read(&piece(kind, text)).unwrap() {
             Statement::Skipped(skip) => skip,
             other => panic!("{other:?}"),
         };
@@ -166,15 +186,9 @@ mod tests {
 
     #[test]
     fn errors_come_from_the_parser_the_statement_belongs_to() {
-        let insert = parse(
-            &piece(PieceKind::Sql, "INSERT INTO T VALUES (1"),
-            Encoding::Utf8,
-        );
+        let insert = read(&piece(PieceKind::Sql, "INSERT INTO T VALUES (1"));
         assert!(insert.unwrap_err().message.contains("value list"));
-        let ddl = parse(
-            &piece(PieceKind::Sql, "CREATE TABLE T (A NUMBER"),
-            Encoding::Utf8,
-        );
+        let ddl = read(&piece(PieceKind::Sql, "CREATE TABLE T (A NUMBER"));
         assert!(ddl.is_err());
     }
 
@@ -187,7 +201,7 @@ mod tests {
                 text.as_bytes(),
                 crate::dialect::Runner::SqlPlus,
             )
-            .map(|p| parse(&p.unwrap(), Encoding::Utf8))
+            .map(|p| read(&p.unwrap()))
             .collect()
         };
         let pieces = read("INSERT INTO T VALUES (1);\n/\n");

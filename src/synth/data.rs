@@ -512,6 +512,7 @@ impl<'o> Writer<'o> {
                 key,
                 first: plant.first,
                 count: None,
+                assumed: false,
             });
         }
         Ok(Some(at))
@@ -594,6 +595,7 @@ impl<'o> Writer<'o> {
                 key: Vec::new(),
                 first: None,
                 count: Some(count),
+                assumed: false,
             });
         }
         let files = self.out.finish()?;

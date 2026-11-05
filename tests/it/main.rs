@@ -1,3 +1,4 @@
+mod check;
 mod cli;
 mod inputs;
 mod insert;

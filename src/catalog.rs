@@ -54,6 +54,9 @@ pub struct Constraint {
     pub kind: Kind,
     pub state: ConstraintState,
     pub declared: Origin,
+    /// Where it last became enabled: its declaration, or the `ENABLE` that turned it on. Rows before it are judged
+    /// only when the constraint validates the rows already there.
+    pub enabled_at: Origin,
 }
 
 /// A constraint, with columns as positions in the table's column list.
@@ -64,7 +67,7 @@ pub enum Kind {
     },
     Unique {
         columns: Vec<usize>,
-        /// Declared by `CREATE UNIQUE INDEX`, so its name is the index's.
+        /// Written by `CREATE UNIQUE INDEX`, so its name is the index's.
         index: bool,
     },
     ForeignKey {
@@ -260,8 +263,25 @@ impl CatalogBuilder {
 /// A table's constraints and unique indexes as written, columns still by name, until every table is known.
 #[derive(Default)]
 struct Draft {
-    constraints: Vec<(ConstraintDef, Origin)>,
+    constraints: Vec<Written>,
     indexes: Vec<(String, Vec<Ident>, Origin)>,
+}
+
+/// A constraint as written, with where it was declared and where it last became enabled.
+struct Written {
+    def: ConstraintDef,
+    declared: Origin,
+    enabled_at: Origin,
+}
+
+impl Written {
+    fn new(def: ConstraintDef, origin: Origin) -> Self {
+        Self {
+            def,
+            declared: origin,
+            enabled_at: origin,
+        }
+    }
 }
 
 struct Build {
@@ -336,9 +356,12 @@ fn add_columns(
             });
             continue;
         }
-        draft
-            .constraints
-            .extend(column.constraints.into_iter().map(|c| (c, origin)));
+        draft.constraints.extend(
+            column
+                .constraints
+                .into_iter()
+                .map(|c| Written::new(c, origin)),
+        );
         table.columns.push(Column {
             name: column.name.value,
             data_type: column.data_type,
@@ -468,7 +491,7 @@ impl Build {
         );
         draft
             .constraints
-            .extend(constraints.into_iter().map(|c| (c, origin)));
+            .extend(constraints.into_iter().map(|c| Written::new(c, origin)));
         self.catalog.add_table(table);
         self.drafts.push(draft);
     }
@@ -527,7 +550,7 @@ impl Build {
         for action in actions {
             match action {
                 AlterAction::AddConstraint(constraint) => {
-                    draft.constraints.push((constraint, origin));
+                    draft.constraints.push(Written::new(constraint, origin));
                 }
                 AlterAction::AddColumns(columns) => {
                     add_columns(rules, table, draft, columns, origin, issues);
@@ -536,16 +559,19 @@ impl Build {
                     for (_, constraints) in items {
                         draft
                             .constraints
-                            .extend(constraints.into_iter().map(|c| (c, origin)));
+                            .extend(constraints.into_iter().map(|c| Written::new(c, origin)));
                     }
                 }
                 AlterAction::ChangeConstraint { name, change } => {
                     let found = draft
                         .constraints
                         .iter_mut()
-                        .find(|(c, _)| c.name.as_ref().is_some_and(|n| n.value == name.value));
-                    if let Some((constraint, _)) = found {
-                        constraint.state.apply(change);
+                        .find(|d| d.def.name.as_ref().is_some_and(|n| n.value == name.value));
+                    if let Some(declared) = found {
+                        if change.enabled == Some(true) && !declared.def.state.enabled {
+                            declared.enabled_at = origin;
+                        }
+                        declared.def.state.apply(change);
                     } else {
                         issues.push(Issue {
                             origin,
@@ -600,10 +626,10 @@ impl Build {
         let drafts = std::mem::take(&mut self.drafts);
         let mut foreign = Vec::new();
         for (index, draft) in drafts.into_iter().enumerate() {
-            for (def, origin) in draft.constraints {
-                if matches!(def.kind, ConstraintKind::ForeignKey { .. }) {
-                    foreign.push((index, def, origin));
-                } else if let Some(constraint) = self.local(index, def, origin) {
+            for declared in draft.constraints {
+                if matches!(declared.def.kind, ConstraintKind::ForeignKey { .. }) {
+                    foreign.push((index, declared));
+                } else if let Some(constraint) = self.local(index, declared) {
                     self.push_constraint(index, constraint);
                 }
             }
@@ -623,13 +649,14 @@ impl Build {
                             },
                             state: ConstraintState::default(),
                             declared: origin,
+                            enabled_at: origin,
                         },
                     );
                 }
             }
         }
-        for (index, def, origin) in foreign {
-            if let Some(constraint) = self.foreign_key(index, def, origin) {
+        for (index, declared) in foreign {
+            if let Some(constraint) = self.foreign_key(index, declared) {
                 self.push_constraint(index, constraint);
             }
         }
@@ -641,18 +668,25 @@ impl Build {
         }
     }
 
-    /// An enabled primary key or unique constraint on the same columns already makes an index's key unique.
+    /// A primary key or unique constraint on the same columns that judges every row already makes an index's key
+    /// unique; one added with NOVALIDATE doesn't judge the rows the index did.
     fn covered_by_key(&self, index: usize, columns: &[usize]) -> bool {
         self.catalog.tables.get(index).is_some_and(|t| {
             t.constraints.iter().any(|c| {
                 c.state.enabled
+                    && c.state.validated
                     && referable(&c.kind).is_some_and(|(key, _)| same_columns(key, columns))
             })
         })
     }
 
     /// A constraint of one table, its columns resolved; `None` with an issue when one is missing.
-    fn local(&mut self, index: usize, def: ConstraintDef, origin: Origin) -> Option<Constraint> {
+    fn local(&mut self, index: usize, written: Written) -> Option<Constraint> {
+        let Written {
+            def,
+            declared: origin,
+            enabled_at,
+        } = written;
         let label = label(&def);
         let kind = match def.kind {
             ConstraintKind::PrimaryKey { columns } => Kind::PrimaryKey {
@@ -673,6 +707,7 @@ impl Build {
             kind,
             state: def.state,
             declared: origin,
+            enabled_at,
         })
     }
 
@@ -697,12 +732,12 @@ impl Build {
         columns.iter().map(|c| table.column(&c.value)).collect()
     }
 
-    fn foreign_key(
-        &mut self,
-        index: usize,
-        def: ConstraintDef,
-        origin: Origin,
-    ) -> Option<Constraint> {
+    fn foreign_key(&mut self, index: usize, written: Written) -> Option<Constraint> {
+        let Written {
+            def,
+            declared: origin,
+            enabled_at,
+        } = written;
         let label = label(&def);
         let ConstraintKind::ForeignKey {
             columns,
@@ -746,6 +781,7 @@ impl Build {
             kind,
             state: def.state,
             declared: origin,
+            enabled_at,
         })
     }
 }

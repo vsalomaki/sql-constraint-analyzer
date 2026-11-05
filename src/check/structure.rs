@@ -1,5 +1,5 @@
-//! The checks a row goes through. Structure comes first: the row's table and columns must exist and its values must
-//! fit them, or the row gets that one finding and no other check sees it.
+//! Structure comes first: the row's table and columns must exist and its values must fit them, or the row gets that
+//! one finding and no other check sees it.
 
 use crate::catalog::{Catalog, Lookup, TableId};
 use crate::finding::{Finding, FindingKind};
@@ -98,6 +98,7 @@ impl StructureError {
             key: Vec::new(),
             first: None,
             count: None,
+            assumed: false,
         }
     }
 }

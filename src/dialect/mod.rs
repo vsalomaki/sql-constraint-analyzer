@@ -19,6 +19,13 @@ pub enum DialectId {
     Oracle,
 }
 
+/// Which pass reads a script: the schema pass wants table and index DDL only, the rows pass everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    Schema,
+    Rows,
+}
+
 /// The program that runs the script; its rules decide where statements end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Runner {
@@ -68,10 +75,15 @@ impl DialectId {
         }
     }
 
-    /// What a piece of a script does, as a neutral statement.
-    pub fn parse(self, piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
+    /// What a piece of a script does for `pass`, as a neutral statement; `None` when it belongs to the other pass.
+    pub fn parse(
+        self,
+        piece: &Piece,
+        encoding: Encoding,
+        pass: Pass,
+    ) -> Result<Option<Statement>, ParseError> {
         match self {
-            Self::Oracle => oracle::parse::parse(piece, encoding),
+            Self::Oracle => oracle::parse::parse(piece, encoding, pass),
         }
     }
 
