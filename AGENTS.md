@@ -25,6 +25,8 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `cargo run -- <args>` | Runs `sqlca` |
 | `cargo run -F gen --bin sqlca-gen -- <args>` | Runs the generator; it builds only with the `gen` feature |
 | `make fixtures` | Regenerates `tests/fixtures/gen/<dialect>/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
+| `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect; see "Ground truth" below |
+| `make oracle-stop` | Removes that container |
 
 Run `make lint` and `make test` before calling a change done.
 
@@ -41,7 +43,8 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - A planted violation that exists only under some rules (`''` in a NOT NULL column, a partially NULL unique
   duplicate, a deferred FK) is planted only when the dialect's `Rules` make it one.
 - Adding a dialect means a new folder, a `DialectId` value, its `Rules` and `Render`, and its fixtures under
-  `tests/fixtures/gen/<dialect>/`.
+  `tests/fixtures/gen/<dialect>/`. Its ground-truth check goes in `scripts/<dialect>/` and
+  `src/dialect/<dialect>/check.rs`.
 
 ## Conventions
 
@@ -114,6 +117,14 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   locally and never committed; what it teaches becomes a generator option and a synthetic fixture.
 - Large generated exports (GB scale) go to `gen-out/`, which is git-ignored.
 - Prove a fix by reverting it and watching a test fail.
+
+### Ground truth
+
+`make oracle-check` (`scripts/oracle/check.sh`) runs the ignored test `oracle_agrees_with_the_manifest` against
+Oracle Free in Docker: image pinned by digest, no published port, a throwaway password. It loads generated exports
+and requires Oracle's rejections to match the manifest, by file and line where SQL\*Plus allows. Run it after any
+change to the generator's schema, plants or Oracle syntax. A failure is either a generator bug or a wrong Oracle
+rule: find out which before changing either. A new `ORA-` code the test doesn't map means SQL Oracle doesn't accept.
 
 ## CI
 
