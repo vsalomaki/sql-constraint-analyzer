@@ -45,6 +45,9 @@ pub struct OutputFile {
     pub schema: String,
     pub ddl: bool,
     pub data: bool,
+    /// SQL statements, PL/SQL blocks and script commands in the file; comments and blank lines don't count.
+    #[serde(default)]
+    pub statements: u64,
 }
 
 struct Open {
@@ -84,6 +87,7 @@ impl Out {
         schema: &str,
         role: Role,
         text: &str,
+        statements: u64,
     ) -> io::Result<Location> {
         let index = match self.by_path.get(path) {
             Some(&i) => i,
@@ -98,6 +102,7 @@ impl Out {
             Role::Ddl => file.info.ddl = true,
             Role::Data => file.info.data = true,
         }
+        file.info.statements += statements;
         let at = Location {
             file: file.info.path.clone(),
             line: file.line,
@@ -129,6 +134,7 @@ impl Out {
             schema: schema.to_owned(),
             ddl: false,
             data: false,
+            statements: 0,
         };
         self.files.push(Open {
             info,
@@ -161,13 +167,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Out::new(dir.path(), Encoding::Utf8);
         assert_eq!(
-            out.write("a/x.sql", "APP", Role::Ddl, "one\r\ntwo\n")
+            out.write("a/x.sql", "APP", Role::Ddl, "one\r\ntwo\n", 2)
                 .unwrap()
                 .line,
             1
         );
         assert_eq!(
-            out.write("a/x.sql", "APP", Role::Data, "'multi\nline';\n")
+            out.write("a/x.sql", "APP", Role::Data, "'multi\nline';\n", 1)
                 .unwrap()
                 .line,
             3
@@ -181,9 +187,9 @@ mod tests {
     fn windows_1252_output_refuses_characters_it_cannot_encode() {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Out::new(dir.path(), Encoding::Windows1252);
-        out.write("x.sql", "APP", Role::Data, "Mäkinen €\n")
+        out.write("x.sql", "APP", Role::Data, "Mäkinen €\n", 0)
             .unwrap();
-        assert!(out.write("x.sql", "APP", Role::Data, "Ā\n").is_err());
+        assert!(out.write("x.sql", "APP", Role::Data, "Ā\n", 0).is_err());
         out.finish().unwrap();
         assert_eq!(
             fs::read(dir.path().join("x.sql")).unwrap(),

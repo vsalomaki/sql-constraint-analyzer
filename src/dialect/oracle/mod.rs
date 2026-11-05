@@ -3,6 +3,8 @@
 #[cfg(test)]
 #[cfg(feature = "gen")]
 mod check;
+pub mod lex;
+pub mod split;
 #[cfg(feature = "gen")]
 pub(crate) mod synth;
 

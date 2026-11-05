@@ -3,5 +3,6 @@
 
 pub mod dialect;
 pub mod finding;
+pub mod source;
 #[cfg(feature = "gen")]
 pub mod synth;

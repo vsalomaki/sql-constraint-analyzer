@@ -35,13 +35,15 @@
       "path": "ref/export.sql",
       "schema": "REF",
       "ddl": true,
-      "data": true
+      "data": true,
+      "statements": 8
     },
     {
       "path": "app/export.sql",
       "schema": "APP",
       "ddl": true,
-      "data": true
+      "data": true,
+      "statements": 150
     }
   ],
   "findings": [

@@ -16,6 +16,13 @@ pub(crate) struct DdlStyle<'a> {
     pub(crate) keys_in_table: bool,
 }
 
+/// Text a dialect wrote, and how many statements (SQL, PL/SQL blocks and script commands) are in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sql {
+    pub(crate) text: String,
+    pub(crate) statements: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DdlItem {
     CreateTable(TableId),
@@ -58,10 +65,10 @@ pub(crate) trait Render {
     fn rules(&self) -> &'static Rules;
     /// Noise switches the dialect has no syntax for.
     fn unsupported_noise(&self) -> Vec<&'static str>;
-    fn ddl(&self, item: DdlItem, style: &DdlStyle<'_>) -> String;
+    fn ddl(&self, item: DdlItem, style: &DdlStyle<'_>) -> Sql;
     fn literal(&self, value: &Value, rng: &mut Rng) -> String;
     /// What goes before and after one table's rows.
-    fn data_section(&self, table: TableId, edge: Edge, eol: &str) -> String;
+    fn data_section(&self, table: TableId, edge: Edge, eol: &str) -> Sql;
     fn insert(&self, insert: &Insert<'_>) -> String;
     fn batch(&self, part: Batch<'_>, eol: &str) -> String;
     /// A script that runs the files in order, with paths relative to it.
