@@ -31,3 +31,40 @@ pub struct Piece {
     /// The piece's bytes without its terminator, as stored (not decoded).
     pub text: Vec<u8>,
 }
+
+/// How a file's bytes encode text. Both are ASCII-compatible, which the splitters rely on: UTF-16 is refused before
+/// a file is split.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    clap::ValueEnum,
+)]
+pub enum Encoding {
+    #[default]
+    #[value(name = "utf-8")]
+    #[serde(rename = "utf-8")]
+    Utf8,
+    #[value(name = "windows-1252")]
+    #[serde(rename = "windows-1252")]
+    Windows1252,
+}
+
+impl Encoding {
+    /// The text of `bytes`; a byte sequence that isn't valid becomes U+FFFD.
+    pub fn decode(self, bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Utf8 => String::from_utf8_lossy(bytes),
+            Self::Windows1252 => {
+                encoding_rs::WINDOWS_1252
+                    .decode_without_bom_handling(bytes)
+                    .0
+            }
+        }
+    }
+}
