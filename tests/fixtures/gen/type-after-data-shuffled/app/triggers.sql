@@ -1,0 +1,12 @@
+--------------------------------------------------------
+--  DDL for Trigger AUDITLOG_BI
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE TRIGGER "APP"."AUDITLOG_BI" 
+  BEFORE INSERT ON "APP"."AuditLog" FOR EACH ROW
+BEGIN
+  NULL;
+END;
+/
+ALTER TRIGGER "APP"."AUDITLOG_BI" ENABLE;
+

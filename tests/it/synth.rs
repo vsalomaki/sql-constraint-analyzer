@@ -1,0 +1,401 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use sqlca::finding::{Finding, FindingKind};
+use sqlca::synth::{self, Encoding, Layout, LineEnding, Manifest, Noise, Options, Placement};
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed generation fails the test that called it"
+)]
+fn generate(options: &Options) -> (tempfile::TempDir, Manifest) {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("export");
+    let manifest = synth::generate(options, &out).unwrap();
+    (dir, manifest)
+}
+
+fn root(dir: &tempfile::TempDir) -> PathBuf {
+    dir.path().join("export")
+}
+
+fn small() -> Options {
+    Options {
+        rows: synth::MIN_ROWS,
+        ..Options::default()
+    }
+}
+
+/// Every file under `dir`, by relative path.
+#[expect(
+    clippy::unwrap_used,
+    reason = "an unreadable test folder fails the test that called it"
+)]
+fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.insert(rel, fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+fn constraints(findings: &[Finding], kind: FindingKind) -> BTreeSet<String> {
+    findings
+        .iter()
+        .filter(|f| f.kind == kind)
+        .filter_map(|f| f.constraint.clone())
+        .collect()
+}
+
+#[test]
+fn the_same_seed_and_options_give_the_same_bytes() {
+    let options = Options {
+        noise: Noise::all(),
+        shuffle_order: true,
+        ..small()
+    };
+    let (a, _) = generate(&options);
+    let (b, _) = generate(&options);
+    assert_eq!(tree(&root(&a)), tree(&root(&b)));
+    let (c, _) = generate(&Options { seed: 2, ..options });
+    assert_ne!(tree(&root(&a)), tree(&root(&c)));
+}
+
+#[test]
+fn every_finding_points_at_the_row_it_is_about() {
+    for layout in [Layout::Single, Layout::Separate, Layout::Type] {
+        let (dir, manifest) = generate(&Options {
+            layout,
+            noise: Noise::all(),
+            ..small()
+        });
+        let locations = manifest.findings.iter().flat_map(|f| {
+            let at = f.file.clone().zip(f.line);
+            let first = f.first.as_ref().map(|l| (l.file.clone(), l.line));
+            at.into_iter().chain(first)
+        });
+        for (file, line) in locations {
+            let text = fs::read_to_string(root(&dir).join(&file)).unwrap();
+            let row = text
+                .lines()
+                .nth(usize::try_from(line - 1).unwrap())
+                .unwrap()
+                .trim_start()
+                .to_ascii_lowercase();
+            assert!(
+                row.starts_with("insert into ") || row.starts_with("into "),
+                "{layout:?} {file}:{line}: {row}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wrapped_statements_spread_one_insert_over_several_lines() {
+    let noise = Noise {
+        wrapped_statements: true,
+        ..Noise::sqldev()
+    };
+    let (dir, _) = generate(&Options { noise, ..small() });
+    let text = fs::read_to_string(root(&dir).join("app/data/EMPLOYEES.sql")).unwrap();
+    let continuation_lines = text.lines().filter(|l| l.starts_with("    ")).count();
+    assert!(continuation_lines > 10, "{text}");
+}
+
+#[test]
+fn every_kind_of_plant_appears_at_the_smallest_size() {
+    let (_dir, manifest) = generate(&Options {
+        noise: Noise::all(),
+        ..small()
+    });
+    let kinds: BTreeSet<FindingKind> = manifest.findings.iter().map(|f| f.kind).collect();
+    for kind in [
+        FindingKind::FkMissingParent,
+        FindingKind::FkLoadOrder,
+        FindingKind::DuplicateKey,
+        FindingKind::NotNull,
+        FindingKind::UnknownTable,
+        FindingKind::UnknownColumn,
+        FindingKind::ValueCountMismatch,
+    ] {
+        assert!(kinds.contains(&kind), "{kind:?} missing");
+    }
+    assert_eq!(
+        constraints(&manifest.findings, FindingKind::FkMissingParent),
+        [
+            "APP.ASSIGNMENTS_EMP_FK",
+            "APP.ASSIGNMENTS_PROJECT_FK",
+            "APP.AUDITLOG_EMP_FK",
+            "APP.DEPARTMENTS_COUNTRY_FK",
+            "APP.DEPARTMENTS_MANAGER_FK",
+            "APP.EMPLOYEES_DEPT_FK",
+            "APP.EMPLOYEES_MANAGER_FK",
+            "APP.PROJECTS_DEPT_FK",
+            "APP.TIMESHEETS_ASSIGNMENT_FK",
+        ]
+        .map(String::from)
+        .into(),
+    );
+    assert_eq!(
+        constraints(&manifest.findings, FindingKind::DuplicateKey),
+        [
+            "APP.ASSIGNMENTS_PK",
+            "APP.ASSIGNMENTS_ROLE_UK",
+            "APP.DEPARTMENTS_NAME_UK",
+            "APP.DEPARTMENTS_PK",
+            "APP.EMPLOYEES_EMAIL_UIX",
+            "APP.EMPLOYEES_PK",
+            "APP.PROJECTS_EXTREF_UK",
+            "APP.PROJECTS_PK",
+            "APP.TIMESHEETS_PK",
+        ]
+        .map(String::from)
+        .into(),
+    );
+    assert!(
+        manifest.findings.iter().any(|f| f.constraint.as_deref()
+            == Some("APP.ASSIGNMENTS_ROLE_UK")
+            && f.key.get(1) == Some(&None)),
+        "the partially NULL unique key duplicate"
+    );
+    assert!(
+        manifest
+            .findings
+            .iter()
+            .all(|f| f.constraint.as_deref() != Some("APP.LEGACY_NOTES_EMP_FK")),
+        "the disabled foreign key is never reported"
+    );
+}
+
+#[test]
+fn constraints_after_the_data_give_no_load_order_findings_and_skip_novalidate() {
+    let options = Options {
+        constraints: Placement::AfterData,
+        shuffle_order: true,
+        ..small()
+    };
+    let (_dir, manifest) = generate(&options);
+    assert!(
+        manifest
+            .findings
+            .iter()
+            .all(|f| f.kind != FindingKind::FkLoadOrder)
+    );
+    assert!(
+        manifest
+            .findings
+            .iter()
+            .all(|f| f.constraint.as_deref() != Some("APP.PROJECTS_DEPT_FK"))
+    );
+    assert!(!constraints(&manifest.findings, FindingKind::FkMissingParent).is_empty());
+}
+
+#[test]
+fn shuffled_data_reports_children_loaded_before_their_parents() {
+    let before = generate(&small()).1;
+    let shuffled = generate(&Options {
+        shuffle_order: true,
+        ..small()
+    })
+    .1;
+    let count = |m: &Manifest| {
+        m.findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::FkLoadOrder)
+            .count()
+    };
+    assert!(
+        count(&shuffled) > count(&before),
+        "{} vs {}",
+        count(&shuffled),
+        count(&before)
+    );
+    assert!(
+        shuffled
+            .findings
+            .iter()
+            .all(|f| f.kind != FindingKind::FkLoadOrder
+                || f.constraint.as_deref() != Some("APP.DEPARTMENTS_MANAGER_FK")),
+        "the deferred foreign key has no load order"
+    );
+}
+
+#[test]
+fn omitted_data_becomes_one_summary_finding_per_foreign_key() {
+    let (dir, manifest) = generate(&Options {
+        omit_data: vec!["APP.PROJECTS".into()],
+        ..small()
+    });
+    assert!(!root(&dir).join("app/data/PROJECTS.sql").exists());
+    let empty: Vec<&Finding> = manifest
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::ParentTableEmpty)
+        .collect();
+    assert_eq!(empty.len(), 1, "{empty:?}");
+    let summary = empty.first().unwrap();
+    assert_eq!(
+        summary.constraint.as_deref(),
+        Some("APP.ASSIGNMENTS_PROJECT_FK")
+    );
+    assert!(summary.count.unwrap() >= 2 * synth::MIN_ROWS);
+    assert!(manifest.findings.iter().all(|f| f.table != "APP.PROJECTS"));
+    assert!(manifest.findings.iter().all(|f| f.constraint.as_deref()
+        != Some("APP.ASSIGNMENTS_PROJECT_FK")
+        || f.kind == FindingKind::ParentTableEmpty));
+}
+
+#[test]
+fn the_deferred_foreign_key_can_be_left_without_violations() {
+    let (_dir, manifest) = generate(&Options {
+        deferred_violations: false,
+        ..small()
+    });
+    assert!(
+        manifest
+            .findings
+            .iter()
+            .all(|f| f.constraint.as_deref() != Some("APP.DEPARTMENTS_MANAGER_FK"))
+    );
+}
+
+#[test]
+fn crlf_changes_only_the_structural_line_breaks() {
+    let noise = Noise {
+        multiline_strings: true,
+        ..Noise::sqldev()
+    };
+    let (dir, manifest) = generate(&Options {
+        line_ending: LineEnding::Crlf,
+        noise,
+        ..small()
+    });
+    for file in &manifest.files {
+        let bytes = fs::read(root(&dir).join(&file.path)).unwrap();
+        let starts_bare = usize::from(bytes.first() == Some(&b'\n'));
+        let bare = starts_bare
+            + bytes
+                .windows(2)
+                .filter(|w| matches!(w, [first, b'\n'] if *first != b'\r'))
+                .count();
+        let expected = if file.path.ends_with("data/LEGACY_NOTES.sql") {
+            3
+        } else {
+            0
+        };
+        assert_eq!(bare, expected, "{}", file.path);
+    }
+}
+
+#[test]
+fn windows_1252_output_is_not_utf8_but_decodes() {
+    let (dir, _) = generate(&Options {
+        encoding: Encoding::Windows1252,
+        ..small()
+    });
+    let bytes = fs::read(root(&dir).join("app/data/EMPLOYEES.sql")).unwrap();
+    assert!(std::str::from_utf8(&bytes).is_err());
+    let (text, _, unmappable) = encoding_rs::WINDOWS_1252.decode(&bytes);
+    assert!(!unmappable);
+    assert!(text.contains("Mäkinen"));
+}
+
+#[test]
+fn layouts_write_the_files_sql_developer_would() {
+    let paths = |layout| {
+        generate(&Options { layout, ..small() })
+            .1
+            .files
+            .into_iter()
+            .map(|f| f.path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(Layout::Single), ["ref/export.sql", "app/export.sql"]);
+    assert_eq!(
+        paths(Layout::Type),
+        [
+            "ref/tables.sql",
+            "ref/data.sql",
+            "app/tables.sql",
+            "app/ref_constraints.sql",
+            "app/data.sql"
+        ]
+    );
+    let separate = paths(Layout::Separate);
+    assert_eq!(
+        separate.first().map(String::as_str),
+        Some("ref/tables/COUNTRIES.sql")
+    );
+    assert!(separate.iter().any(|p| p == "app/data/AuditLog.sql"));
+}
+
+#[test]
+fn load_script_and_order_list_follow_the_load_order() {
+    let (dir, manifest) = generate(&small());
+    let order = fs::read_to_string(root(&dir).join(synth::ORDER_FILE)).unwrap();
+    let paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(order.lines().collect::<Vec<_>>(), paths);
+    let load = fs::read_to_string(root(&dir).join(synth::LOAD_SCRIPT)).unwrap();
+    assert_eq!(load.lines().next(), Some("SET DEFINE OFF"));
+    assert_eq!(
+        load.lines()
+            .skip(1)
+            .map(|l| l.trim_start_matches("@@"))
+            .collect::<Vec<_>>(),
+        paths
+    );
+}
+
+#[test]
+fn output_into_a_non_empty_folder_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("keep.txt"), "x").unwrap();
+    assert!(matches!(
+        synth::generate(&small(), dir.path()),
+        Err(synth::Error::OutputNotEmpty(_))
+    ));
+    assert!(matches!(
+        synth::generate(&Options { rows: 3, ..small() }, &dir.path().join("new")),
+        Err(synth::Error::TooFewRows(3))
+    ));
+}
+
+/// The committed fixtures are what the generator writes today; `make fixtures` refreshes them on purpose.
+#[test]
+fn committed_fixtures_regenerate_byte_for_byte() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gen");
+    let mut checked = 0;
+    for entry in fs::read_dir(&fixtures).unwrap() {
+        let committed = entry.unwrap().path();
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(committed.join(synth::MANIFEST_FILE)).unwrap())
+                .unwrap();
+        let (dir, _) = generate(&manifest.options);
+        assert_eq!(
+            tree(&root(&dir)),
+            tree(&committed),
+            "{} differs; run `make fixtures`",
+            committed.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 3,
+        "fixtures missing under {}",
+        fixtures.display()
+    );
+}

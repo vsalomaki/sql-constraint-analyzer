@@ -1,0 +1,410 @@
+{
+  "generator": "sqlca-gen 0.1.0",
+  "options": {
+    "seed": 1,
+    "rows": 20,
+    "layout": "single",
+    "constraints": "before-data",
+    "shuffle-order": false,
+    "violations-ppm": 1000,
+    "deferred-violations": true,
+    "noise": {
+      "rem-header": true,
+      "set-define-off": true,
+      "comments": true,
+      "storage-clauses": true,
+      "plsql-trigger": true,
+      "quoted-numbers": true,
+      "numeric-forms": true,
+      "multiline-strings": true,
+      "q-quote": true,
+      "embedded-delimiters": true,
+      "nextval": true,
+      "insert-all": true,
+      "mixed-case": true,
+      "no-column-list": true,
+      "wrapped-statements": true
+    },
+    "line-ending": "crlf",
+    "encoding": "windows-1252",
+    "omit-data": []
+  },
+  "files": [
+    {
+      "path": "ref/export.sql",
+      "schema": "REF",
+      "ddl": true,
+      "data": true
+    },
+    {
+      "path": "app/export.sql",
+      "schema": "APP",
+      "ddl": true,
+      "data": true
+    }
+  ],
+  "findings": [
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_COUNTRY_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "COUNTRY_CODE"
+      ],
+      "file": "app/export.sql",
+      "line": 264,
+      "key": [
+        "XX"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_NAME_UK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "NAME"
+      ],
+      "file": "app/export.sql",
+      "line": 275,
+      "key": [
+        "Myynti & markkinointi 1"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 266
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 279,
+      "key": [
+        "30"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 277
+      }
+    },
+    {
+      "kind": "not_null",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 290
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_MANAGER_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 301,
+      "key": [
+        "-5"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 327,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 332,
+      "key": [
+        "-2"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_PK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 373,
+      "key": [
+        "1005"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 354
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/export.sql",
+      "line": 393,
+      "key": [
+        "user7@example.com"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 391
+      }
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/export.sql",
+      "line": 413
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/export.sql",
+      "line": 440
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 456,
+      "key": [
+        "1011"
+      ]
+    },
+    {
+      "kind": "unknown_column",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL_ADDR"
+      ],
+      "file": "app/export.sql",
+      "line": 493
+    },
+    {
+      "kind": "value_count_mismatch",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/export.sql",
+      "line": 534
+    },
+    {
+      "kind": "unknown_table",
+      "table": "APP.EMPLOYEES_ARCHIVE",
+      "columns": [],
+      "file": "app/export.sql",
+      "line": 553
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 583,
+      "key": [
+        "1019"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/export.sql",
+      "line": 610,
+      "key": [
+        "Lakkautettu 1"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_PK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/export.sql",
+      "line": 621,
+      "key": [
+        "P00002"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 619
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_EXTREF_UK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "EXTERNAL_REF"
+      ],
+      "file": "app/export.sql",
+      "line": 634,
+      "key": [
+        "EXT-3"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 623
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_ROLE_UK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "ROLE"
+      ],
+      "file": "app/export.sql",
+      "line": 693,
+      "key": [
+        "1004",
+        null
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 691
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_PK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/export.sql",
+      "line": 741,
+      "key": [
+        "1008",
+        "P00003"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 729
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 798,
+      "key": [
+        "-3"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/export.sql",
+      "line": 841,
+      "key": [
+        "NOPE4"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.TIMESHEETS_ASSIGNMENT_FK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/export.sql",
+      "line": 1056,
+      "key": [
+        "1005",
+        "P00003"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "HOURS"
+      ],
+      "file": "app/export.sql",
+      "line": 1224
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.TIMESHEETS_PK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "TS_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 1387,
+      "key": [
+        "80"
+      ],
+      "first": {
+        "file": "app/export.sql",
+        "line": 1376
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.AUDITLOG_EMP_FK",
+      "table": "APP.\"AuditLog\"",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/export.sql",
+      "line": 1526,
+      "key": [
+        "-1"
+      ]
+    }
+  ]
+}
