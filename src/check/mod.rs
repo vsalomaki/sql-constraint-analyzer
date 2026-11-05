@@ -90,25 +90,65 @@ pub struct SchemaCounts {
     pub deferred: usize,
 }
 
+/// What a run tells its observer as it goes, for a progress display. Every method does nothing by default.
+pub trait Observer {
+    /// A pass starts over `files` files of `bytes` bytes in all.
+    fn pass(&mut self, _pass: Pass, _files: usize, _bytes: u64) {}
+    /// The current pass starts reading the file at `index` in the run.
+    fn file(&mut self, _index: usize, _name: &str, _bytes: u64) {}
+    /// The current file has been read up to `offset`.
+    fn advance(&mut self, _offset: u64) {}
+    /// The schema pass built the catalog.
+    fn schema(&mut self, _catalog: &Catalog) {}
+    /// Every row is in; the foreign keys left pending are being resolved.
+    fn resolve(&mut self) {}
+}
+
+/// An observer that ignores everything.
+struct Quiet;
+
+impl Observer for Quiet {}
+
 /// Checks `files`, in the order given. Only a file that can't be opened stops the run; everything else ends up in the
 /// report.
 pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError> {
+    run_with(files, options, &mut Quiet)
+}
+
+/// `run`, telling `observer` how it goes.
+pub fn run_with(
+    files: &[InputFile],
+    options: &Options,
+    observer: &mut dyn Observer,
+) -> Result<Report, InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
+    let reading = Reading {
+        names: &names,
+        options,
+    };
     let mut report = Report::default();
     let schema_given = files.iter().any(|f| f.role == Role::Schema);
+    let in_schema_pass = |f: &InputFile| !(schema_given && f.role == Role::Data);
+    let in_rows_pass = |f: &InputFile| f.role != Role::Schema;
+    let total = |pass: &dyn Fn(&InputFile) -> bool| {
+        let read: Vec<&InputFile> = files.iter().filter(|f| pass(f)).collect();
+        (read.len(), read.iter().map(|f| f.bytes).sum::<u64>())
+    };
 
     let mut builder = CatalogBuilder::new(options.dialect.rules(), options.default_schema.clone());
+    let (count, bytes) = total(&in_schema_pass);
+    observer.pass(Pass::Schema, count, bytes);
     for (index, file) in files.iter().enumerate() {
-        if schema_given && file.role == Role::Data {
+        if !in_schema_pass(file) {
             continue;
         }
         read(
+            &reading,
             file,
             index,
-            &names,
             Pass::Schema,
-            options,
             &mut report,
+            observer,
             |statement, origin| {
                 builder.add(statement, origin);
             },
@@ -116,6 +156,7 @@ pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError>
     }
     let (catalog, issues) = builder.finish();
     report.schema = schema_counts(&catalog);
+    observer.schema(&catalog);
     report.catalog = issues
         .into_iter()
         .map(|Issue { origin, message }| problem(&names, origin.file, Some(origin.line), message))
@@ -125,18 +166,20 @@ pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError>
     let mut not_followed = Vec::new();
     let mut unused = 0;
     let mut count = 0;
+    let (files_read, bytes) = total(&in_rows_pass);
+    observer.pass(Pass::Rows, files_read, bytes);
     for (index, file) in files.iter().enumerate() {
-        if file.role == Role::Schema {
+        if !in_rows_pass(file) {
             continue;
         }
         let reference = file.role == Role::Reference;
         read(
+            &reading,
             file,
             index,
-            &names,
             Pass::Rows,
-            options,
             &mut report,
+            observer,
             |statement, origin| match statement {
                 Statement::Insert(inserted) => {
                     let file = names.get(index).cloned().unwrap_or_default();
@@ -165,7 +208,19 @@ pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError>
             },
         )?;
     }
+    observer.resolve();
     let (mut findings, warnings) = checker.finish();
+    sort_by_place(&mut findings, &names);
+    report.findings = findings;
+    report.warnings = warnings;
+    report.not_followed = not_followed;
+    report.unused = unused;
+    report.rows = count;
+    Ok(report)
+}
+
+/// By the file's position in the run, then line; findings without a place last.
+fn sort_by_place(findings: &mut [Finding], names: &[String]) {
     let position = |file: &Option<String>| {
         file.as_ref()
             .and_then(|f| names.iter().position(|n| n == f))
@@ -177,12 +232,6 @@ pub fn run(files: &[InputFile], options: &Options) -> Result<Report, InputError>
             b,
         ))
     });
-    report.findings = findings;
-    report.warnings = warnings;
-    report.not_followed = not_followed;
-    report.unused = unused;
-    report.rows = count;
-    Ok(report)
 }
 
 fn schema_counts(catalog: &Catalog) -> SchemaCounts {
@@ -226,23 +275,39 @@ fn problem(names: &[String], file: usize, line: Option<u64>, message: String) ->
     }
 }
 
+/// What every file read shares.
+#[derive(Clone, Copy)]
+struct Reading<'a> {
+    names: &'a [String],
+    options: &'a Options,
+}
+
 /// Reads one file's statements for `pass`, handing each to `take` with where it starts.
 fn read(
+    reading: &Reading,
     file: &InputFile,
     index: usize,
-    names: &[String],
     pass: Pass,
-    options: &Options,
     report: &mut Report,
+    observer: &mut dyn Observer,
     mut take: impl FnMut(Statement, Origin),
 ) -> Result<(), InputError> {
+    let Reading { names, options } = *reading;
     let opened = input::open(&file.path)?;
+    observer.file(
+        index,
+        names.get(index).map_or("", String::as_str),
+        file.bytes,
+    );
     for piece in options
         .dialect
         .pieces(opened.reader, options.runner, opened.base_offset)
     {
         let piece: Piece = match piece {
-            Ok(piece) => piece,
+            Ok(piece) => {
+                observer.advance(piece.span.end);
+                piece
+            }
             Err(error) => {
                 // Both passes read the file; the last one to read it reports it.
                 if pass == Pass::Rows || file.role == Role::Schema {

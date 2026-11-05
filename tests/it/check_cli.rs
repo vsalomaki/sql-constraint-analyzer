@@ -55,8 +55,36 @@ fn check_export(root: &Path, encoding: &str, args: &[&str]) -> (i32, String, Str
     (
         output.status.code().unwrap(),
         text(output.stdout),
-        text(output.stderr),
+        untimed(&text(output.stderr)),
     )
+}
+
+/// `stderr` with its timings and rates as `T`, so it compares from run to run.
+fn untimed(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(|line| {
+            let words: Vec<&str> = line.split(' ').collect();
+            let timed = |i: usize| {
+                words.get(i).is_some_and(|w| w.parse::<f64>().is_ok())
+                    && words
+                        .get(i + 1)
+                        .is_some_and(|u| *u == "s" || u.ends_with("B/s"))
+            };
+            let mut out = Vec::with_capacity(words.len());
+            let mut i = 0;
+            while let Some(word) = words.get(i) {
+                if timed(i) {
+                    out.push("T");
+                    i += 2;
+                } else {
+                    out.push(word);
+                    i += 1;
+                }
+            }
+            out.join(" ") + "\n"
+        })
+        .collect()
 }
 
 #[expect(clippy::unwrap_used, reason = "a malformed manifest fails the test")]
@@ -146,12 +174,15 @@ fn the_cap_hides_findings_but_not_their_count() {
         "{stdout}"
     );
     assert!(
-        stderr.contains(
-            "note: 1 more findings for NULL in NOT NULL in APP.EMPLOYEES (EMAIL) not shown"
-        ),
+        stderr.contains("note: 2 more findings not shown, past the cap in 2 constraints"),
         "{stderr}"
     );
     assert!(stderr.contains("Result     25 findings"), "{stderr}");
+    let (_, _, stderr) = check_export(&root, "utf-8", &["--max-per-constraint", "1", "-v"]);
+    assert!(
+        stderr.contains("\n  1 of NULL in NOT NULL in APP.EMPLOYEES (EMAIL)\n"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -205,4 +236,32 @@ fn unnamed_constraints_of_one_table_are_capped_apart() {
         stdout.contains("t.sql:4: duplicate key of T: V='10'"),
         "{stdout}"
     );
+}
+
+#[test]
+fn progress_lines_and_the_catalog_listing() {
+    let root = fixture("gen/oracle/separate-sqldev");
+    let (_, _, plain) = check_export(&root, "utf-8", &[]);
+    assert!(
+        plain.contains("[2/3] app/data/EMPLOYEES.sql  8.2 kB  T\n"),
+        "{plain}"
+    );
+    let (_, _, never) = check_export(&root, "utf-8", &["--progress", "never"]);
+    assert!(!never.contains("[2/3] app/"), "{never}");
+    assert!(
+        never.contains("[2/3] Rows      23 files, 40.9 kB · 215 rows · T · T\n"),
+        "{never}"
+    );
+    assert!(!never.contains("primary key"), "{never}");
+    let (_, _, verbose) = check_export(&root, "utf-8", &["--progress", "never", "-v"]);
+    for line in [
+        "  APP.EMPLOYEES  10 columns\n",
+        "    EMPLOYEES_PK  primary key (EMP_ID)\n",
+        "    EMPLOYEES_EMAIL_UIX  unique index (EMAIL)\n",
+        "    PROJECTS_DEPT_FK  foreign key (DEPT_NAME) → APP.DEPARTMENTS (NAME), not validated\n",
+        "    LEGACY_NOTES_EMP_FK  foreign key (EMP_ID) → APP.EMPLOYEES (EMP_ID), disabled\n",
+        "    DEPARTMENTS_MANAGER_FK  foreign key (MANAGER_ID) → APP.EMPLOYEES (EMP_ID), deferred\n",
+    ] {
+        assert!(verbose.contains(line), "{line:?} in {verbose}");
+    }
 }

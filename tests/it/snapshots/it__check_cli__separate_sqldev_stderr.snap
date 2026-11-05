@@ -3,7 +3,31 @@ source: tests/it/check_cli.rs
 expression: stderr
 ---
 sqlca VERSION · check · end-state mode
-Inputs     23 files, 40854 bytes: 0 schema, 21 data, 2 reference
-Schema     8 tables · 23 keys (1 disabled, 1 deferred)
-Data       215 rows
+Inputs     23 files, 40.9 kB: 0 schema, 21 data, 2 reference
+[2/3] ref/data/COUNTRIES.sql  767 B  T
+[2/3] ref/tables/COUNTRIES.sql  511 B  T
+[2/3] app/tables/DEPARTMENTS.sql  871 B  T
+[2/3] app/tables/EMPLOYEES.sql  1.2 kB  T
+[2/3] app/tables/PROJECTS.sql  880 B  T
+[2/3] app/tables/ASSIGNMENTS.sql  824 B  T
+[2/3] app/tables/TIMESHEETS.sql  980 B  T
+[2/3] app/tables/LEGACY_NOTES.sql  589 B  T
+[2/3] app/tables/AuditLog.sql  676 B  T
+[2/3] app/ref_constraints/DEPARTMENTS.sql  343 B  T
+[2/3] app/ref_constraints/EMPLOYEES.sql  282 B  T
+[2/3] app/ref_constraints/PROJECTS.sql  154 B  T
+[2/3] app/ref_constraints/ASSIGNMENTS.sql  276 B  T
+[2/3] app/ref_constraints/TIMESHEETS.sql  182 B  T
+[2/3] app/ref_constraints/LEGACY_NOTES.sql  137 B  T
+[2/3] app/ref_constraints/AuditLog.sql  128 B  T
+[2/3] app/data/DEPARTMENTS.sql  1.1 kB  T
+[2/3] app/data/EMPLOYEES.sql  8.2 kB  T
+[2/3] app/data/PROJECTS.sql  1.3 kB  T
+[2/3] app/data/ASSIGNMENTS.sql  5.7 kB  T
+[2/3] app/data/TIMESHEETS.sql  14.8 kB  T
+[2/3] app/data/LEGACY_NOTES.sql  332 B  T
+[2/3] app/data/AuditLog.sql  714 B  T
+[1/3] Schema    23 files, 40.9 kB · 8 tables · 23 keys (1 disabled, 1 deferred) · T
+[2/3] Rows      23 files, 40.9 kB · 215 rows · T · T
+[3/3] Resolve   T
 Result     25 findings (missing parent 9, duplicate key 9, NULL in NOT NULL 4, unknown table 1, unknown column 1, value count 1) · 0 warnings · 0 errors → exit 1
