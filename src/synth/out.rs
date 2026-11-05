@@ -9,17 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::finding::Location;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum Encoding {
-    #[default]
-    #[value(name = "utf-8")]
-    #[serde(rename = "utf-8")]
-    Utf8,
-    #[value(name = "windows-1252")]
-    #[serde(rename = "windows-1252")]
-    Windows1252,
-}
+pub use crate::source::Encoding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
