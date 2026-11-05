@@ -159,6 +159,21 @@ impl Catalog {
         display(self.rules, name)
     }
 
+    /// A name from a statement as the dialect displays it, in the default schema when it has none.
+    pub fn display_name(&self, name: &Name) -> String {
+        display(
+            self.rules,
+            &TableName {
+                schema: name
+                    .schema
+                    .as_ref()
+                    .map(|s| s.value.clone())
+                    .or_else(|| self.default_schema.clone()),
+                name: name.name.value.clone(),
+            },
+        )
+    }
+
     fn add_table(&mut self, table: Table) {
         let id = TableId(self.tables.len());
         self.by_name
