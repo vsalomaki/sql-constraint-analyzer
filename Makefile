@@ -1,4 +1,4 @@
-.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop
+.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop sqlcl-fixtures
 
 GEN = cargo run -q -F gen --bin sqlca-gen -- --dialect oracle
 FIXTURES = tests/fixtures/gen/oracle
@@ -10,6 +10,10 @@ oracle-check:
 ## Removes the Oracle Free container that oracle-check keeps between runs.
 oracle-stop:
 	scripts/oracle/check.sh --stop
+
+## Rewrites tests/fixtures/sqlcl/: a generated export loaded into Oracle Free and exported again with SQLcl.
+sqlcl-fixtures:
+	scripts/oracle/sqlcl-fixtures.sh
 
 ## Regenerates the committed generator fixtures; review the diff before committing it.
 fixtures:
