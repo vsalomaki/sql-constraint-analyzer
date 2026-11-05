@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -6,8 +6,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sqlca::check;
 use sqlca::dialect::{DialectId, Runner};
 use sqlca::input::{self, InputSpec, Resolved};
-use sqlca::report;
 use sqlca::source::Encoding;
+use sqlca::{progress, report};
 
 /// Checks Oracle SQL exports for rows that violate the declared constraints.
 ///
@@ -141,11 +141,16 @@ struct CheckArgs {
     #[arg(long, value_name = "N", default_value_t = 100)]
     max_per_constraint: u64,
 
+    /// How the run shows its progress on stderr: auto is a live line on a terminal and a line per data file
+    /// otherwise; never shows only the summary.
+    #[arg(long, value_enum, default_value_t)]
+    progress: ProgressArg,
+
     /// Show only the result line on stderr.
     #[arg(short, long, conflicts_with = "verbose")]
     quiet: bool,
 
-    /// Also list every statement the check doesn't follow.
+    /// Also list the catalog (tables, keys and their states) and every statement the check doesn't follow.
     #[arg(short, long)]
     verbose: bool,
 }
@@ -182,6 +187,13 @@ struct InputsArgs {
     /// text (default), or JSON Lines: one object per file with position, role, path, bytes and order.
     #[arg(long, value_enum, default_value_t)]
     format: Format,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum ProgressArg {
+    #[default]
+    Auto,
+    Never,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -241,14 +253,33 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
         default_schema: args.default_schema(spec.dialect),
         load_order: args.load_order,
     };
-    let result = check::run(&resolved.files, &options)?;
+    let display = match (args.progress, verbosity) {
+        (_, report::Verbosity::Quiet) | (ProgressArg::Never, _) => progress::Display::Off,
+        (ProgressArg::Auto, _) if io::stderr().is_terminal() => progress::Display::Live {
+            width: terminal_width(),
+        },
+        (ProgressArg::Auto, _) => progress::Display::Plain,
+    };
+    let mut progress =
+        progress::Progress::new(display, verbosity == report::Verbosity::Verbose, err);
+    let result = check::run_with(&resolved.files, &options, &mut progress)?;
+    let phases = progress.finish();
     let omitted =
         report::write_findings(&result.findings, args.format, args.max_per_constraint, out)?;
     if args.format == report::Format::Json {
         report::write_json_summary(&result, &omitted, out)?;
     }
-    report::write_run(&result, &omitted, verbosity, err)?;
+    report::write_run(&result, &phases, &omitted, verbosity, err)?;
     Ok(ExitCode::from(report::exit_code(&result)))
+}
+
+/// The terminal's width from `COLUMNS` when the shell exports it, else 80.
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(80)
 }
 
 fn write_header(resolved: &Resolved, err: &mut dyn Write) -> io::Result<()> {
@@ -259,8 +290,9 @@ fn write_header(resolved: &Resolved, err: &mut dyn Write) -> io::Result<()> {
     let bytes: u64 = resolved.files.iter().map(|f| f.bytes).sum();
     writeln!(
         err,
-        "Inputs     {} files, {bytes} bytes: {} schema, {} data, {} reference",
+        "Inputs     {} files, {}: {} schema, {} data, {} reference",
         resolved.files.len(),
+        progress::size(bytes),
         count(input::Role::Schema),
         count(input::Role::Data),
         count(input::Role::Reference),

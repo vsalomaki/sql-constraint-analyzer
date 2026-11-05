@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::check::{Problem, Report, Warning};
 use crate::finding::{Finding, FindingKind};
+use crate::progress::{self, Phases};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Format {
@@ -24,7 +25,7 @@ pub enum Verbosity {
     Quiet,
     #[default]
     Normal,
-    /// Every statement not followed, one per line.
+    /// The catalog, and every statement not followed, one per line.
     Verbose,
 }
 
@@ -234,21 +235,61 @@ fn problem(problem: &Problem) -> String {
     }
 }
 
+/// What each phase read and found, and how long it took.
+fn write_phases(report: &Report, phases: &Phases, err: &mut dyn Write) -> io::Result<()> {
+    let schema = report.schema;
+    let read =
+        |phase: &progress::Phase| format!("{} files, {}", phase.files, progress::size(phase.bytes));
+    writeln!(
+        err,
+        "[1/3] Schema    {} · {} tables · {} keys ({} disabled, {} deferred) · {}",
+        read(&phases.schema),
+        schema.tables,
+        schema.keys,
+        schema.disabled,
+        schema.deferred,
+        progress::seconds(phases.schema.took),
+    )?;
+    for line in &phases.catalog {
+        writeln!(err, "{line}")?;
+    }
+    let secs = phases.rows.took.as_secs_f64();
+    let rate = if secs > 0.0 {
+        format!("{}/s", progress::size(rate(phases.rows.bytes, secs)))
+    } else {
+        "—".to_owned()
+    };
+    writeln!(
+        err,
+        "[2/3] Rows      {} · {} rows · {rate} · {}",
+        read(&phases.rows),
+        progress::count(report.rows),
+        progress::seconds(phases.rows.took),
+    )?;
+    writeln!(err, "[3/3] Resolve   {}", progress::seconds(phases.resolve))
+}
+
+fn rate(bytes: u64, secs: f64) -> u64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a display rate: non-negative, rounded, exact below 2^53"
+    )]
+    let rate = (bytes as f64 / secs).round() as u64;
+    rate
+}
+
 /// Everything about the run that isn't a finding, and the result line, for stderr.
 pub fn write_run(
     report: &Report,
+    phases: &Phases,
     omitted: &Omitted,
     verbosity: Verbosity,
     err: &mut dyn Write,
 ) -> io::Result<()> {
     if verbosity != Verbosity::Quiet {
-        let schema = report.schema;
-        writeln!(
-            err,
-            "Schema     {} tables · {} keys ({} disabled, {} deferred)",
-            schema.tables, schema.keys, schema.disabled, schema.deferred
-        )?;
-        writeln!(err, "Data       {} rows", report.rows)?;
+        write_phases(report, phases, err)?;
         for error in report.unreadable.iter().chain(&report.errors) {
             writeln!(err, "error: {}", problem(error))?;
         }
@@ -275,11 +316,23 @@ pub fn write_run(
                 }
             }
         }
-        for (group, count) in omitted {
+        if !omitted.is_empty() {
+            let hidden: u64 = omitted.values().sum();
             writeln!(
                 err,
-                "note: {count} more findings for {group} not shown (--max-per-constraint 0 shows all)"
+                "note: {hidden} more findings not shown, past the cap in {} constraints (--max-per-constraint 0 shows all){}",
+                omitted.len(),
+                if verbosity == Verbosity::Verbose {
+                    ":"
+                } else {
+                    ""
+                }
             )?;
+            if verbosity == Verbosity::Verbose {
+                for (group, count) in omitted {
+                    writeln!(err, "  {count} of {group}")?;
+                }
+            }
         }
     }
     writeln!(err, "{}", result(report))

@@ -103,7 +103,7 @@ fn the_text_listing_has_position_role_path_size_and_order() {
         .success()
         .stdout(contains("   1  data       a.sql  5 bytes  (as given)\n"))
         .stderr(contains(
-            "Inputs     1 files, 5 bytes: 0 schema, 1 data, 0 reference",
+            "Inputs     1 files, 5 B: 0 schema, 1 data, 0 reference",
         ));
 }
 
