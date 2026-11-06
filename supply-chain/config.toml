@@ -22,18 +22,6 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-[[exemptions.block-buffer]]
-version = "0.12.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.crypto-common]]
-version = "0.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.digest]]
-version = "0.11.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.fastrand]]
 version = "2.5.0"
 criteria = "safe-to-run"
@@ -41,10 +29,6 @@ criteria = "safe-to-run"
 [[exemptions.float-cmp]]
 version = "0.10.0"
 criteria = "safe-to-run"
-
-[[exemptions.hybrid-array]]
-version = "0.4.15"
-criteria = "safe-to-deploy"
 
 [[exemptions.insta]]
 version = "1.49.0"
@@ -62,10 +46,7 @@ criteria = "safe-to-run"
 version = "0.5.0"
 criteria = "safe-to-run"
 
-[[exemptions.sha2]]
-version = "0.11.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.typenum]]
 version = "1.20.1"
 criteria = "safe-to-deploy"
+notes = "Kept on purpose (issue #35): ~41,000 lines, mostly generated type-level arithmetic with no runtime behaviour or I/O, used across the RustCrypto stack (here through hybrid-array for sha2). Elsewhere only the 1.15 -> 1.17 diffs are audited, with no full audit to build on. hybrid-array's soundness relies on its USIZE constants, which that crate's 820-size check covers."
