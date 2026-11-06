@@ -1,7 +1,8 @@
 //! `fix`: the check, then the input written again without the rows that break a constraint.
 //!
-//! The output is always the original bytes minus a growing set of removed ranges, so everything not removed stays
-//! byte-identical and the removed bytes, kept in `rejects.sql`, restore the input exactly. Rounds repeat the check on
+//! The output is always the original bytes minus a growing set of removed ranges, each replaced by a comment with
+//! `annotate`, so everything not removed stays byte-identical and the removed bytes, kept in `rejects.sql`, restore
+//! the input exactly. Rounds repeat the check on
 //! the input with the removed rows skipped: a removed parent can orphan its children, which the next round removes.
 //! Once a round removes nothing, the output is written and checked again, and that check is the verified result.
 //!
@@ -18,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::check::{self, Report};
 use crate::dialect::Pass;
 use crate::finding::{Finding, FindingKind};
-use crate::input::{self, InputError, InputFile};
+use crate::input::{self, InputError, InputFile, Role};
 use crate::source::Span;
 use crate::statement::Statement;
 
@@ -36,6 +37,8 @@ pub enum OnDuplicate {
     /// The first row stays; the later ones go.
     #[default]
     KeepFirst,
+    /// The last row in run order stays; the first and every other one go.
+    KeepLast,
     Keep,
 }
 
@@ -44,6 +47,9 @@ pub struct Policy {
     pub on_fk: OnRow,
     pub on_duplicate: OnDuplicate,
     pub on_not_null: OnRow,
+    /// Act on findings whose key rests on an assumption, such as a date written as text, instead of leaving them for
+    /// review.
+    pub fix_assumed: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,13 +86,17 @@ pub struct Removal {
     pub reasons: Vec<Reason>,
     pub round: usize,
     pub text: Vec<u8>,
+    /// What the output has in its place: nothing, or with `annotate` a comment.
+    pub replacement: Vec<u8>,
 }
 
-/// Why a row went: the finding's kind, and the finding as a line.
+/// Why a row went: the finding's kind, the finding as a line, and the finding without its values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reason {
     pub kind: FindingKind,
     pub text: String,
+    /// `missing parent for APP.FK_EMP_DEPT`.
+    pub brief: String,
 }
 
 /// A finding the fix would act on but doesn't, and why.
@@ -123,6 +133,8 @@ pub struct Target {
     pub report: ReportPlace,
     /// Run the rounds and tell what would change, writing nothing.
     pub dry_run: bool,
+    /// Leave a comment where each row or statement was removed.
+    pub annotate: bool,
 }
 
 impl Target {
@@ -132,6 +144,7 @@ impl Target {
             destination: Destination::Out(dir.into()),
             report: ReportPlace::Default,
             dry_run: false,
+            annotate: false,
         }
     }
 }
@@ -233,7 +246,7 @@ pub fn fix(
     {
         return Err(FixError::BackupExists(taken.clone()));
     }
-    describe_removals(&mut removed, files)?;
+    describe_removals(&mut removed, files, target.annotate)?;
     let mut report = FixReport {
         input,
         output: last,
@@ -248,7 +261,7 @@ pub fn fix(
         report.files = outputs;
         return Ok(report);
     }
-    write(files, options, &originals, &cuts, outputs, report)
+    write(files, options, &originals, outputs, report)
 }
 
 /// Writes the outputs and the report folder, and checks what was written. An in-place fix writes `rejects.sql` before
@@ -257,7 +270,6 @@ fn write(
     files: &[InputFile],
     options: &check::Options,
     originals: &[PathBuf],
-    cuts: &[Vec<Span>],
     mut outputs: Vec<Output>,
     mut report: FixReport,
 ) -> Result<FixReport, FixError> {
@@ -274,12 +286,12 @@ fn write(
     match target.destination {
         // The copies first: on a file system that ignores case, a copied folder can take the report's name.
         Destination::Out(_) => {
-            write_outputs(originals, cuts, &mut outputs)?;
+            write_outputs(originals, &report.removed, &mut outputs)?;
             rejects(&report)?;
         }
         Destination::InPlace { .. } => {
             rejects(&report)?;
-            write_outputs(originals, cuts, &mut outputs)?;
+            write_outputs(originals, &report.removed, &mut outputs)?;
         }
     }
     let written: Vec<InputFile> = match target.destination {
@@ -333,25 +345,31 @@ fn run_rounds(
     let mut rounds = 0;
     let last = loop {
         let report = check::run_without(files, options, &cuts)?;
-        let (targets, skipped) = targets(&report.findings, names, policy);
+        let mut scans = BTreeMap::new();
+        for (index, lines) in named_rows(&report.findings, names, policy) {
+            let (Some(file), Some(file_cuts)) = (files.get(index), cuts.get(index)) else {
+                continue;
+            };
+            if file.role != Role::Reference {
+                scans.insert(index, scan(file, options, &lines, file_cuts)?);
+            }
+        }
+        let crowded: BTreeSet<Row> = scans
+            .iter()
+            .flat_map(|(index, scan)| scan.crowded.iter().map(move |line| (*index, *line)))
+            .collect();
+        let (targets, skipped) = targets(&report.findings, files, names, policy, &crowded);
         if rounds == 0 {
             left.extend(skipped);
         }
         let mut changed = false;
         for (index, lines) in &targets {
-            let (Some(file), Some(file_cuts)) = (files.get(*index), cuts.get_mut(*index)) else {
+            let (Some(file), Some(file_cuts), Some(scanned)) =
+                (files.get(*index), cuts.get_mut(*index), scans.get(index))
+            else {
                 continue;
             };
-            let located = locate(file, options, lines, file_cuts)?;
-            for unlocated in located.ambiguous {
-                if rounds == 0 {
-                    left.extend(lines.get(&unlocated).into_iter().flatten().map(|f| Left {
-                        finding: (*f).clone(),
-                        why: "the line holds several rows, so the fix can't tell which",
-                    }));
-                }
-            }
-            for cut in located.cuts {
+            for cut in locate(scanned, lines) {
                 let span = extend_to_line_end(&file.path, cut.span)?;
                 insert_cut(file_cuts, span);
                 let name = names.get(*index).cloned().unwrap_or_default();
@@ -374,6 +392,7 @@ fn run_rounds(
                     reasons,
                     round: rounds + 1,
                     text: Vec::new(),
+                    replacement: Vec::new(),
                 });
                 changed = true;
             }
@@ -400,7 +419,7 @@ fn run_rounds(
 /// that fails leaves all inputs as they were.
 fn write_outputs(
     originals: &[PathBuf],
-    cuts: &[Vec<Span>],
+    removed: &[Removal],
     outputs: &mut [Output],
 ) -> Result<(), FixError> {
     for (original, output) in originals.iter().zip(outputs.iter()) {
@@ -408,11 +427,19 @@ fn write_outputs(
             keep_backup(original, backup)?;
         }
     }
-    for ((original, file_cuts), output) in originals.iter().zip(cuts).zip(outputs) {
-        if file_cuts.is_empty() && output.path == *original {
+    for (original, output) in originals.iter().zip(outputs) {
+        if !output.changed && output.path == *original {
             continue;
         }
-        output.sha256 = splice(original, file_cuts, &output.path)?;
+        let edits: Vec<Edit> = removed
+            .iter()
+            .filter(|r| r.file == output.input)
+            .map(|r| Edit {
+                span: r.span,
+                with: &r.replacement,
+            })
+            .collect();
+        output.sha256 = splice(original, &edits, &output.path)?;
     }
     Ok(())
 }
@@ -579,32 +606,133 @@ fn civil_date(days: u64) -> (u64, u64, u64) {
 /// The findings a round acts on, by file position and line, and the fixable ones it leaves for review.
 type Targets<'a> = BTreeMap<usize, BTreeMap<u64, Vec<&'a Finding>>>;
 
-fn targets<'a>(
-    findings: &'a [Finding],
-    names: &[String],
-    policy: Policy,
-) -> (Targets<'a>, Vec<Left>) {
-    let fixed = |kind: FindingKind| match kind {
+/// A row by file position and line.
+type Row = (usize, u64);
+
+const ASSUMED: &str = "its key rests on a date written as text";
+const CROWDED: &str = "the line holds several rows, so the fix can't tell which";
+
+/// Whether `policy` acts on findings of `kind`.
+fn acted_on(kind: FindingKind, policy: Policy) -> bool {
+    match kind {
         FindingKind::FkMissingParent => policy.on_fk == OnRow::Drop,
-        FindingKind::DuplicateKey => policy.on_duplicate == OnDuplicate::KeepFirst,
+        FindingKind::DuplicateKey => policy.on_duplicate != OnDuplicate::Keep,
         FindingKind::NotNull => policy.on_not_null == OnRow::Drop,
         _ => false,
-    };
-    let position = |file: &str| names.iter().position(|n| n == file);
-    let mut targets: Targets = BTreeMap::new();
+    }
+}
+
+/// By file position, the lines of the rows the findings `policy` acts on name: their own, and a duplicate's first row.
+fn named_rows(
+    findings: &[Finding],
+    names: &[String],
+    policy: Policy,
+) -> BTreeMap<usize, BTreeSet<u64>> {
+    let mut rows: BTreeMap<usize, BTreeSet<u64>> = BTreeMap::new();
+    for finding in findings.iter().filter(|f| acted_on(f.kind, policy)) {
+        let own = finding.file.as_deref().zip(finding.line);
+        let first = finding.first.as_ref().map(|l| (l.file.as_str(), l.line));
+        for (file, line) in own.into_iter().chain(first) {
+            if let Some(index) = names.iter().position(|n| n == file) {
+                rows.entry(index).or_default().insert(line);
+            }
+        }
+    }
+    rows
+}
+
+fn targets<'a>(
+    findings: &'a [Finding],
+    files: &[InputFile],
+    names: &[String],
+    policy: Policy,
+    crowded: &BTreeSet<Row>,
+) -> (Targets<'a>, Vec<Left>) {
+    let row_of = |file: &str, line: u64| Some((names.iter().position(|n| n == file)?, line));
+    let keep_last = policy.on_duplicate == OnDuplicate::KeepLast;
+    let mut going: Vec<(Row, &Finding)> = Vec::new();
+    let mut groups: BTreeMap<_, Vec<&Finding>> = BTreeMap::new();
     let mut left = Vec::new();
-    for finding in findings.iter().filter(|f| fixed(f.kind)) {
-        if finding.assumed {
+    for finding in findings.iter().filter(|f| acted_on(f.kind, policy)) {
+        if keep_last && finding.kind == FindingKind::DuplicateKey {
+            // The columns tell unnamed constraints apart; no two keys of a table have the same columns.
+            let constraint = (&finding.table, &finding.constraint, &finding.columns);
+            groups
+                .entry((constraint, &finding.key))
+                .or_default()
+                .push(finding);
+            continue;
+        }
+        if finding.assumed && !policy.fix_assumed {
             left.push(Left {
                 finding: finding.clone(),
-                why: "its key rests on a date written as text",
+                why: ASSUMED,
             });
             continue;
         }
-        let (Some(index), Some(line)) = (finding.file.as_deref().and_then(position), finding.line)
+        let Some(row) = finding
+            .file
+            .as_deref()
+            .zip(finding.line)
+            .and_then(|(file, line)| row_of(file, line))
         else {
             continue;
         };
+        if crowded.contains(&row) {
+            left.push(Left {
+                finding: finding.clone(),
+                why: CROWDED,
+            });
+            continue;
+        }
+        going.push((row, finding));
+    }
+    let mut lasts = Vec::new();
+    for group in groups.into_values() {
+        match all_but_last(&group, files, &row_of, policy, crowded) {
+            Ok(last) => lasts.push(last),
+            Err(why) => left.extend(group.iter().map(|f| Left {
+                finding: (*f).clone(),
+                why: if f.assumed && !policy.fix_assumed {
+                    ASSUMED
+                } else {
+                    why
+                },
+            })),
+        }
+    }
+    // Duplicates wait while anything else goes: the row they would keep may go itself, or lose its parent in a later
+    // round, and only the rounds after show which row is left to keep.
+    if going
+        .iter()
+        .any(|(_, f)| f.kind != FindingKind::DuplicateKey)
+    {
+        going.retain(|(_, f)| f.kind != FindingKind::DuplicateKey);
+        lasts.clear();
+    }
+    let doomed: BTreeSet<Row> = going
+        .iter()
+        .map(|(row, _)| *row)
+        .chain(
+            lasts
+                .iter()
+                .flat_map(|(_, rows)| rows.iter().map(|(row, _)| *row)),
+        )
+        .collect();
+    // A row can be in several keys. A duplicate whose first row goes this round, as a duplicate of another key, waits:
+    // once the first row is gone, it may be the one to keep.
+    going.retain(|(_, f)| {
+        let first = f.first.as_ref().and_then(|l| row_of(&l.file, l.line));
+        f.kind != FindingKind::DuplicateKey || first.is_none_or(|first| !doomed.contains(&first))
+    });
+    // Likewise a key whose last row goes this round: once the last row is gone, the one before it is the one to keep.
+    for (last, rows) in lasts {
+        if !doomed.contains(&last) {
+            going.extend(rows);
+        }
+    }
+    let mut targets: Targets = BTreeMap::new();
+    for ((index, line), finding) in going {
         targets
             .entry(index)
             .or_default()
@@ -612,26 +740,60 @@ fn targets<'a>(
             .or_default()
             .push(finding);
     }
-    // A duplicate whose first row goes this round waits: once the first row is gone, it may be the one to keep.
-    let doomed: BTreeSet<(usize, u64)> = targets
-        .iter()
-        .flat_map(|(file, lines)| lines.keys().map(move |line| (*file, *line)))
-        .collect();
-    for lines in targets.values_mut() {
-        for findings in lines.values_mut() {
-            findings.retain(|f| {
-                let first = f
-                    .first
-                    .as_ref()
-                    .and_then(|l| Some((position(&l.file)?, l.line)));
-                f.kind != FindingKind::DuplicateKey
-                    || first.is_none_or(|first| !doomed.contains(&first))
-            });
-        }
-        lines.retain(|_, findings| !findings.is_empty());
-    }
-    targets.retain(|_, lines| !lines.is_empty());
     (targets, left)
+}
+
+/// The rows of one duplicate key that keep-last removes, each with a finding on its key, after the last row in run
+/// order; or why the key is left whole.
+#[expect(
+    clippy::type_complexity,
+    reason = "the last row, then each other row with its finding"
+)]
+fn all_but_last<'a>(
+    group: &[&'a Finding],
+    files: &[InputFile],
+    row_of: &dyn Fn(&str, u64) -> Option<Row>,
+    policy: Policy,
+    crowded: &BTreeSet<Row>,
+) -> Result<(Row, Vec<(Row, &'a Finding)>), &'static str> {
+    if !policy.fix_assumed && group.iter().any(|f| f.assumed) {
+        return Err("another row of its key rests on a date written as text");
+    }
+    let mut rows: Vec<(Row, &Finding)> = Vec::new();
+    for finding in group {
+        let first = finding.first.as_ref().and_then(|l| row_of(&l.file, l.line));
+        let own = finding
+            .file
+            .as_deref()
+            .zip(finding.line)
+            .and_then(|(file, line)| row_of(file, line));
+        let (Some(first), Some(own)) = (first, own) else {
+            return Err("the first row of its key is in no input");
+        };
+        if files.get(first.0).is_none_or(|f| f.role == Role::Reference) {
+            return Err(
+                "the first row of its key is in a reference file, which the fix doesn't change",
+            );
+        }
+        if !rows.iter().any(|(row, _)| *row == first) {
+            rows.push((first, finding));
+        }
+        rows.push((own, finding));
+    }
+    rows.sort_by_key(|(row, _)| *row);
+    let shared = rows.windows(2).any(|pair| match pair {
+        [(a, _), (b, _)] => a == b,
+        _ => false,
+    });
+    if shared || rows.iter().any(|(row, _)| crowded.contains(row)) {
+        return Err(
+            "a row of its key shares its line with another row, so the fix can't tell which",
+        );
+    }
+    let Some((last, _)) = rows.pop() else {
+        return Err("the first row of its key is in no input");
+    };
+    Ok((last, rows))
 }
 
 /// A cut in a file's current output, with why.
@@ -641,20 +803,19 @@ struct Cut {
     reasons: Vec<Reason>,
 }
 
-struct Located {
-    cuts: Vec<Cut>,
-    /// Target lines holding more than one row.
-    ambiguous: Vec<u64>,
+/// The statements of a file that hold one of the lines asked for, each with its rows left after the earlier cuts, and
+/// which of those lines hold several rows.
+struct Scan {
+    statements: Vec<(Span, Vec<(u64, Span)>)>,
+    crowded: BTreeSet<u64>,
 }
 
-/// The cuts that remove the target rows from `file`: a row's clause, or its whole statement when every row of the
-/// statement left after the earlier `cuts` goes.
-fn locate(
+fn scan(
     file: &InputFile,
     options: &check::Options,
-    lines: &BTreeMap<u64, Vec<&Finding>>,
+    lines: &BTreeSet<u64>,
     cuts: &[Span],
-) -> Result<Located, FixError> {
+) -> Result<Scan, FixError> {
     let opened = input::open(&file.path)?;
     let mut rows_per_line: BTreeMap<u64, usize> = BTreeMap::new();
     let mut statements = Vec::new();
@@ -671,21 +832,30 @@ fn locate(
             continue;
         };
         rows.retain(|r| !check::is_removed(cuts, r.span));
-        for row in &rows {
+        for row in rows.iter().filter(|r| lines.contains(&r.line)) {
             *rows_per_line.entry(row.line).or_default() += 1;
         }
         let spans: Vec<(u64, Span)> = rows.iter().map(|r| (r.line, r.span)).collect();
-        if spans.iter().any(|(line, _)| lines.contains_key(line)) {
+        if spans.iter().any(|(line, _)| lines.contains(line)) {
             statements.push((piece.span, spans));
         }
     }
-    let ambiguous: Vec<u64> = lines
-        .keys()
-        .copied()
-        .filter(|line| rows_per_line.get(line).copied().unwrap_or(0) > 1)
+    let crowded = rows_per_line
+        .into_iter()
+        .filter(|(_, rows)| *rows > 1)
+        .map(|(line, _)| line)
         .collect();
+    Ok(Scan {
+        statements,
+        crowded,
+    })
+}
+
+/// The cuts that remove the target rows from a scanned file: a row's clause, or its whole statement when every row of
+/// the statement left after the earlier cuts goes.
+fn locate(scan: &Scan, lines: &BTreeMap<u64, Vec<&Finding>>) -> Vec<Cut> {
     let mut cuts = Vec::new();
-    for (statement, rows) in statements {
+    for (statement, rows) in &scan.statements {
         let reasons = |line: &u64| -> Vec<Reason> {
             lines
                 .get(line)
@@ -700,19 +870,20 @@ fn locate(
                         first: None,
                         ..(*f).clone()
                     }),
+                    brief: brief(f),
                 })
                 .collect()
         };
         let going: Vec<&(u64, Span)> = rows
             .iter()
-            .filter(|(line, _)| lines.contains_key(line) && !ambiguous.contains(line))
+            .filter(|(line, _)| lines.contains_key(line))
             .collect();
         if going.is_empty() {
             continue;
         }
         if going.len() == rows.len() {
             cuts.push(Cut {
-                span: statement,
+                span: *statement,
                 clause: false,
                 reasons: going.iter().flat_map(|(line, _)| reasons(line)).collect(),
             });
@@ -724,7 +895,24 @@ fn locate(
             }));
         }
     }
-    Ok(Located { cuts, ambiguous })
+    cuts
+}
+
+/// A finding as an annotation names it: what is wrong and the constraint, without the row's values.
+fn brief(finding: &Finding) -> String {
+    let table = &finding.table;
+    match (finding.kind, &finding.constraint) {
+        (FindingKind::FkMissingParent, Some(constraint)) => {
+            format!("missing parent for {constraint}")
+        }
+        (FindingKind::FkMissingParent, None) => {
+            format!("missing parent for a foreign key of {table}")
+        }
+        (FindingKind::DuplicateKey, Some(constraint)) => format!("duplicate key of {constraint}"),
+        (FindingKind::DuplicateKey, None) => format!("duplicate key in {table}"),
+        (FindingKind::NotNull, _) => format!("NULL in {table}.{}", finding.columns.join(", ")),
+        (kind, _) => crate::report::kind_name(kind).to_owned(),
+    }
 }
 
 /// Adds a cut to the sorted, non-overlapping set, merging any it touches.
@@ -779,14 +967,21 @@ fn extend_to_line_end(path: &Path, span: Span) -> Result<Span, FixError> {
     })
 }
 
-/// Writes `original` without the `cuts` to `to`, with the original's permissions, and gives both files' digests. An
-/// unchanged file is a hard link where it can be, and has no digests; anything else goes through a new temporary file
-/// renamed into place, since `to` may be a hard link to the original, or the original itself.
-fn splice(original: &Path, cuts: &[Span], to: &Path) -> Result<Option<Digests>, FixError> {
+/// A span of the original, and what the output has in its place.
+struct Edit<'a> {
+    span: Span,
+    with: &'a [u8],
+}
+
+/// Writes `original` with the sorted, separate `edits` applied to `to`, with the original's permissions, and gives
+/// both files' digests. An unchanged file is a hard link where it can be, and has no digests; anything else goes
+/// through a new temporary file renamed into place, since `to` may be a hard link to the original, or the original
+/// itself.
+fn splice(original: &Path, edits: &[Edit], to: &Path) -> Result<Option<Digests>, FixError> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|source| write_error(parent, source))?;
     }
-    if cuts.is_empty() && fs::hard_link(original, to).is_ok() {
+    if edits.is_empty() && fs::hard_link(original, to).is_ok() {
         return Ok(None);
     }
     let permissions = fs::metadata(original)
@@ -797,13 +992,12 @@ fn splice(original: &Path, cuts: &[Span], to: &Path) -> Result<Option<Digests>, 
         let mut reader = Hashing::new(BufReader::with_capacity(1 << 16, File::open(original)?));
         let mut writer = Hashing::new(writer);
         let mut at = 0;
-        for cut in cuts {
-            io::copy(&mut (&mut reader).take(cut.start - at), &mut writer)?;
-            io::copy(
-                &mut (&mut reader).take(cut.end - cut.start),
-                &mut io::sink(),
-            )?;
-            at = cut.end;
+        for edit in edits {
+            let Span { start, end } = edit.span;
+            io::copy(&mut (&mut reader).take(start - at), &mut writer)?;
+            io::copy(&mut (&mut reader).take(end - start), &mut io::sink())?;
+            writer.write_all(edit.with)?;
+            at = end;
         }
         io::copy(&mut reader, &mut writer)?;
         digests = Some(Digests {
@@ -910,8 +1104,13 @@ fn temporary_beside(path: &Path) -> io::Result<(PathBuf, File)> {
     Err(io::Error::other("no free temporary name"))
 }
 
-/// Fills each removal's line in the original and its original bytes, reading each changed input once.
-fn describe_removals(removed: &mut [Removal], files: &[InputFile]) -> Result<(), FixError> {
+/// Fills each removal's line in the original, its original bytes and, with `annotate`, its comment, reading each
+/// changed input once.
+fn describe_removals(
+    removed: &mut [Removal],
+    files: &[InputFile],
+    annotate: bool,
+) -> Result<(), FixError> {
     removed.sort_by(|a, b| (&a.file, a.span.start).cmp(&(&b.file, b.span.start)));
     for file in files {
         let name = check::display(&file.path);
@@ -921,7 +1120,7 @@ fn describe_removals(removed: &mut [Removal], files: &[InputFile]) -> Result<(),
         }
         let read_error = |source| write_error(&file.path, source);
         let mut reader = BufReader::new(File::open(&file.path).map_err(read_error)?);
-        let (mut at, mut line) = (0_u64, 1_u64);
+        let (mut at, mut line, mut last_byte) = (0_u64, 1_u64, None);
         for removal in mine {
             let mut before = Vec::new();
             (&mut reader)
@@ -929,6 +1128,7 @@ fn describe_removals(removed: &mut [Removal], files: &[InputFile]) -> Result<(),
                 .read_to_end(&mut before)
                 .map_err(read_error)?;
             line += newlines(&before);
+            last_byte = before.last().copied().or(last_byte);
             let mut text = Vec::new();
             (&mut reader)
                 .take(removal.span.end - removal.span.start)
@@ -938,9 +1138,62 @@ fn describe_removals(removed: &mut [Removal], files: &[InputFile]) -> Result<(),
             line += newlines(&text);
             at = removal.span.end;
             removal.text = text;
+            if annotate {
+                removal.replacement = annotation(removal, last_byte.is_none_or(|b| b == b'\n'));
+            }
+            last_byte = removal.text.last().copied().or(last_byte);
         }
     }
     Ok(())
+}
+
+/// The comment `annotate` leaves for `removal`: a line of its own, indented as the removed line was, when the removal
+/// took whole lines; else a block comment, so the rest of the line stays as it was. It keeps the removal's line end.
+fn annotation(removal: &Removal, at_line_start: bool) -> Vec<u8> {
+    let what = if removal.clause { "a row" } else { "an INSERT" };
+    let mut briefs: Vec<&str> = Vec::new();
+    for reason in &removal.reasons {
+        if !briefs.contains(&reason.brief.as_str()) {
+            briefs.push(&reason.brief);
+        }
+    }
+    let note = format!(
+        "sqlca fix removed {what} here ({}); see rejects.sql",
+        briefs.join(", ")
+    );
+    // Names can hold anything. These characters read the same in every encoding the input can have, and none can end
+    // a comment, continue a line or start a SQL*Plus substitution.
+    let note: String = note
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " _.,;()".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    let text = &removal.text;
+    let eol: &[u8] = if text.ends_with(b"\r\n") {
+        b"\r\n"
+    } else if text.ends_with(b"\n") {
+        b"\n"
+    } else {
+        b""
+    };
+    let mut comment = Vec::new();
+    if at_line_start && !eol.is_empty() {
+        let indent = text.iter().take_while(|b| **b == b' ' || **b == b'\t');
+        comment.extend(indent);
+        comment.extend_from_slice(b"-- ");
+        comment.extend_from_slice(note.as_bytes());
+    } else {
+        comment.extend_from_slice(b"/* ");
+        comment.extend_from_slice(note.as_bytes());
+        comment.extend_from_slice(b" */");
+    }
+    comment.extend_from_slice(eol);
+    comment
 }
 
 fn newlines(bytes: &[u8]) -> u64 {

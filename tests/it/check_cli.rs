@@ -297,7 +297,7 @@ fn fix_writes_fixed_copies_and_a_report_folder() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
         stderr.contains(
-            "Fixed      22 rows in 1 round (missing parent 9, duplicate key 9, NULL in NOT NULL 4)"
+            "Fixed      22 rows in 2 rounds (missing parent 9, duplicate key 9, NULL in NOT NULL 4)"
         ),
         "{stderr}"
     );
@@ -488,6 +488,26 @@ fn fix_refuses_unclear_or_unsafe_destinations() {
     assert!(
         stderr.contains("would keep the removed rows nowhere"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn fix_takes_the_policy_and_annotation_options() {
+    let (dir, code, _, stderr) = fix_orphan(&[
+        "--out",
+        "o",
+        "--annotate",
+        "--on-duplicate",
+        "keep-last",
+        "--fix-assumed",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let fixed = fs::read_to_string(dir.path().join("o/t.sql")).unwrap();
+    assert!(
+        fixed.ends_with(
+            "INSERT INTO P VALUES (1);\n-- sqlca fix removed an INSERT here (missing parent for a foreign key of C); see rejects.sql\n"
+        ),
+        "{fixed}"
     );
 }
 
