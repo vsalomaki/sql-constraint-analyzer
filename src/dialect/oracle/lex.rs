@@ -181,7 +181,9 @@ pub fn lex(source: &[u8]) -> Result<Vec<Token>, LexError> {
                     .count();
                 TokenKind::Bind
             }
-            _ if OPERATORS.iter().any(|op| source.get(i..i + 2) == Some(*op)) => {
+            _ if matches!(b, b'|' | b':' | b'=' | b'<' | b'>' | b'!' | b'^' | b'*')
+                && OPERATORS.iter().any(|op| source.get(i..i + 2) == Some(*op)) =>
+            {
                 i += 2;
                 TokenKind::Operator
             }
@@ -203,11 +205,11 @@ pub fn lex(source: &[u8]) -> Result<Vec<Token>, LexError> {
 fn quoted(source: &[u8], open: usize, quote: u8) -> Option<usize> {
     let mut i = open + 1;
     loop {
-        match (source.get(i), source.get(i + 1)) {
-            (None, _) => return None,
-            (Some(&a), Some(&b)) if a == quote && b == quote => i += 2,
-            (Some(&a), _) if a == quote => return Some(i + 1),
-            _ => i += 1,
+        i += source.get(i..)?.iter().position(|&b| b == quote)?;
+        if source.get(i + 1) == Some(&quote) {
+            i += 2;
+        } else {
+            return Some(i + 1);
         }
     }
 }

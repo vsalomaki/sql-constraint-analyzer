@@ -64,7 +64,11 @@ impl Encoding {
     /// The text of `bytes`; a byte sequence that isn't valid becomes U+FFFD.
     pub fn decode(self, bytes: &[u8]) -> std::borrow::Cow<'_, str> {
         match self {
-            Self::Utf8 => String::from_utf8_lossy(bytes),
+            // `from_utf8` checks ASCII a word at a time; the lossy walk is only for text that needs it.
+            Self::Utf8 => std::str::from_utf8(bytes).map_or_else(
+                |_| String::from_utf8_lossy(bytes),
+                std::borrow::Cow::Borrowed,
+            ),
             Self::Windows1252 => {
                 encoding_rs::WINDOWS_1252
                     .decode_without_bom_handling(bytes)

@@ -3,6 +3,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use xxhash_rust::xxh3::Xxh3;
 
@@ -31,7 +32,52 @@ impl At {
 }
 
 /// One constraint's keys, by hash, with each key's first row.
-type KeyMap = HashMap<u128, First>;
+type KeyMap = FxMap<u128, First>;
+
+/// A map hashed the way rustc's own maps are. Its keys are table and constraint positions, and key hashes that are
+/// already xxh3, so a hash that resists crafted collisions would only cost time.
+type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+type FxSet<K> = HashSet<K, BuildHasherDefault<Fx>>;
+
+#[derive(Default)]
+struct Fx(u64);
+
+impl Fx {
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0; 8];
+            for (to, from) in word.iter_mut().zip(chunk) {
+                *to = *from;
+            }
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.add(n);
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.add(crate::source::to_u64(n));
+    }
+
+    fn write_u128(&mut self, n: u128) {
+        let [low, high] =
+            [n, n >> 64].map(|half| u64::try_from(half & u128::from(u64::MAX)).unwrap_or(0));
+        self.add(low);
+        self.add(high);
+    }
+}
 
 /// Where a key was first seen, and whether its value rests on an assumption. Kept to 16 bytes, as the key maps
 /// hold one per key.
@@ -88,17 +134,17 @@ pub(super) struct Checker<'a> {
     load_order: bool,
     /// File names by position, as findings show them.
     files: &'a [String],
-    keys: HashMap<(TableId, usize), KeyMap>,
+    keys: FxMap<(TableId, usize), KeyMap>,
     /// What makes a key map less than certain, by key; lookups against it inherit the doubt.
-    doubt: HashMap<(TableId, usize), Doubt>,
-    rows: HashMap<TableId, u64>,
+    doubt: FxMap<(TableId, usize), Doubt>,
+    rows: FxMap<TableId, u64>,
     /// Tables with rows `fix` removed: a parent among them had rows, so its children lack theirs.
-    removed: HashSet<TableId>,
+    removed: FxSet<TableId>,
     pending: Vec<Pending>,
     findings: Vec<Finding>,
-    unverifiable: HashMap<(TableId, usize), Undecided>,
-    no_parent: HashMap<(TableId, usize), u64>,
-    dates: HashMap<(TableId, usize), u64>,
+    unverifiable: FxMap<(TableId, usize), Undecided>,
+    no_parent: FxMap<(TableId, usize), u64>,
+    dates: FxMap<(TableId, usize), u64>,
 }
 
 impl<'a> Checker<'a> {
@@ -114,15 +160,15 @@ impl<'a> Checker<'a> {
             rules: dialect.rules(),
             load_order,
             files,
-            keys: HashMap::new(),
-            doubt: HashMap::new(),
-            rows: HashMap::new(),
-            removed: HashSet::new(),
+            keys: FxMap::default(),
+            doubt: FxMap::default(),
+            rows: FxMap::default(),
+            removed: FxSet::default(),
             pending: Vec::new(),
             findings: Vec::new(),
-            unverifiable: HashMap::new(),
-            no_parent: HashMap::new(),
-            dates: HashMap::new(),
+            unverifiable: FxMap::default(),
+            no_parent: FxMap::default(),
+            dates: FxMap::default(),
         }
     }
 

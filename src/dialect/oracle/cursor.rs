@@ -113,7 +113,9 @@ impl<'a> Cursor<'a> {
     }
 
     pub(crate) fn is_word(&self, token: Token, keyword: &str) -> bool {
+        // The length first: most tokens tested against a keyword are another word.
         token.kind == TokenKind::Word
+            && token.end - token.start == keyword.len()
             && token
                 .text(&self.piece.text)
                 .eq_ignore_ascii_case(keyword.as_bytes())
