@@ -1,9 +1,10 @@
 //! `fix`: the check, then the input written again without the rows that break a constraint.
 //!
 //! The output is always the original bytes minus a growing set of removed ranges, each replaced by a comment with
-//! `annotate`, so everything not removed stays byte-identical and the removed bytes, kept in `rejects.sql`, restore
-//! the input exactly. Rounds repeat the check on
-//! the input with the removed rows skipped: a removed parent can orphan its children, which the next round removes.
+//! `annotate`, or with `--on-fk null` a row's foreign key values replaced by NULL, so everything else stays
+//! byte-identical and the original bytes, kept in `rejects.sql`, restore the input exactly. Rounds repeat the check on
+//! the input with the removed rows skipped and the changed values read as NULL: a removed parent can orphan its
+//! children, which the next round removes.
 //! Once a round removes nothing, the output is written and checked again, and that check is the verified result.
 //!
 //! Rows are found again by file and line: the fix re-reads each file it changes anyway, so findings carry no spans.
@@ -16,18 +17,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::catalog::{Catalog, Kind, Table};
 use crate::check::{self, Report};
 use crate::dialect::Pass;
 use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role};
 use crate::source::Span;
-use crate::statement::Statement;
+use crate::statement::{InsertRow, Statement};
 
-/// What happens to a row with a missing parent, or with NULL in a NOT NULL column.
+/// What happens to a row with NULL in a NOT NULL column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum OnRow {
     #[default]
     Drop,
+    Keep,
+}
+
+/// What happens to a row with a missing parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum OnFk {
+    #[default]
+    Drop,
+    /// Every column of the foreign key is set to NULL; the row is dropped when one of them can't be NULL.
+    Null,
     Keep,
 }
 
@@ -44,7 +56,7 @@ pub enum OnDuplicate {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Policy {
-    pub on_fk: OnRow,
+    pub on_fk: OnFk,
     pub on_duplicate: OnDuplicate,
     pub on_not_null: OnRow,
     /// Act on findings whose key rests on an assumption, such as a date written as text, instead of leaving them for
@@ -74,7 +86,8 @@ pub enum FixError {
     NothingKept,
 }
 
-/// A removed row: where it was in the input, what it was, and why it went.
+/// A removed row, or with `nulled` a row kept with its foreign key set to NULL: where it was in the input, what it
+/// was, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Removal {
     /// The input's name, as findings show it.
@@ -86,8 +99,11 @@ pub struct Removal {
     pub reasons: Vec<Reason>,
     pub round: usize,
     pub text: Vec<u8>,
-    /// What the output has in its place: nothing, or with `annotate` a comment.
+    /// What the output has in its place: nothing, or with `annotate` a comment; for a changed row, the row with
+    /// NULL for each of `nulled`.
     pub replacement: Vec<u8>,
+    /// For a changed row: each column set to NULL, with its value's place in the input.
+    pub nulled: Vec<(String, Span)>,
 }
 
 /// Why a row went: the finding's kind, the finding as a line, and the finding without its values.
@@ -220,7 +236,6 @@ pub fn fix(
         input,
         last,
         rounds,
-        cuts,
         mut removed,
         left,
     } = run_rounds(files, options, policy, &names, target.dry_run)?;
@@ -228,15 +243,18 @@ pub fn fix(
     let outputs: Vec<Output> = names
         .into_iter()
         .zip(&paths)
-        .zip(originals.iter().zip(&cuts))
-        .map(|((input, path), (original, file_cuts))| Output {
-            input,
-            path: path.clone(),
-            changed: !file_cuts.is_empty(),
-            backup: backup
-                .filter(|_| !file_cuts.is_empty())
-                .map(|suffix| beside(original, suffix)),
-            sha256: None,
+        .zip(&originals)
+        .map(|((input, path), original)| {
+            let changed = removed.iter().any(|r| r.file == input);
+            Output {
+                path: path.clone(),
+                changed,
+                backup: backup
+                    .filter(|_| changed)
+                    .map(|suffix| beside(original, suffix)),
+                sha256: None,
+                input,
+            }
         })
         .collect();
     if let Some(taken) = outputs
@@ -326,8 +344,6 @@ struct Plan {
     /// The check of the input as the output will be, unless the rounds ended once nothing more could be found.
     last: Option<Report>,
     rounds: usize,
-    /// By input position: the sorted, separate spans to remove.
-    cuts: Vec<Vec<Span>>,
     removed: Vec<Removal>,
     left: Vec<Left>,
 }
@@ -347,7 +363,8 @@ fn run_rounds(
     let mut rounds = 0;
     let schema = check::schema(files, options)?;
     let last = loop {
-        let report = check::run_without(files, options, &schema, &cuts)?;
+        let nulls = nulled_values(&removed, names);
+        let report = check::run_without(files, options, &schema, &cuts, &nulls)?;
         let mut scans = BTreeMap::new();
         for (index, lines) in named_rows(&report.findings, names, policy) {
             let (Some(file), Some(file_cuts)) = (files.get(index), cuts.get(index)) else {
@@ -369,7 +386,8 @@ fn run_rounds(
         if rounds == 0 {
             left.extend(skipped);
         }
-        let settled = !waiting && !can_orphan(&targets, &report.referenced);
+        // A value set to NULL can make a unique key a duplicate, or take a key children point at.
+        let mut settled = !waiting && !can_orphan(&targets, &report.referenced);
         let mut changed = false;
         for (index, lines) in &targets {
             let (Some(file), Some(file_cuts), Some(scanned)) =
@@ -377,10 +395,18 @@ fn run_rounds(
             else {
                 continue;
             };
-            for cut in locate(scanned, lines) {
+            for cut in locate(scanned, *index, lines, schema.catalog(), policy) {
+                let name = names.get(*index).cloned().unwrap_or_default();
+                if !cut.nulled.is_empty() {
+                    if change(&mut removed, name, cut, rounds + 1) {
+                        changed = true;
+                        settled = false;
+                    }
+                    continue;
+                }
+                changed = true;
                 let span = extend_to_line_end(&file.path, cut.span)?;
                 insert_cut(file_cuts, span);
-                let name = names.get(*index).cloned().unwrap_or_default();
                 // A statement going whole takes the rows an earlier round cut from it, reasons and all.
                 let mut reasons = Vec::new();
                 removed.retain(|r: &Removal| {
@@ -401,8 +427,8 @@ fn run_rounds(
                     round: rounds + 1,
                     text: Vec::new(),
                     replacement: Vec::new(),
+                    nulled: Vec::new(),
                 });
-                changed = true;
             }
         }
         if !changed {
@@ -421,10 +447,56 @@ fn run_rounds(
         input: first_report.or_else(|| last.clone()).unwrap_or_default(),
         last,
         rounds,
-        cuts,
         removed,
         left,
     })
+}
+
+/// Records a row kept with values set to NULL, and whether that sets any value the changes so far didn't; a row
+/// changed in an earlier round, for another foreign key, takes the new values into the same change.
+fn change(removed: &mut Vec<Removal>, file: String, cut: Cut, round: usize) -> bool {
+    if let Some(earlier) = removed
+        .iter_mut()
+        .find(|r| r.file == file && r.span == cut.span)
+    {
+        let before = earlier.nulled.len();
+        earlier.nulled.extend(cut.nulled);
+        earlier.nulled.sort_by_key(|(_, span)| *span);
+        earlier.nulled.dedup_by_key(|(_, span)| *span);
+        if earlier.nulled.len() == before {
+            return false;
+        }
+        earlier.reasons.extend(cut.reasons);
+        return true;
+    }
+    removed.push(Removal {
+        file,
+        line: 0,
+        span: cut.span,
+        clause: cut.clause,
+        reasons: cut.reasons,
+        round,
+        text: Vec::new(),
+        replacement: Vec::new(),
+        nulled: cut.nulled,
+    });
+    true
+}
+
+/// By file position, the sorted places of the values the changes so far set to NULL.
+fn nulled_values(removed: &[Removal], names: &[String]) -> Vec<Vec<Span>> {
+    names
+        .iter()
+        .map(|name| {
+            let mut spans: Vec<Span> = removed
+                .iter()
+                .filter(|r| r.file == *name)
+                .flat_map(|r| r.nulled.iter().map(|(_, span)| *span))
+                .collect();
+            spans.sort();
+            spans
+        })
+        .collect()
 }
 
 /// Writes each output that differs from its input. Every backup is made before any input is rewritten, so a backup
@@ -627,7 +699,7 @@ const CROWDED: &str = "the line holds several rows, so the fix can't tell which"
 /// Whether `policy` acts on findings of `kind`.
 fn acted_on(kind: FindingKind, policy: Policy) -> bool {
     match kind {
-        FindingKind::FkMissingParent => policy.on_fk == OnRow::Drop,
+        FindingKind::FkMissingParent => policy.on_fk != OnFk::Keep,
         FindingKind::DuplicateKey => policy.on_duplicate != OnDuplicate::Keep,
         FindingKind::NotNull => policy.on_not_null == OnRow::Drop,
         _ => false,
@@ -843,17 +915,19 @@ fn all_but_last<'a>(
     Ok((last, rows))
 }
 
-/// A cut in a file's current output, with why.
+/// A cut in a file's current output, or with `nulled` a row kept with those values set to NULL; with why.
 struct Cut {
     span: Span,
     clause: bool,
     reasons: Vec<Reason>,
+    /// Each column set to NULL, with its value's place; empty for a cut.
+    nulled: Vec<(String, Span)>,
 }
 
 /// The statements of a file that hold one of the lines asked for, each with its rows left after the earlier cuts, and
 /// which of those lines hold several rows.
 struct Scan {
-    statements: Vec<(Span, Vec<(u64, Span)>)>,
+    statements: Vec<(Span, Vec<InsertRow<'static>>)>,
     crowded: BTreeSet<u64>,
 }
 
@@ -886,9 +960,9 @@ fn scan(
         for row in rows.iter().filter(|r| lines.contains(&r.line)) {
             *rows_per_line.entry(row.line).or_default() += 1;
         }
-        let spans: Vec<(u64, Span)> = rows.iter().map(|r| (r.line, r.span)).collect();
-        if spans.iter().any(|(line, _)| lines.contains(line)) {
-            statements.push((piece.span, spans));
+        if rows.iter().any(|r| lines.contains(&r.line)) {
+            let rows = rows.into_iter().map(InsertRow::into_owned).collect();
+            statements.push((piece.span, rows));
         }
     }
     let crowded = rows_per_line
@@ -902,51 +976,138 @@ fn scan(
     })
 }
 
-/// The cuts that remove the target rows from a scanned file: a row's clause, or its whole statement when every row of
-/// the statement left after the earlier cuts goes.
-fn locate(scan: &Scan, lines: &BTreeMap<u64, Vec<&Finding>>) -> Vec<Cut> {
+/// What happens to the target rows of a scanned file: a row's clause goes, or its whole statement when every row of
+/// the statement left after the earlier cuts goes, or a row stays with its foreign key set to NULL.
+fn locate(
+    scan: &Scan,
+    file: usize,
+    lines: &BTreeMap<u64, Vec<&Finding>>,
+    catalog: &Catalog,
+    policy: Policy,
+) -> Vec<Cut> {
     let mut cuts = Vec::new();
     for (statement, rows) in &scan.statements {
-        let reasons = |line: &u64| -> Vec<Reason> {
-            lines
-                .get(line)
-                .into_iter()
-                .flatten()
-                .map(|f| Reason {
-                    kind: f.kind,
-                    // Without places: the removal says where the row was.
-                    text: crate::report::describe(&Finding {
-                        file: None,
-                        line: None,
-                        first: None,
-                        ..(*f).clone()
-                    }),
-                    brief: brief(f),
-                })
-                .collect()
-        };
-        let going: Vec<&(u64, Span)> = rows
+        let actions: Vec<Cut> = rows
             .iter()
-            .filter(|(line, _)| lines.contains_key(line))
+            .filter_map(|row| {
+                let findings = lines.get(&row.line)?;
+                Some(action(row, (file, *statement), findings, catalog, policy))
+            })
             .collect();
-        if going.is_empty() {
-            continue;
-        }
-        if going.len() == rows.len() {
+        let going = actions.iter().filter(|a| a.nulled.is_empty()).count();
+        if going > 0 && going == rows.len() {
             cuts.push(Cut {
                 span: *statement,
                 clause: false,
-                reasons: going.iter().flat_map(|(line, _)| reasons(line)).collect(),
+                reasons: actions.into_iter().flat_map(|a| a.reasons).collect(),
+                nulled: Vec::new(),
             });
         } else {
-            cuts.extend(going.iter().map(|(line, span)| Cut {
-                span: *span,
-                clause: true,
-                reasons: reasons(line),
-            }));
+            cuts.extend(actions);
         }
     }
     cuts
+}
+
+/// What happens to one target row. With `--on-fk null` and only missing parents against it, it stays with every
+/// column of those foreign keys set to NULL, unless one can't hold NULL; then it goes, and its reasons say why.
+fn action(
+    row: &InsertRow,
+    (file, statement): (usize, Span),
+    findings: &[&Finding],
+    catalog: &Catalog,
+    policy: Policy,
+) -> Cut {
+    let mut reasons: Vec<Reason> = findings.iter().map(|f| reason(f)).collect();
+    let null_wanted = policy.on_fk == OnFk::Null
+        && findings
+            .iter()
+            .all(|f| f.kind == FindingKind::FkMissingParent);
+    let mut nulled = Vec::new();
+    if null_wanted {
+        match nullable_values(row, file, findings, catalog) {
+            Ok(values) => nulled = values,
+            Err(why) => {
+                for reason in &mut reasons {
+                    reason.text.push_str("; the row went, since ");
+                    reason.text.push_str(&why);
+                }
+            }
+        }
+    }
+    Cut {
+        span: row.span,
+        clause: row.span != statement,
+        reasons,
+        nulled,
+    }
+}
+
+/// The values of the findings' foreign key columns in `row`, a row of the file at `file` in the run, each with its
+/// column, when every one of them can be set to NULL; else why not.
+fn nullable_values(
+    row: &InsertRow,
+    file: usize,
+    findings: &[&Finding],
+    catalog: &Catalog,
+) -> Result<Vec<(String, Span)>, String> {
+    let resolved =
+        check::resolve_row(catalog, row).map_err(|_| "its table can't be matched".to_owned())?;
+    let table = catalog
+        .table(resolved.table)
+        .ok_or_else(|| "its table can't be matched".to_owned())?;
+    let mut nulled: Vec<(String, Span)> = Vec::new();
+    for column in findings.iter().flat_map(|f| &f.columns) {
+        let position = table
+            .column(column)
+            .ok_or_else(|| format!("{column} isn't a column of its table"))?;
+        if let Some(why) = not_nullable(table, position, file, row.span.start) {
+            return Err(format!("{column} {why}"));
+        }
+        let value = resolved
+            .values
+            .get(position)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("the row leaves {column} out, so its default applies"))?;
+        if !nulled.iter().any(|(c, _)| c == column) {
+            nulled.push((column.clone(), value.span));
+        }
+    }
+    nulled.sort_by_key(|(_, span)| *span);
+    Ok(nulled)
+}
+
+/// Why the column at `position` can't hold NULL in a row at `offset` in the file at `file`, if it can't: the same
+/// constraints the check judges the row by.
+fn not_nullable(table: &Table, position: usize, file: usize, offset: u64) -> Option<&'static str> {
+    let column = table.columns.get(position)?;
+    if column.identity {
+        return Some("is an identity column");
+    }
+    if column.default_on_null {
+        return Some("takes its default in place of NULL");
+    }
+    table
+        .forbids_null(position, file, offset)
+        .map(|c| match c.kind {
+            Kind::PrimaryKey { .. } => "is part of the primary key",
+            _ => "is NOT NULL",
+        })
+}
+
+/// A finding as a removal or change gives it, without places: the removal says where the row was.
+fn reason(finding: &Finding) -> Reason {
+    Reason {
+        kind: finding.kind,
+        text: crate::report::describe(&Finding {
+            file: None,
+            line: None,
+            first: None,
+            ..finding.clone()
+        }),
+        brief: brief(finding),
+    }
 }
 
 /// A finding as an annotation names it: what is wrong and the constraint, without the row's values.
@@ -1189,7 +1350,9 @@ fn describe_removals(
             line += newlines(&text);
             at = removal.span.end;
             removal.text = text;
-            if annotate {
+            if !removal.nulled.is_empty() {
+                removal.replacement = with_nulls(removal, annotate);
+            } else if annotate {
                 removal.replacement = annotation(removal, last_byte.is_none_or(|b| b == b'\n'));
             }
             last_byte = removal.text.last().copied().or(last_byte);
@@ -1208,22 +1371,10 @@ fn annotation(removal: &Removal, at_line_start: bool) -> Vec<u8> {
             briefs.push(&reason.brief);
         }
     }
-    let note = format!(
+    let note = safe(&format!(
         "sqlca fix removed {what} here ({}); see rejects.sql",
         briefs.join(", ")
-    );
-    // Names can hold anything. These characters read the same in every encoding the input can have, and none can end
-    // a comment, continue a line or start a SQL*Plus substitution.
-    let note: String = note
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || " _.,;()".contains(c) {
-                c
-            } else {
-                '?'
-            }
-        })
-        .collect();
+    ));
     let text = &removal.text;
     let eol: &[u8] = if text.ends_with(b"\r\n") {
         b"\r\n"
@@ -1247,6 +1398,43 @@ fn annotation(removal: &Removal, at_line_start: bool) -> Vec<u8> {
     comment
 }
 
+/// Names can hold anything. These characters read the same in every encoding the input can have, and none can end a
+/// comment, continue a line or start a SQL*Plus substitution.
+fn safe(note: &str) -> String {
+    note.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " _.,;()".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
+/// A changed row's text with NULL for each value it sets to NULL, followed with `annotate` by a comment saying why.
+fn with_nulls(removal: &Removal, annotate: bool) -> Vec<u8> {
+    let mut text = Vec::with_capacity(removal.text.len());
+    let mut at = 0;
+    for (column, span) in &removal.nulled {
+        let from = usize::try_from(span.start - removal.span.start).unwrap_or(usize::MAX);
+        let to = usize::try_from(span.end - removal.span.start).unwrap_or(usize::MAX);
+        let (Some(before), Some(_)) = (removal.text.get(at..from), removal.text.get(from..to))
+        else {
+            continue;
+        };
+        text.extend_from_slice(before);
+        text.extend_from_slice(b"NULL");
+        if annotate {
+            let note = safe(&format!("sqlca fix set {column} to NULL; see rejects.sql"));
+            text.extend_from_slice(format!(" /* {note} */").as_bytes());
+        }
+        at = to;
+    }
+    text.extend_from_slice(removal.text.get(at..).unwrap_or_default());
+    text
+}
+
 fn newlines(bytes: &[u8]) -> u64 {
     u64::try_from(bytes.split(|&b| b == b'\n').count() - 1).unwrap_or(0)
 }
@@ -1255,7 +1443,7 @@ fn newlines(bytes: &[u8]) -> u64 {
 pub fn write_rejects(removed: &[Removal], out: &mut dyn Write) -> io::Result<()> {
     writeln!(
         out,
-        "-- Rows sqlca fix removed, in their original form. Each can be corrected and loaded by hand."
+        "-- Rows sqlca fix removed or changed, in their original form. Each can be corrected and loaded by hand."
     )?;
     for removal in removed {
         writeln!(out)?;
@@ -1266,8 +1454,11 @@ pub fn write_rejects(removed: &[Removal], out: &mut dyn Write) -> io::Result<()>
         };
         writeln!(
             out,
-            "-- {}:{}{part}, round {}",
-            removal.file, removal.line, removal.round
+            "-- {}:{}{part}, round {}{}",
+            removal.file,
+            removal.line,
+            removal.round,
+            set_to_null(removal).map_or_else(String::new, |s| format!("; kept with {s}"))
         )?;
         for reason in &removal.reasons {
             writeln!(out, "--   {}", reason.text)?;
@@ -1278,6 +1469,15 @@ pub fn write_rejects(removed: &[Removal], out: &mut dyn Write) -> io::Result<()>
         }
     }
     Ok(())
+}
+
+/// `DEPT_ID set to NULL`, for a changed row.
+fn set_to_null(removal: &Removal) -> Option<String> {
+    if removal.nulled.is_empty() {
+        return None;
+    }
+    let columns: Vec<&str> = removal.nulled.iter().map(|(c, _)| c.as_str()).collect();
+    Some(format!("{} set to NULL", columns.join(", ")))
 }
 
 /// `Fixed      12 rows in 2 rounds (missing parent 9, duplicate key 2, NULL in NOT NULL 1); 1 left for review`.
@@ -1295,6 +1495,16 @@ pub fn summary(report: &FixReport) -> String {
     } else {
         format!(" ({})", kinds.join(", "))
     };
+    let changed = report
+        .removed
+        .iter()
+        .filter(|r| !r.nulled.is_empty())
+        .count();
+    let changed = if changed == 0 {
+        String::new()
+    } else {
+        format!("; {changed} kept with a foreign key set to NULL")
+    };
     let left = if report.left.is_empty() {
         String::new()
     } else {
@@ -1311,7 +1521,7 @@ pub fn summary(report: &FixReport) -> String {
         "Fixed     "
     };
     format!(
-        "{fixed} {} rows in {} {rounds}{kinds}{left}",
+        "{fixed} {} rows in {} {rounds}{kinds}{changed}{left}",
         report.removed.len(),
         report.rounds
     )
@@ -1347,9 +1557,10 @@ pub fn write_report(report: &FixReport, out: &mut dyn Write) -> io::Result<()> {
         } else {
             ""
         };
+        let kept = set_to_null(removal).map_or_else(String::new, |s| format!(": kept with {s}"));
         writeln!(
             out,
-            "  {}:{} (round {}{part})",
+            "  {}:{} (round {}{part}){kept}",
             removal.file, removal.line, removal.round
         )?;
         for reason in &removal.reasons {
@@ -1431,6 +1642,9 @@ struct JsonRemoval<'a> {
     round: usize,
     clause: bool,
     reasons: Vec<JsonReason<'a>>,
+    /// For a row kept rather than removed: the columns set to NULL.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    nulled: Vec<&'a str>,
 }
 #[derive(serde::Serialize)]
 struct JsonReason<'a> {
@@ -1490,6 +1704,7 @@ pub fn write_json_report(report: &FixReport, out: &mut dyn Write) -> io::Result<
                         text: &reason.text,
                     })
                     .collect(),
+                nulled: r.nulled.iter().map(|(c, _)| c.as_str()).collect(),
             })
             .collect(),
         left: report
