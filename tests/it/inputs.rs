@@ -330,3 +330,304 @@ fn check_and_fix_refuse_schema_files_without_data() {
         .assert()
         .success();
 }
+
+const TABLES: &[u8] = b"CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER, CONSTRAINT C_P FOREIGN KEY (P_ID) REFERENCES P (ID));\n";
+
+const TABLES_WITHOUT_KEY: &[u8] =
+    b"CREATE TABLE P (ID NUMBER PRIMARY KEY);\nCREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER);\n";
+
+/// A child file given before its parent's, the tables between them.
+fn parent_and_child() -> TempDir {
+    workspace(&[
+        ("c.sql", b"INSERT INTO C VALUES (1, 1);\nCOMMIT;\n"),
+        ("ddl.sql", TABLES),
+        ("p.sql", b"INSERT INTO P VALUES (1);\nCOMMIT;\n"),
+    ])
+}
+
+#[test]
+fn dependency_order_lists_parents_first_for_files_from() {
+    let dir = parent_and_child();
+    let output = sqlca_in(&dir)
+        .args([
+            "inputs",
+            "c.sql",
+            "p.sql",
+            "--schema",
+            "ddl.sql",
+            "--dependency-order",
+            "--format",
+            "paths",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let list = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(list, "p.sql\nc.sql\n");
+
+    let load_order = |stdin: &str| {
+        let output = sqlca_in(&dir)
+            .args([
+                "check",
+                "--load-order",
+                "--format",
+                "json",
+                "--schema",
+                "ddl.sql",
+                "--files-from",
+                "-",
+            ])
+            .write_stdin(stdin)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert!(load_order("c.sql\np.sql\n").contains("\"fk_load_order\""));
+    assert!(!load_order(&list).contains("\"fk_load_order\""));
+}
+
+#[test]
+fn the_dependency_order_says_why_each_data_file_moved() {
+    let dir = parent_and_child();
+    let found = listing(sqlca_in(&dir).args([
+        "inputs",
+        "c.sql",
+        "p.sql",
+        "--schema",
+        "ddl.sql",
+        "--dependency-order",
+    ]));
+    assert_eq!(
+        paths(&found),
+        [Path::new("ddl.sql"), Path::new("p.sql"), Path::new("c.sql")]
+    );
+    assert_eq!(found[0].order, "as given");
+    assert!(found[1..].iter().all(|l| l.order == "parents first"));
+}
+
+#[test]
+fn no_file_moves_across_table_ddl_so_every_row_keeps_its_constraints() {
+    // The child's row comes before its key is added without validating old rows, so it is never judged by it;
+    // moving it after the parent's file would move it after the key too.
+    let dir = workspace(&[
+        ("ddl.sql", TABLES_WITHOUT_KEY),
+        ("c.sql", b"INSERT INTO C VALUES (1, 9);\nCOMMIT;\n"),
+        (
+            "fk.sql",
+            b"ALTER TABLE C ADD CONSTRAINT C_P FOREIGN KEY (P_ID) REFERENCES P (ID) ENABLE NOVALIDATE;\n",
+        ),
+        ("p.sql", b"INSERT INTO P VALUES (1);\nCOMMIT;\n"),
+    ]);
+    let output = sqlca_in(&dir)
+        .args([
+            "inputs",
+            "ddl.sql",
+            "c.sql",
+            "fk.sql",
+            "p.sql",
+            "--dependency-order",
+            "--format",
+            "paths",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let list = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(list, "ddl.sql\nc.sql\nfk.sql\np.sql\n");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("warning: c.sql is listed before p.sql, which holds parent rows for C_P"),
+    );
+    sqlca_in(&dir)
+        .args(["check", "--files-from", "-"])
+        .write_stdin(list)
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn files_that_depend_on_each_other_keep_the_given_order_with_a_warning() {
+    let dir = workspace(&[
+        (
+            "ddl.sql",
+            b"CREATE TABLE A (ID NUMBER PRIMARY KEY, B_ID NUMBER);\n\
+              CREATE TABLE B (ID NUMBER PRIMARY KEY, A_ID NUMBER);\n\
+              ALTER TABLE A ADD CONSTRAINT A_B FOREIGN KEY (B_ID) REFERENCES B (ID);\n\
+              ALTER TABLE B ADD CONSTRAINT B_A FOREIGN KEY (A_ID) REFERENCES A (ID);\n",
+        ),
+        ("b.sql", b"INSERT INTO B VALUES (1, NULL);\nCOMMIT;\n"),
+        ("a.sql", b"INSERT INTO A VALUES (1, 1);\nCOMMIT;\n"),
+    ]);
+    sqlca_in(&dir)
+        .args([
+            "inputs",
+            "ddl.sql",
+            "b.sql",
+            "a.sql",
+            "--dependency-order",
+            "--format",
+            "paths",
+        ])
+        .assert()
+        .success()
+        .stdout("ddl.sql\nb.sql\na.sql\n")
+        .stderr(contains(
+            "warning: b.sql is listed before a.sql, which holds parent rows for B_A",
+        ));
+}
+
+#[test]
+fn print0_ends_each_path_with_a_nul_and_leaves_out_schema_files() {
+    let dir = parent_and_child();
+    sqlca_in(&dir)
+        .args([
+            "inputs",
+            "c.sql",
+            "p.sql",
+            "--schema",
+            "ddl.sql",
+            "--dependency-order",
+            "--print0",
+        ])
+        .assert()
+        .success()
+        .stdout("p.sql\0c.sql\0");
+}
+
+#[test]
+fn a_disabled_or_deferred_key_doesnt_order_files() {
+    for state in ["DISABLE", "DEFERRABLE INITIALLY DEFERRED"] {
+        let ddl = format!(
+            "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+             CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER, CONSTRAINT C_P FOREIGN KEY (P_ID) REFERENCES P (ID) {state});\n"
+        );
+        let dir = workspace(&[
+            ("c.sql", b"INSERT INTO C VALUES (1, 1);\nCOMMIT;\n"),
+            ("ddl.sql", ddl.as_bytes()),
+            ("p.sql", b"INSERT INTO P VALUES (1);\nCOMMIT;\n"),
+        ]);
+        sqlca_in(&dir)
+            .args([
+                "inputs",
+                "c.sql",
+                "ddl.sql",
+                "p.sql",
+                "--dependency-order",
+                "--format",
+                "paths",
+            ])
+            .assert()
+            .success()
+            .stdout("c.sql\nddl.sql\np.sql\n");
+    }
+}
+
+#[test]
+fn a_cycle_is_broken_inside_it_not_at_a_file_that_waits_on_it() {
+    let dir = workspace(&[
+        (
+            "ddl.sql",
+            b"CREATE TABLE A (ID NUMBER PRIMARY KEY, B_ID NUMBER);\n\
+              CREATE TABLE B (ID NUMBER PRIMARY KEY, A_ID NUMBER);\n\
+              CREATE TABLE D (ID NUMBER PRIMARY KEY, A_ID NUMBER);\n\
+              ALTER TABLE A ADD CONSTRAINT A_B FOREIGN KEY (B_ID) REFERENCES B (ID);\n\
+              ALTER TABLE B ADD CONSTRAINT B_A FOREIGN KEY (A_ID) REFERENCES A (ID);\n\
+              ALTER TABLE D ADD CONSTRAINT D_A FOREIGN KEY (A_ID) REFERENCES A (ID);\n",
+        ),
+        ("d.sql", b"INSERT INTO D VALUES (1, 1);\nCOMMIT;\n"),
+        ("a.sql", b"INSERT INTO A VALUES (1, NULL);\nCOMMIT;\n"),
+        ("b.sql", b"INSERT INTO B VALUES (1, 1);\nCOMMIT;\n"),
+    ]);
+    let output = sqlca_in(&dir)
+        .args([
+            "inputs",
+            "d.sql",
+            "a.sql",
+            "b.sql",
+            "--schema",
+            "ddl.sql",
+            "--dependency-order",
+            "--format",
+            "paths",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // D waits only on A, so it follows A as soon as the cycle is broken there.
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "a.sql\nd.sql\nb.sql\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("warning:"))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            "warning: a.sql is listed before b.sql, which holds parent rows for A_B: they wait on each other, or \
+             table DDL between them or rows of a table both hold keep them in order"
+        ]
+    );
+}
+
+#[test]
+fn a_statement_the_order_cant_read_is_an_error_and_the_listing_still_comes() {
+    let dir = workspace(&[
+        (
+            "c.sql",
+            b"INSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2;\nCOMMIT;\n",
+        ),
+        ("ddl.sql", TABLES),
+        ("p.sql", b"INSERT INTO P VALUES (1);\nCOMMIT;\n"),
+    ]);
+    sqlca_in(&dir)
+        .args([
+            "inputs",
+            "c.sql",
+            "p.sql",
+            "--schema",
+            "ddl.sql",
+            "--dependency-order",
+            "--format",
+            "paths",
+        ])
+        .assert()
+        .code(1)
+        .stdout("p.sql\nc.sql\n")
+        .stderr(contains("error: c.sql:2:"));
+}
+
+#[test]
+fn files_inserting_into_one_table_keep_their_order_so_duplicates_stay_the_same() {
+    // a.sql's row would wait for its parent in b.sql, but moving it after b.sql would make b.sql's row of the same
+    // key the first one, and a.sql's the duplicate.
+    let dir = workspace(&[
+        ("ddl.sql", TABLES),
+        ("a.sql", b"INSERT INTO C VALUES (1, 1);\nCOMMIT;\n"),
+        (
+            "b.sql",
+            b"INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (1, NULL);\nCOMMIT;\n",
+        ),
+    ]);
+    sqlca_in(&dir)
+        .args([
+            "inputs",
+            "a.sql",
+            "b.sql",
+            "--schema",
+            "ddl.sql",
+            "--dependency-order",
+            "--format",
+            "paths",
+        ])
+        .assert()
+        .success()
+        .stdout("a.sql\nb.sql\n")
+        .stderr(contains(
+            "warning: a.sql is listed before b.sql, which holds parent rows for C_P",
+        ));
+}

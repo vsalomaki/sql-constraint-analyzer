@@ -214,7 +214,10 @@ fn the_sqlcl_export_misses_only_a_commit_in_each_data_file() {
 mod generated {
     use sqlca::synth::{self, Layout, Noise, Placement};
 
-    use super::{assert_clean, check, difference, expected};
+    use super::{
+        BTreeSet, Finding, FindingKind, InputFile, Options, Path, assert_clean, check, difference,
+        expected, inputs,
+    };
 
     /// Generates an export and checks it in both modes.
     #[expect(clippy::unwrap_used, reason = "a failed generation fails the test")]
@@ -270,6 +273,87 @@ mod generated {
                 constraints,
                 ..base(3)
             });
+        }
+    }
+
+    /// A finding as the manifest writes it: its file relative to the export.
+    fn placed(finding: &Finding, root: &Path) -> Finding {
+        let file = finding.file.as_deref().map(|file| {
+            Path::new(file).strip_prefix(root).map_or_else(
+                |_| file.to_owned(),
+                |p| p.to_string_lossy().replace('\\', "/"),
+            )
+        });
+        Finding {
+            file,
+            ..finding.clone()
+        }
+    }
+
+    #[test]
+    fn data_files_in_dependency_order_leave_only_the_load_order_findings_within_a_file() {
+        let runs = (1..=4).flat_map(|seed| {
+            [Placement::BeforeData, Placement::AfterData].map(|constraints| (seed, constraints))
+        });
+        for (seed, constraints) in runs {
+            let options = synth::Options {
+                shuffle_order: true,
+                layout: Layout::Separate,
+                constraints,
+                ..base(seed)
+            };
+            let seed = format!("{seed} {constraints:?}");
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("shuffled");
+            synth::generate(&options, &root).unwrap();
+            let unshuffled = synth::generate(
+                &synth::Options {
+                    shuffle_order: false,
+                    ..options.clone()
+                },
+                &dir.path().join("unshuffled"),
+            )
+            .unwrap();
+            let check_options = Options {
+                encoding: options.encoding,
+                load_order: true,
+                ..Options::default()
+            };
+            let given = inputs(&root);
+            let ordered =
+                check::dependency_order(&given, &check_options, &mut check::Quiet).unwrap();
+            assert!(ordered.unmet.is_empty(), "seed {seed}: {:?}", ordered.unmet);
+            let findings = |files: &[InputFile]| -> (BTreeSet<Finding>, BTreeSet<Finding>) {
+                let report = check::run(files, &check_options).unwrap();
+                assert_clean(&report, &format!("seed {seed}"));
+                report
+                    .findings
+                    .iter()
+                    .map(|f| placed(f, &root))
+                    .partition(|f| f.kind == FindingKind::FkLoadOrder)
+            };
+            let (before_load_order, before) = findings(&given);
+            let (after_load_order, after) = findings(&ordered.files);
+            // Rows before a constraint added after the data are judged only in the end state.
+            assert_eq!(
+                before_load_order.is_empty(),
+                constraints == Placement::AfterData,
+                "seed {seed}: load-order findings before reordering"
+            );
+            assert_eq!(
+                after, before,
+                "seed {seed}: reordering changed other findings"
+            );
+            let within: BTreeSet<Finding> = unshuffled
+                .findings
+                .into_iter()
+                .filter(|f| f.kind == FindingKind::FkLoadOrder)
+                .collect();
+            assert!(
+                after_load_order == within,
+                "seed {seed}\n{}",
+                difference(&after_load_order, &within)
+            );
         }
     }
 

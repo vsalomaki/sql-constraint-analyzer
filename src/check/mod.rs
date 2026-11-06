@@ -2,12 +2,14 @@
 //! its table and runs the constraint checks on it. What a row can't settle on its own (a foreign key whose parent may
 //! come later) is resolved once every row is in.
 
+mod order;
 mod rows;
 mod structure;
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
+pub use order::{Ordered, dependency_order};
 pub use structure::{Row, StructureError, resolve_row};
 
 use crate::catalog::{Catalog, CatalogBuilder, CreatedTwice, Issue, Kind, Lookup, Origin, Parent};
@@ -164,6 +166,8 @@ pub fn run_with(
 pub struct Schema {
     catalog: Catalog,
     report: Report,
+    /// By file: whether the pass applied table DDL from it.
+    ddl: Vec<bool>,
 }
 
 impl Schema {
@@ -258,6 +262,7 @@ pub fn schema(
         rules.folder_schema(folder)
     });
     let mut builder = CatalogBuilder::new(rules, options.default_schema.clone(), homes);
+    let mut ddl = vec![false; files.len()];
     let (count, bytes) = total(files, in_schema_pass);
     observer.pass(Pass::Schema, count, bytes);
     for (index, file) in files.iter().enumerate() {
@@ -272,6 +277,9 @@ pub fn schema(
             &mut report,
             observer,
             |statement, origin| {
+                if let Some(applied) = ddl.get_mut(origin.file) {
+                    *applied = true;
+                }
                 builder.add(statement.into_owned(), origin);
             },
         )?;
@@ -303,7 +311,11 @@ pub fn schema(
         .into_iter()
         .map(|Issue { origin, message }| problem(&names, origin.file, Some(origin.line), message))
         .collect();
-    Ok(Schema { catalog, report })
+    Ok(Schema {
+        catalog,
+        report,
+        ddl,
+    })
 }
 
 /// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there and

@@ -242,7 +242,8 @@ fn warning_count(report: &Report) -> usize {
     report.warnings.len() + report.catalog.len() + usize::from(!report.not_followed.is_empty())
 }
 
-fn problem(problem: &Problem) -> String {
+/// A problem as one line: where, then what.
+pub fn problem(problem: &Problem) -> String {
     match problem.line {
         Some(line) => format!("{}:{line}: {}", problem.file, problem.message),
         None => format!("{}: {}", problem.file, problem.message),

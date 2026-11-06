@@ -27,7 +27,7 @@ pub struct Issue {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TableId(usize);
 
 /// A table's name; `schema` is `None` for a table created without one when no default schema was given.
@@ -381,7 +381,7 @@ struct Build {
     issues: Vec<Issue>,
 }
 
-fn display(rules: &Rules, name: &TableName) -> String {
+pub(crate) fn display(rules: &Rules, name: &TableName) -> String {
     match &name.schema {
         Some(schema) => rules.qualified(schema, &name.name),
         None => rules.display_ident(&name.name).into_owned(),
