@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use crate::dialect::Rules;
 use crate::statement::{
-    AlterAction, ColumnDef, ColumnDefault, ConstraintDef, ConstraintKind, ConstraintState,
-    DataType, Ident, IndexColumn, Name, Statement,
+    AlterAction, ColumnDef, ConstraintDef, ConstraintKind, ConstraintState, DataType, Expr, Ident,
+    IndexColumn, Name, Statement,
 };
 
 /// Where a statement is in the input: the file's position in the run, and its offset and line in that file.
@@ -41,7 +41,7 @@ pub struct TableName {
 pub struct Column {
     pub name: String,
     pub data_type: DataType,
-    pub default: Option<ColumnDefault>,
+    pub default: Option<Expr<'static>>,
     pub default_on_null: bool,
     pub identity: bool,
     pub invisible: bool,

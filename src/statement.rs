@@ -154,18 +154,10 @@ pub struct ConstraintDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ColumnDefault {
-    /// An expression the checker can evaluate, such as a literal.
-    Value(Expr<'static>),
-    /// One it can't, such as `SYSTIMESTAMP` or a sequence.
-    Opaque(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDef {
     pub name: Ident<'static>,
     pub data_type: DataType,
-    pub default: Option<ColumnDefault>,
+    pub default: Option<Expr<'static>>,
     /// `DEFAULT ON NULL`: an explicit NULL takes the default.
     pub default_on_null: bool,
     /// Identity and invisible columns are noted so the checker can warn; their values are not checked.

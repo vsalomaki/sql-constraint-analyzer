@@ -12,7 +12,7 @@ use crate::catalog::{Catalog, Column, Constraint, Kind, Origin, Parent, Table, T
 use crate::dialect::{DialectId, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::source::Encoding;
-use crate::statement::{ColumnDefault, DataType, Expr, InsertRow};
+use crate::statement::{DataType, Expr, InsertRow};
 use crate::value::{self, Canonical, Literal};
 
 /// Where a row is: its file's position in the run, its offset there, and its line.
@@ -240,8 +240,7 @@ impl<'a> Checker<'a> {
         encoding: Encoding,
     ) -> Literal<'v> {
         let default = || match &column.default {
-            Some(ColumnDefault::Value(expr)) => self.dialect.evaluate(expr, encoding),
-            Some(ColumnDefault::Opaque(text)) => Literal::Unknown(format!("the default {text}")),
+            Some(expr) => self.dialect.evaluate(expr, encoding),
             None if column.identity => {
                 Literal::Unknown("an identity column's generated value".to_owned())
             }
