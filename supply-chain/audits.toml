@@ -7,6 +7,30 @@ criteria = "safe-to-deploy"
 delta = "2.11.1 -> 2.13.2"
 notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). New safe APIs (all_named, iter_equal_names) and macro refactoring; no new unsafe, dependencies or build script."
 
+[[audits.block-buffer]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.10.4 -> 0.12.1"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Rewrite onto hybrid-array; no_std, no build script, no I/O. Its 22 unsafe sites rely on the cursor staying within the block with the bytes before it initialised; every safe path keeps that, panics included, through a reset guard. The Clone safety comment is stale (Drop exists but only zeroizes, behind a feature that is off); the bitwise clone is still sound."
+
+[[audits.crypto-common]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.6 -> 0.2.2"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Moves to hybrid-array and adds serialisable-state impls and optional RNG helpers (getrandom/rand_core, off by default). forbid(unsafe_code), no_std, no build script, no I/O."
+
+[[audits.digest]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.11.3"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Trait crate plus wrapper macros combining a hash core with block-buffer. forbid(unsafe_code), no_std, no build script, no statics; alloc, dev, mac, oid, zeroize and rand_core are off by default."
+
+[[audits.hybrid-array]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.4.15"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). No build script, proc macros or I/O; no default features. All unsafe is layout casting of the repr(transparent) Array<T, U> to and from [T; N], slices and MaybeUninit, resting on the ArraySize invariant (all 820 generated sizes checked, and asserted by the crate's tests). Slice-to-array casts check lengths first; try_from_fn drops only initialised elements on error or panic; split/flatten/unflatten move ownership exactly once. Soundness also relies on typenum's constants."
+
 [[audits.libc]]
 who = "Ville Salomäki <vsalomaki@gmail.com>"
 criteria = "safe-to-deploy"
@@ -18,6 +42,12 @@ who = "Ville Salomäki <vsalomaki@gmail.com>"
 criteria = "safe-to-deploy"
 version = "1.2.0"
 notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Reads the process's own memory use: /proc/self/statm or smaps (read-only), task_info on macOS, GetProcessMemoryInfo on Windows, kinfo_getproc on FreeBSD; results read only after success. No build script, network, writes or processes."
+
+[[audits.sha2]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.10.9 -> 0.11.1"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). No build script, I/O, environment, process or FFI use. Hardware backends (x86 SHA-NI/AVX2, aarch64 sha2/sha3) are chosen at runtime by cpufeatures, else portable code; opt-in --cfg backends are guarded by compile_error!. SIMD loads and stores use fixed-size blocks and state or bounds-checked slices; unchecked round-constant reads use literal indices within the tables."
 
 [[audits.terminal_size]]
 who = "Ville Salomäki <vsalomaki@gmail.com>"
