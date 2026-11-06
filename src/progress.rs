@@ -4,6 +4,8 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::catalog::{Catalog, Kind, Parent, Table};
 use crate::check::Observer;
 use crate::dialect::Pass;
@@ -145,37 +147,26 @@ impl<'a> Progress<'a> {
             return;
         }
         let name = self.file.as_ref().map_or("", |(n, _, _)| n.as_str());
-        let name: String = name
-            .chars()
-            .rev()
-            .take(24)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let line = match self.pass {
-            Some((pass, started)) => self.bar(pass, started, &name),
-            None if self.stage.is_some() => format!("{} {name}", self.step()),
+        let (head, mut tail) = match self.pass {
+            Some((pass, started)) => self.bar(pass, started),
+            None if self.stage.is_some() => (format!("{} ", self.step()), Vec::new()),
             None => return,
         };
-        let memory = memory_stats::memory_stats().map_or(String::new(), |memory| {
-            format!(" · mem {}", size(memory.physical_mem as u64))
-        });
-        // One column short of the width, so the cursor never wraps to the next line; the memory is cut last.
-        let room = width.saturating_sub(1);
-        let line: String = line
-            .chars()
-            .take(room.saturating_sub(memory.chars().count()))
-            .chain(memory.chars())
-            .take(room)
-            .collect();
+        if let Some(memory) = memory_stats::memory_stats() {
+            tail.push((
+                Keep::Memory,
+                format!(" · mem {}", size(memory.physical_mem as u64)),
+            ));
+        }
+        // One column short of the width, so the cursor never wraps to the next line.
+        let line = fit(&head, name, tail, width.saturating_sub(1));
         drop(write!(self.err, "\r\x1b[2K{line}"));
         drop(self.err.flush());
         self.drawn = Some(Instant::now());
     }
 
-    /// `[2/3] Rows    ███░░░░░░░  30%  a.sql · 40.0 MB/s · ETA 12 s`, before the memory in use.
-    fn bar(&self, pass: Pass, started: Instant, name: &str) -> String {
+    /// `[2/3] Rows    ███░░░░░░░  30%  `, and the speed and ETA that go after the file's name.
+    fn bar(&self, pass: Pass, started: Instant) -> (String, Vec<(Keep, String)>) {
         let label = match pass {
             Pass::Schema => "Schema",
             Pass::Rows => "Rows",
@@ -200,20 +191,13 @@ impl<'a> Progress<'a> {
         } else {
             0.0
         };
-        let eta = if rate > 0.0 {
-            format!(
-                " · ETA {:.0} s",
-                ratio(total.saturating_sub(read), 1) / rate
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{} {label:<7} {bar} {:>3.0}%  {name} · {}/s{eta}",
-            self.step(),
-            share * 100.0,
-            size(rate_bytes(rate)),
-        )
+        let mut tail = vec![(Keep::Speed, format!(" · {}/s", size(rate_bytes(rate))))];
+        if rate > 0.0 {
+            let eta = ratio(total.saturating_sub(read), 1) / rate;
+            tail.push((Keep::Eta, format!(" · ETA {eta:.0} s")));
+        }
+        let head = format!("{} {label:<7} {bar} {:>3.0}%  ", self.step(), share * 100.0);
+        (head, tail)
     }
 }
 
@@ -263,6 +247,62 @@ impl Observer for Progress<'_> {
         self.done = 0;
         self.offset = 0;
     }
+}
+
+/// The parts after the file's name on the live line, least worth keeping first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Keep {
+    Memory,
+    Speed,
+    Eta,
+}
+
+/// A file name shorter than this is no help; a part goes first.
+const SHORTEST_NAME: usize = 12;
+
+/// The longest file name shown, by its end.
+const LONGEST_NAME: usize = 24;
+
+/// `head`, the end of `name` and the `tail` parts in at most `room` terminal columns: the name is shortened first,
+/// then the parts go, the one least worth keeping first; the head is cut only when nothing else is left.
+fn fit(head: &str, name: &str, mut tail: Vec<(Keep, String)>, room: usize) -> String {
+    loop {
+        let fixed = head.width() + tail.iter().map(|(_, t)| t.width()).sum::<usize>();
+        let left = room.saturating_sub(fixed).min(LONGEST_NAME);
+        if name.width() <= left || left >= SHORTEST_NAME || tail.is_empty() {
+            let tail: String = tail.into_iter().map(|(_, t)| t).collect();
+            let line = format!("{head}{}{tail}", columns_from_end(name, left));
+            return columns_from_start(&line, room).to_owned();
+        }
+        if let Some(least) = tail.iter().enumerate().min_by_key(|(_, (keep, _))| *keep) {
+            let index = least.0;
+            tail.remove(index);
+        }
+    }
+}
+
+/// The longest start of `text` that fits in `columns` terminal columns, measured whole, as emoji sequences are.
+fn columns_from_start(text: &str, columns: usize) -> &str {
+    let mut fits = "";
+    for (at, c) in text.char_indices() {
+        match text.get(..at + c.len_utf8()) {
+            Some(start) if start.width() <= columns => fits = start,
+            _ => break,
+        }
+    }
+    fits
+}
+
+/// The longest end of `text` that fits in `columns` terminal columns, measured whole.
+fn columns_from_end(text: &str, columns: usize) -> &str {
+    let mut fits = "";
+    for (at, _) in text.char_indices().rev() {
+        match text.get(at..) {
+            Some(end) if end.width() <= columns => fits = end,
+            _ => break,
+        }
+    }
+    fits
 }
 
 fn ratio(a: u64, b: u64) -> f64 {
@@ -501,6 +541,59 @@ mod tests {
             number.parse::<f64>().is_ok() && ["B", "kB", "MB", "GB", "TB"].contains(&unit),
             "the whole size shows: {line:?}"
         );
+    }
+
+    #[test]
+    fn a_narrow_line_shortens_the_name_then_drops_memory_speed_and_eta_in_turn() {
+        let head = "[check 2] Rows    █████░░░░░  51%  ";
+        let tail = || {
+            vec![
+                (Keep::Speed, " · 80.4 MB/s".to_owned()),
+                (Keep::Eta, " · ETA 6 s".to_owned()),
+                (Keep::Memory, " · mem 321.6 MB".to_owned()),
+            ]
+        };
+        let name = "app/data/TIMESHEETS.sql";
+        let line = |room| fit(head, name, tail(), room);
+        assert_eq!(
+            line(200),
+            "[check 2] Rows    █████░░░░░  51%  app/data/TIMESHEETS.sql · 80.4 MB/s · ETA 6 s · mem 321.6 MB"
+        );
+        // An 80-column terminal: the name gives way, keeping its end, and then the memory.
+        assert_eq!(
+            line(79),
+            "[check 2] Rows    █████░░░░░  51%  pp/data/TIMESHEETS.sql · 80.4 MB/s · ETA 6 s"
+        );
+        assert_eq!(
+            line(60),
+            "[check 2] Rows    █████░░░░░  51%  /TIMESHEETS.sql · ETA 6 s"
+        );
+        let narrow = line(40);
+        assert!(
+            narrow.starts_with(head) && !narrow.contains(" · "),
+            "{narrow}"
+        );
+        assert_eq!(line(30).chars().count(), 30);
+        // Wide characters count by their columns.
+        let wide = format!("{}.sql", "表".repeat(20));
+        for room in [200, 79, 60, 40] {
+            let line = fit(head, &wide, tail(), room);
+            assert!(line.width() <= room, "{room}: {line}");
+            assert!(
+                line.contains("表.sql · 80.4 MB/s · ETA 6 s") || room < 79,
+                "{room}: {line}"
+            );
+        }
+        // An emoji presentation sequence is two columns, though its characters' widths add up to one.
+        let emoji = "prefix/aaaaaaaaaa\u{2764}\u{fe0f}\u{2764}\u{fe0f}.sql";
+        for room in 10..=30 {
+            let line = fit("", emoji, Vec::new(), room);
+            assert!(line.width() <= room, "{room}: {line}");
+        }
+        // A long name shows only its end.
+        let long = "a/very/long/path/to/a/data/file/with/a/long/name.sql";
+        let end: String = long.chars().skip(long.len() - LONGEST_NAME).collect();
+        assert_eq!(fit(head, long, Vec::new(), 200), format!("{head}{end}"));
     }
 
     #[test]

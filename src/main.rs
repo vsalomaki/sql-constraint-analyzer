@@ -386,11 +386,11 @@ fn display(progress: ProgressArg, verbosity: report::Verbosity) -> progress::Dis
     }
 }
 
-/// The terminal's width from `COLUMNS` when the shell exports it, else 80.
+/// The width of the terminal stderr writes to, else `COLUMNS` when the shell exports it, else 80.
 fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse().ok())
+    terminal_size::terminal_size_of(io::stderr())
+        .map(|(width, _)| usize::from(width.0))
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
         .filter(|&w| w > 0)
         .unwrap_or(80)
 }
