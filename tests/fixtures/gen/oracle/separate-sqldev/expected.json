@@ -1,5 +1,5 @@
 {
-  "generator": "sqlca-gen 0.2.0",
+  "generator": "sqlca-gen 0.2.1",
   "options": {
     "dialect": "oracle",
     "seed": 1,
