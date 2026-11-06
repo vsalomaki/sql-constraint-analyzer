@@ -4,8 +4,7 @@ A Rust CLI (`sqlca`) that checks Oracle SQL exports for rows violating declared 
 plus a test-data generator (`sqlca-gen`). One crate: library `sqlca` (`src/lib.rs`), binaries `src/main.rs` and
 `src/bin/sqlca-gen.rs`.
 
-If `PLAN.md` exists in the checkout, it holds the design and milestones. It is local only and git-ignored: never
-commit it, quote it in commit messages, or copy it into tracked files.
+Open work is tracked in GitHub issues; the roadmap issue lists the larger features after v1.
 
 ## Setup
 
@@ -91,6 +90,27 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   - Trust a new publisher only if Mozilla, ISRG or the Bytecode Alliance trust them. Trust entries expire after a
     year; renew them with `cargo vet trust`.
   - Issue #35 lists the exemptions still to vet; a PR that vets one removes its exemption.
+
+## Fixing
+
+`fix` acts only on end-state violations, as decided rules with tests:
+
+- **Acted on:** a missing parent (`--on-fk`), a duplicate key (`--on-duplicate`) and NULL in a NOT NULL column
+  (`--on-not-null`). `--on-fk null` drops the row when one of the key's columns can't be NULL.
+- **Never acted on:**
+  - structure errors, unverifiable keys and disabled constraints;
+  - load-order findings, since the row is valid in the end state; `fix` never reorders statements;
+  - a key resting on an assumed value, and a row on a line holding several rows, both left for review.
+- **Output is the input's bytes** with only the affected statements cut or their values replaced. An `INSERT ALL`
+  loses only the bad `INTO` clause, and goes whole when no row is left. Unchanged files are hard-linked or copied.
+- **Rounds:** a removed row's key never enters the parent map, so its children fail in the same round. Rounds
+  repeat until one removes nothing. A parent table whose rows the fix removed is not "empty": its children are
+  missing parents, not one summary finding.
+- **Verify:** after writing, `fix` checks its own output with the same inputs and options. That check gives the
+  run's findings and exit code, and a fixed kind left in the output is a bug.
+- **Nothing is lost:** each removed or changed statement goes to `rejects.sql` in its original form. In-place
+  writes go through a temporary file and a rename, and a run that fails before writing writes nothing.
+  `--in-place --no-backup --no-report` is refused.
 
 ## Engineering principles
 
