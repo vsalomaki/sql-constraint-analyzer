@@ -13,7 +13,7 @@ use crate::catalog::{Catalog, CatalogBuilder, Issue, Kind, Origin};
 use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::Finding;
 use crate::input::{self, InputError, InputFile, Role};
-use crate::source::{Encoding, Piece};
+use crate::source::{Encoding, Piece, Span};
 use crate::statement::{Skip, Statement};
 
 #[derive(Debug, Clone, Default)]
@@ -121,6 +121,34 @@ pub fn run_with(
     options: &Options,
     observer: &mut dyn Observer,
 ) -> Result<Report, InputError> {
+    run_inner(files, options, &[], observer)
+}
+
+/// `run`, reading each file as if the rows inside its `removed` spans weren't there. `removed` is by file position,
+/// each file's spans sorted and apart.
+pub fn run_without(
+    files: &[InputFile],
+    options: &Options,
+    removed: &[Vec<Span>],
+) -> Result<Report, InputError> {
+    run_inner(files, options, removed, &mut Quiet)
+}
+
+/// Whether `span` lies inside one of the sorted, separate `cuts`.
+pub fn is_removed(cuts: &[Span], span: Span) -> bool {
+    let after = cuts.partition_point(|c| c.start <= span.start);
+    after
+        .checked_sub(1)
+        .and_then(|i| cuts.get(i))
+        .is_some_and(|c| span.end <= c.end)
+}
+
+fn run_inner(
+    files: &[InputFile],
+    options: &Options,
+    removed: &[Vec<Span>],
+    observer: &mut dyn Observer,
+) -> Result<Report, InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
     let reading = Reading {
         names: &names,
@@ -173,6 +201,7 @@ pub fn run_with(
             continue;
         }
         let reference = file.role == Role::Reference;
+        let cuts = removed.get(index).map_or(&[][..], Vec::as_slice);
         read(
             &reading,
             file,
@@ -184,7 +213,7 @@ pub fn run_with(
                 Statement::Insert(inserted) => {
                     let file = names.get(index).cloned().unwrap_or_default();
                     let mut matched = Vec::with_capacity(inserted.len());
-                    for row in &inserted {
+                    for row in inserted.iter().filter(|r| !is_removed(cuts, r.span)) {
                         count += 1;
                         let at = rows::At {
                             file: index,
