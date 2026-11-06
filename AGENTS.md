@@ -163,8 +163,25 @@ Linux, and `test` (a default-features build, then nextest with all features) on 
 - Check workflow edits with `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7`.
 - `.github/workflows/oracle.yml` runs `scripts/oracle/check.sh` on a runner, started by hand only (`workflow_dispatch`).
 - `.github/workflows/perf.yml` runs `make perf` the same way, by hand only. Its numbers are a trend, not a gate.
+- `.github/workflows/release.yml` runs on a `v*` tag: it fails unless the tag is `v` + Cargo.toml's `version`,
+  builds `sqlca` with `--profile dist` (Linux x86_64 and aarch64 as gnu on Ubuntu 22.04 for speed and as static
+  musl for reach, macOS aarch64, Windows x86_64),
+  and creates a draft release with the archives, `SHA256SUMS` and a build-provenance attestation. A manual run
+  only builds the archives, as workflow artifacts. `[profile.release]` is the perf baseline; shipped binaries use
+  `[profile.dist]`.
 - The repository setting "Require approval for all external contributors" holds a fork's run for approval as a
   second layer.
+
+### Releasing
+
+1. Bump `version` in `Cargo.toml` (and `Cargo.lock`, which `cargo build` updates) in a pull request; merge it.
+2. Tag the merged commit on `main` and push the tag: `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
+3. Review the draft release `release.yml` creates (archives, notes) and publish it by hand.
+
+The "release tags" ruleset protects `v*` tags: they can't be moved or deleted, so a wrong tag means a new version,
+not a re-tag.
+
+A dispatch of `release.yml` (`gh workflow run release.yml --ref <branch>`) is a dry run of the build.
 
 ## Git workflow
 
