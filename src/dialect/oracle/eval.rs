@@ -189,9 +189,12 @@ fn elements(mask: &str) -> impl Iterator<Item = Option<Element>> {
     let mut rest = mask.as_bytes();
     std::iter::from_fn(move || {
         let &b = rest.first()?;
+        let first = b.to_ascii_uppercase();
         let (element, len) = match ELEMENTS.iter().find(|(name, _)| {
-            rest.get(..name.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
+            name.as_bytes().first() == Some(&first)
+                && rest
+                    .get(..name.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
         }) {
             Some((name, element)) => (Some(*element), name.len()),
             None if is_separator(b) => (Some(Element::Separator), 1),
