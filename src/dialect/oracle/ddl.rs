@@ -39,7 +39,7 @@ pub fn parse_ddl(
 }
 
 /// Whether a statement is table or index DDL, by its first words, without lexing it.
-pub(crate) fn is_table_ddl(text: &[u8]) -> bool {
+fn is_table_ddl(text: &[u8]) -> bool {
     let is = |word: &[u8], keyword: &str| word.eq_ignore_ascii_case(keyword.as_bytes());
     let mut words = words(text).take(4);
     match words.next() {
@@ -435,7 +435,6 @@ fn references(c: &mut Cursor, columns: Vec<Ident<'static>>) -> Result<Constraint
 struct WrittenState {
     enabled: Option<bool>,
     validated: Option<bool>,
-    deferrable: Option<bool>,
     initially_deferred: Option<bool>,
 }
 
@@ -447,12 +446,10 @@ impl WrittenState {
 
     fn into_state(self) -> ConstraintState {
         let enabled = self.enabled.unwrap_or(true);
-        let initially_deferred = self.initially_deferred.unwrap_or(false);
         ConstraintState {
             enabled,
             validated: self.validated().unwrap_or(enabled),
-            deferrable: self.deferrable.unwrap_or(initially_deferred),
-            initially_deferred,
+            initially_deferred: self.initially_deferred.unwrap_or(false),
         }
     }
 
@@ -476,10 +473,7 @@ fn constraint_state(c: &mut Cursor) -> Result<WrittenState, ParseError> {
             state.validated = Some(true);
         } else if c.eat_word("NOVALIDATE") {
             state.validated = Some(false);
-        } else if c.eat_word("DEFERRABLE") {
-            state.deferrable = Some(true);
-        } else if c.eat_words(&["NOT", "DEFERRABLE"]) {
-            state.deferrable = Some(false);
+        } else if c.eat_word("DEFERRABLE") || c.eat_words(&["NOT", "DEFERRABLE"]) {
         } else if c.eat_words(&["INITIALLY", "DEFERRED"]) {
             state.initially_deferred = Some(true);
         } else if c.eat_words(&["INITIALLY", "IMMEDIATE"]) {
@@ -672,13 +666,14 @@ fn enable_constraint(c: &mut Cursor) -> Result<Option<AlterAction>, ParseError> 
             break;
         }
     }
+    let written = WrittenState {
+        enabled: Some(enabled),
+        validated,
+        initially_deferred: None,
+    };
     Ok(Some(AlterAction::ChangeConstraint {
         name,
-        change: StateChange {
-            enabled: Some(enabled),
-            validated: validated.or(Some(enabled)),
-            initially_deferred: None,
-        },
+        change: written.into_change(),
     }))
 }
 
@@ -782,7 +777,6 @@ mod tests {
     const ENFORCED: ConstraintState = ConstraintState {
         enabled: true,
         validated: true,
-        deferrable: false,
         initially_deferred: false,
     };
 
@@ -1070,25 +1064,25 @@ mod tests {
                 panic!("{actions:?}");
             };
             let s = def.state;
-            (s.enabled, s.validated, s.deferrable, s.initially_deferred)
+            (s.enabled, s.validated, s.initially_deferred)
         };
-        assert_eq!(state(""), (true, true, false, false));
-        assert_eq!(state("ENABLE"), (true, true, false, false));
-        assert_eq!(state("ENABLE NOVALIDATE"), (true, false, false, false));
-        assert_eq!(state("DISABLE"), (false, false, false, false));
-        assert_eq!(state("DISABLE VALIDATE"), (false, true, false, false));
+        assert_eq!(state(""), (true, true, false));
+        assert_eq!(state("ENABLE"), (true, true, false));
+        assert_eq!(state("ENABLE NOVALIDATE"), (true, false, false));
+        assert_eq!(state("DISABLE"), (false, false, false));
+        assert_eq!(state("DISABLE VALIDATE"), (false, true, false));
         assert_eq!(
             state("DEFERRABLE INITIALLY DEFERRED ENABLE"),
-            (true, true, true, true)
+            (true, true, true)
         );
-        assert_eq!(state("INITIALLY DEFERRED"), (true, true, true, true));
+        assert_eq!(state("INITIALLY DEFERRED"), (true, true, true));
         assert_eq!(
             state("ON DELETE CASCADE RELY DISABLE NOVALIDATE"),
-            (false, false, false, false)
+            (false, false, false)
         );
         assert_eq!(
             state("NOT DEFERRABLE USING INDEX \"APP\".\"X\" ENABLE"),
-            (true, true, false, false)
+            (true, true, false)
         );
     }
 
@@ -1500,6 +1494,7 @@ mod catalog {
                             Parent::Key {
                                 table: id,
                                 constraint,
+                                ..
                             },
                     } => {
                         let parent = catalog.table(*id).unwrap();
@@ -1667,12 +1662,11 @@ mod catalog {
             (
                 fk.state.enabled,
                 fk.state.validated,
-                fk.state.deferrable,
                 fk.state.initially_deferred
             ),
-            (true, false, true, true)
+            (true, false, true)
         );
-        assert_eq!(fk.declared.line, 3);
+        assert_eq!(fk.enabled_at.line, 3);
     }
 }
 
@@ -1948,6 +1942,7 @@ mod fixtures {
                             Parent::Key {
                                 table: parent,
                                 constraint,
+                                ..
                             },
                     },
                     schema::Kind::Foreign {
@@ -1982,8 +1977,7 @@ mod fixtures {
                     assert_eq!(key_columns, wanted, "{at}: {}", generated.name);
                     assert_eq!(names(t, actual), columns, "{at}: {}", generated.name);
                     assert_eq!(
-                        (c.state.deferrable, c.state.initially_deferred),
-                        (deferred, deferred),
+                        c.state.initially_deferred, deferred,
                         "{at}: {}",
                         generated.name
                     );

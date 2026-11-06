@@ -355,18 +355,23 @@ pub fn days_from_date(year: i64, month: u32, day: u32) -> Option<i64> {
     if day == 0 || day > days_in_month {
         return None;
     }
-    // Howard Hinnant's days_from_civil.
+    Some(days_from_civil(year, month, day))
+}
+
+/// Days since 1970-01-01 of (year, month 1–12, day 1–31), not checked to be a date (Howard Hinnant's
+/// `days_from_civil`).
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
     let mp = i64::from(if month > 2 { month - 3 } else { month + 9 });
     let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe - 719_468)
+    era * 146_097 + doe - 719_468
 }
 
 /// (year, month 1–12, day 1–31) of a day counted from 1970-01-01 (Howard Hinnant's `civil_from_days`).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

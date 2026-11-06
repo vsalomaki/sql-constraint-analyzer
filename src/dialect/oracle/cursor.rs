@@ -6,7 +6,7 @@ use std::cell::Cell;
 
 use super::RULES;
 use super::lex::{self, Token, TokenKind, is_word_byte};
-use crate::source::{Encoding, Piece, Span};
+use crate::source::{Encoding, Piece, Span, to_u64};
 use crate::statement::{Ident, Name, ParseError};
 
 /// Whether the statement's first word, past blanks and comments, is `keyword`, without lexing the rest.
@@ -377,8 +377,4 @@ impl<'a> Cursor<'a> {
             }
         }
     }
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).unwrap_or(u64::MAX)
 }

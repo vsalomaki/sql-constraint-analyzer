@@ -156,7 +156,8 @@ pub fn run_with(
     options: &Options,
     observer: &mut dyn Observer,
 ) -> Result<Report, InputError> {
-    run_inner(files, options, &[], observer)
+    let schema = schema(files, options, observer)?;
+    run_without(files, options, &schema, &[], &[], observer)
 }
 
 /// The catalog the schema pass built from the files' DDL, with what the pass reported.
@@ -171,28 +172,6 @@ impl Schema {
     }
 }
 
-/// The schema pass of `run`, for `run_without` to check rows against as often as it is asked.
-pub fn schema(
-    files: &[InputFile],
-    options: &Options,
-    observer: &mut dyn Observer,
-) -> Result<Schema, InputError> {
-    read_schema(files, options, observer)
-}
-
-/// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there and
-/// the values at its `nulled` spans were NULL. Both are by file position, each file's spans sorted and apart.
-pub fn run_without(
-    files: &[InputFile],
-    options: &Options,
-    schema: &Schema,
-    removed: &[Vec<Span>],
-    nulled: &[Vec<Span>],
-    observer: &mut dyn Observer,
-) -> Result<Report, InputError> {
-    check_rows(files, options, schema, removed, nulled, observer)
-}
-
 /// Whether `span` lies inside one of the sorted, separate `cuts`.
 pub fn is_removed(cuts: &[Span], span: Span) -> bool {
     let after = cuts.partition_point(|c| c.start <= span.start);
@@ -200,16 +179,6 @@ pub fn is_removed(cuts: &[Span], span: Span) -> bool {
         .checked_sub(1)
         .and_then(|i| cuts.get(i))
         .is_some_and(|c| span.end <= c.end)
-}
-
-fn run_inner(
-    files: &[InputFile],
-    options: &Options,
-    removed: &[Vec<Span>],
-    observer: &mut dyn Observer,
-) -> Result<Report, InputError> {
-    let schema = read_schema(files, options, observer)?;
-    check_rows(files, options, &schema, removed, &[], observer)
 }
 
 /// By file position, the schema named after the file's folder as `mode` picks it, below the folder all files share.
@@ -247,7 +216,7 @@ fn homes(
 }
 
 /// The deepest folder that holds all of `folders`.
-fn shared_folder(folders: &[PathBuf]) -> PathBuf {
+pub(crate) fn shared_folder(folders: &[PathBuf]) -> PathBuf {
     let mut folders = folders.iter();
     let Some(first) = folders.next() else {
         return PathBuf::new();
@@ -270,7 +239,8 @@ fn total(files: &[InputFile], pass: impl Fn(&InputFile) -> bool) -> (usize, u64)
     (read.len(), read.iter().map(|f| f.bytes).sum::<u64>())
 }
 
-fn read_schema(
+/// The schema pass of `run`, for `run_without` to check rows against as often as it is asked.
+pub fn schema(
     files: &[InputFile],
     options: &Options,
     observer: &mut dyn Observer,
@@ -336,7 +306,9 @@ fn read_schema(
     Ok(Schema { catalog, report })
 }
 
-fn check_rows(
+/// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there and
+/// the values at its `nulled` spans were NULL. Both are by file position, each file's spans sorted and apart.
+pub fn run_without(
     files: &[InputFile],
     options: &Options,
     schema: &Schema,
@@ -509,11 +481,7 @@ fn referenced(catalog: &Catalog) -> BTreeSet<(String, Vec<String>)> {
     let mut keys = BTreeSet::new();
     for constraint in catalog.tables().iter().flat_map(|t| &t.constraints) {
         let Kind::ForeignKey {
-            parent:
-                Parent::Key {
-                    table,
-                    constraint: key,
-                },
+            parent: Parent::Key { table, columns, .. },
             ..
         } = &constraint.kind
         else {
@@ -525,17 +493,7 @@ fn referenced(catalog: &Catalog) -> BTreeSet<(String, Vec<String>)> {
         let Some(parent) = catalog.table(*table) else {
             continue;
         };
-        let Some(Kind::PrimaryKey { columns } | Kind::Unique { columns, .. }) =
-            parent.constraints.get(*key).map(|c| &c.kind)
-        else {
-            continue;
-        };
-        let names = columns
-            .iter()
-            .filter_map(|&c| parent.columns.get(c))
-            .map(|c| c.name.clone())
-            .collect();
-        keys.insert((catalog.display(&parent.name), names));
+        keys.insert((catalog.display(&parent.name), parent.column_names(columns)));
     }
     keys
 }

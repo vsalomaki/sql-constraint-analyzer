@@ -149,11 +149,7 @@ impl<'a> Checker<'a> {
             kind,
             constraint: self.constraint_name(table, constraint),
             table: self.catalog.display(&table.name),
-            columns: columns
-                .iter()
-                .filter_map(|&c| table.columns.get(c))
-                .map(|c| c.name.clone())
-                .collect(),
+            columns: table.column_names(columns),
             file: None,
             line: None,
             key: Vec::new(),
@@ -192,9 +188,9 @@ impl<'a> Checker<'a> {
             return;
         }
         let catalog = self.catalog;
-        for ((matched, row, at), literals) in rows.iter().zip(&literals) {
+        for ((matched, _, at), literals) in rows.iter().zip(&literals) {
             if let Some(table) = catalog.table(matched.table) {
-                self.foreign_keys(matched.table, table, literals, row, *at);
+                self.foreign_keys(matched.table, table, literals, *at);
             }
         }
     }
@@ -382,14 +378,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Looks the row's foreign keys up in their parents' key maps; a miss waits for the end of the input.
-    fn foreign_keys(
-        &mut self,
-        id: TableId,
-        table: &Table,
-        literals: &[Literal],
-        row: &InsertRow,
-        at: At,
-    ) {
+    fn foreign_keys(&mut self, id: TableId, table: &Table, literals: &[Literal], at: At) {
         for (position, constraint) in table.constraints.iter().enumerate() {
             let Kind::ForeignKey { columns, parent } = &constraint.kind else {
                 continue;
@@ -397,23 +386,18 @@ impl<'a> Checker<'a> {
             if !Self::applies(constraint, at) {
                 continue;
             }
-            let (parent_id, parent_key) = match parent {
-                Parent::Key { table, constraint } => (*table, *constraint),
+            let (parent_id, parent_key, parent_columns) = match parent {
+                Parent::Key {
+                    table,
+                    constraint,
+                    columns,
+                } => (*table, *constraint, columns),
                 Parent::Missing(_) => {
                     *self.no_parent.entry((id, position)).or_default() += 1;
                     continue;
                 }
             };
-            let Some((parent_table, parent_columns)) =
-                self.catalog.table(parent_id).and_then(|p| {
-                    let key = p.constraints.get(parent_key)?;
-                    let (Kind::PrimaryKey { columns } | Kind::Unique { columns, .. }) = &key.kind
-                    else {
-                        return None;
-                    };
-                    Some((p, columns))
-                })
-            else {
+            let Some(parent_table) = self.catalog.table(parent_id) else {
                 continue;
             };
             // A child value is stored as its own column stores numbers, then compared as the parent's type compares.
@@ -454,10 +438,7 @@ impl<'a> Checker<'a> {
                     constraint: position,
                     parent: (parent_id, parent_key),
                     hash,
-                    at: At {
-                        line: row.line,
-                        ..at
-                    },
+                    at,
                     key: parts.iter().map(|(p, _)| shown(p)).collect(),
                     load_order: self.load_order
                         && at.after(constraint.enabled_at)

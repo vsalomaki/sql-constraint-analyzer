@@ -25,6 +25,7 @@ use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role};
 use crate::source::Span;
 use crate::statement::{InsertRow, Statement};
+use crate::value;
 
 /// What happens to a row with NULL in a NOT NULL column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -703,16 +704,11 @@ pub const REPORT_FOLDER: &str = "sqlca-report";
 fn destinations(originals: &[PathBuf], out: &Path) -> Result<(Vec<PathBuf>, PathBuf), FixError> {
     let out = resolved(out)?;
     require_empty(&out, FixError::OutNotEmpty)?;
-    let mut common = originals
-        .first()
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    while !originals.iter().all(|p| p.starts_with(&common)) {
-        if !common.pop() {
-            break;
-        }
-    }
+    let folders: Vec<PathBuf> = originals
+        .iter()
+        .map(|p| p.parent().map(Path::to_path_buf).unwrap_or_default())
+        .collect();
+    let common = check::shared_folder(&folders);
     let paths = originals
         .iter()
         .map(|p| out.join(p.strip_prefix(&common).unwrap_or(p)))
@@ -793,7 +789,7 @@ fn report_folder(
 /// `20261106T143005Z`: a time as a name that sorts.
 fn utc_stamp(at: SystemTime) -> String {
     let seconds = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (year, month, day) = civil_date(seconds / 86_400);
+    let (year, month, day) = value::civil_from_days(i64::try_from(seconds / 86_400).unwrap_or(0));
     let time = seconds % 86_400;
     format!(
         "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
@@ -801,24 +797,6 @@ fn utc_stamp(at: SystemTime) -> String {
         time % 3600 / 60,
         time % 60
     )
-}
-
-/// The proleptic Gregorian date `days` after 1970-01-01 (Howard Hinnant's `civil_from_days`).
-fn civil_date(days: u64) -> (u64, u64, u64) {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let day_of_era = z % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    (era * 400 + year_of_era + u64::from(month <= 2), month, day)
 }
 
 /// The findings a round acts on, by file position and line, and the fixable ones it leaves for review.
@@ -1620,15 +1598,7 @@ pub fn summary(report: &FixReport) -> String {
     for reason in report.removed.iter().flat_map(|r| &r.reasons) {
         *counts.entry(reason.kind).or_default() += 1;
     }
-    let kinds: Vec<String> = counts
-        .iter()
-        .map(|(kind, n)| format!("{} {n}", crate::report::kind_name(*kind)))
-        .collect();
-    let kinds = if kinds.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", kinds.join(", "))
-    };
+    let kinds = crate::report::kind_counts(&counts);
     let changed = report
         .removed
         .iter()

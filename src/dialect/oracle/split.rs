@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Read};
 
 use super::lex::{Delimiter, alternative_delimiter, is_word_byte};
-use crate::source::{Piece, PieceKind, Span};
+use crate::source::{Piece, PieceKind, Span, to_u64};
 
 pub use crate::dialect::Runner;
 
@@ -453,10 +453,6 @@ impl<R: BufRead> Iterator for Splitter<R> {
     }
 }
 
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).unwrap_or(u64::MAX)
-}
-
 fn strip_eol(line: &[u8]) -> &[u8] {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     line.strip_suffix(b"\r").unwrap_or(line)
@@ -637,14 +633,20 @@ fn is_command(trimmed: &[u8]) -> bool {
     {
         return false;
     }
-    let initial = first.first().map(u8::to_ascii_uppercase);
-    COMMANDS.iter().any(|(shortest, full)| {
-        full.as_bytes().first() == initial.as_ref()
-            && first.len() >= shortest.len()
+    command(first).is_some()
+}
+
+/// The full name of the SQL\*Plus command `word` names, in any case and any accepted abbreviation.
+pub(crate) fn command(word: &[u8]) -> Option<&'static str> {
+    let initial = word.first().map(u8::to_ascii_uppercase);
+    COMMANDS.iter().find_map(|&(shortest, full)| {
+        (full.as_bytes().first() == initial.as_ref()
+            && word.len() >= shortest.len()
             && full
                 .as_bytes()
-                .get(..first.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(first))
+                .get(..word.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(word)))
+        .then_some(full)
     })
 }
 

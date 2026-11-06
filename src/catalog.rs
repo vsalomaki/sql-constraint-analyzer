@@ -53,7 +53,6 @@ pub struct Constraint {
     pub name: Option<String>,
     pub kind: Kind,
     pub state: ConstraintState,
-    pub declared: Origin,
     /// Where it last became enabled: its declaration, or the `ENABLE` that turned it on. Rows before it are judged
     /// only when the constraint validates the rows already there.
     pub enabled_at: Origin,
@@ -85,8 +84,13 @@ pub enum Kind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parent {
-    /// The parent table's primary key or unique constraint, by its position in that table's constraints.
-    Key { table: TableId, constraint: usize },
+    /// The parent table's primary key or unique constraint, by its position in that table's constraints, with the
+    /// key's columns.
+    Key {
+        table: TableId,
+        constraint: usize,
+        columns: Vec<usize>,
+    },
     /// The parent table isn't in the input, so the foreign key can't be verified; its name as written.
     Missing(String),
 }
@@ -102,6 +106,15 @@ pub struct Table {
 impl Table {
     pub fn column(&self, name: &str) -> Option<usize> {
         self.columns.iter().position(|c| c.name == name)
+    }
+
+    /// The names of the columns at `positions`.
+    pub fn column_names(&self, positions: &[usize]) -> Vec<String> {
+        positions
+            .iter()
+            .filter_map(|&p| self.columns.get(p))
+            .map(|c| c.name.clone())
+            .collect()
     }
 
     /// The constraint that forbids NULL in the column at `position` for a row at `offset` in the file at `file` in
@@ -518,6 +531,7 @@ fn parent_key(
         parent: Parent::Key {
             table: id,
             constraint: position,
+            columns: key_columns.to_vec(),
         },
     })
 }
@@ -727,7 +741,6 @@ impl Build {
                                 index: true,
                             },
                             state: ConstraintState::default(),
-                            declared: origin,
                             enabled_at: origin,
                         },
                     );
@@ -785,7 +798,6 @@ impl Build {
             name: def.name.map(|n| n.value.into_owned()),
             kind,
             state: def.state,
-            declared: origin,
             enabled_at,
         })
     }
@@ -859,7 +871,6 @@ impl Build {
             name: def.name.map(|n| n.value.into_owned()),
             kind,
             state: def.state,
-            declared: origin,
             enabled_at,
         })
     }

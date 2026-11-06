@@ -11,10 +11,11 @@ use super::schema::{
     self, APP_SCHEMA, APP_TABLES, AUDIT_SEQ, Constraint, Kind, REF_SCHEMA, REF_TABLES, State,
     TableId,
 };
-use super::value::{Value, days_from_civil};
+use super::value::Value;
 use super::{Layout, Options, Placement};
 use crate::dialect::{Fold, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
+use crate::value::days_from_civil;
 
 #[derive(Debug, Clone, Copy)]
 enum Section {

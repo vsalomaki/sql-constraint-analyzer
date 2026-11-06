@@ -14,8 +14,9 @@ use crate::synth::schema::{
     APP_SCHEMA, AUDIT_SEQ, AUDIT_TRIGGER, Constraint, DefaultValue, EMPLOYEES_EMAIL_UIX, Form,
     Kind, NotNull, State, TableId, Ty, constraints_of,
 };
-use crate::synth::value::{Value, civil_from_days};
+use crate::synth::value::Value;
 use crate::synth::{self, Noise};
+use crate::value::civil_from_days;
 
 pub(crate) struct Render {
     noise: Noise,
@@ -513,7 +514,7 @@ fn month(m: u32) -> &'static str {
 mod tests {
     use super::*;
     use crate::synth::Render as _;
-    use crate::synth::value::days_from_civil;
+    use crate::value::days_from_civil;
 
     /// DDL without storage clauses or comments.
     fn plain(item: DdlItem, keys_in_table: bool) -> String {

@@ -174,6 +174,38 @@ impl CheckArgs {
         )
     }
 
+    fn options(&self, spec: &InputSpec) -> check::Options {
+        check::Options {
+            dialect: spec.dialect,
+            runner: spec.runner,
+            encoding: spec.encoding,
+            default_schema: self.default_schema(spec.dialect),
+            load_order: self.load_order,
+            commit_check: !self.no_commit_check,
+            folder_schema: self.folder_schema,
+        }
+    }
+
+    /// `sqlca <version> · <command> · <mode>`, then the inputs.
+    fn write_mode_header(
+        &self,
+        command: &str,
+        resolved: &Resolved,
+        err: &mut dyn Write,
+    ) -> io::Result<()> {
+        let mode = if self.load_order {
+            "load-order mode"
+        } else {
+            "end-state mode"
+        };
+        writeln!(
+            err,
+            "sqlca {} · {command} · {mode}",
+            env!("CARGO_PKG_VERSION")
+        )?;
+        write_header(resolved, err)
+    }
+
     fn verbosity(&self) -> report::Verbosity {
         if self.quiet {
             report::Verbosity::Quiet
@@ -342,23 +374,9 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
     resolved.require_data()?;
     let verbosity = args.verbosity();
     if verbosity != report::Verbosity::Quiet {
-        let mode = if args.load_order {
-            "load-order mode"
-        } else {
-            "end-state mode"
-        };
-        writeln!(err, "sqlca {} · check · {mode}", env!("CARGO_PKG_VERSION"))?;
-        write_header(&resolved, err)?;
+        args.write_mode_header("check", &resolved, err)?;
     }
-    let options = check::Options {
-        dialect: spec.dialect,
-        runner: spec.runner,
-        encoding: spec.encoding,
-        default_schema: args.default_schema(spec.dialect),
-        load_order: args.load_order,
-        commit_check: !args.no_commit_check,
-        folder_schema: args.folder_schema,
-    };
+    let options = args.options(&spec);
     let mut progress = progress::Progress::new(
         display(args.progress, verbosity),
         verbosity == report::Verbosity::Verbose,
@@ -404,13 +422,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
     let quiet = verbosity == report::Verbosity::Quiet;
     let target = args.target();
     if !quiet {
-        let mode = if check.load_order {
-            "load-order mode"
-        } else {
-            "end-state mode"
-        };
-        writeln!(err, "sqlca {} · fix · {mode}", env!("CARGO_PKG_VERSION"))?;
-        write_header(&resolved, err)?;
+        check.write_mode_header("fix", &resolved, err)?;
         writeln!(err, "Output     {}", fix::destination_text(&target))?;
         if target.dry_run {
             writeln!(
@@ -419,15 +431,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
             )?;
         }
     }
-    let options = check::Options {
-        dialect: spec.dialect,
-        runner: spec.runner,
-        encoding: spec.encoding,
-        default_schema: check.default_schema(spec.dialect),
-        load_order: check.load_order,
-        commit_check: !check.no_commit_check,
-        folder_schema: check.folder_schema,
-    };
+    let options = check.options(&spec);
     let policy = fix::Policy {
         on_fk: args.on_fk,
         on_duplicate: args.on_duplicate,
