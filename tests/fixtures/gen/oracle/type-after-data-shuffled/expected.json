@@ -34,65 +34,38 @@
   "files": [
     {
       "path": "ref/tables.sql",
-      "schema": "REF",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "ref/data.sql",
-      "schema": "REF",
-      "ddl": false,
-      "data": true,
       "statements": 7
     },
     {
       "path": "ref/constraints.sql",
-      "schema": "REF",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/sequences.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/tables.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 15
     },
     {
       "path": "app/triggers.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/data.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 121
     },
     {
       "path": "app/constraints.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 12
     },
     {
       "path": "app/ref_constraints.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 10
     }
   ],

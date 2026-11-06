@@ -34,16 +34,10 @@
   "files": [
     {
       "path": "ref/export.sql",
-      "schema": "REF",
-      "ddl": true,
-      "data": true,
       "statements": 9
     },
     {
       "path": "app/export.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": true,
       "statements": 156
     }
   ],

@@ -5,43 +5,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use sqlca::check::{self, Options};
 use sqlca::finding::FindingKind;
 use sqlca::fix::{self, FixReport, Policy};
 use sqlca::input::{InputFile, OrderSource, Role};
-use sqlca::source::Encoding;
 
-#[derive(Deserialize)]
-struct Expected {
-    options: ExpectedOptions,
-}
-
-#[derive(Deserialize)]
-struct ExpectedOptions {
-    encoding: Encoding,
-}
-
-#[expect(
-    clippy::unwrap_used,
-    reason = "a fixture or folder that fails fails the test"
-)]
-fn inputs(root: &Path) -> Vec<InputFile> {
-    fs::read_to_string(root.join("order.txt"))
-        .unwrap()
-        .lines()
-        .map(|path| InputFile {
-            path: root.join(path),
-            role: if path.starts_with("ref/") {
-                Role::Reference
-            } else {
-                Role::Data
-            },
-            bytes: fs::metadata(root.join(path)).unwrap().len(),
-            order: OrderSource::Given,
-        })
-        .collect()
-}
+use crate::fixtures::{self, inputs};
 
 const FIXED: [FindingKind; 3] = [
     FindingKind::FkMissingParent,
@@ -120,24 +89,17 @@ fn run_with(
 
 #[test]
 fn committed_exports_are_fixed_and_restored_by_their_rejects() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gen/oracle");
-    for name in [
-        "separate-sqldev",
-        "single-all-crlf-1252",
-        "type-after-data-shuffled",
-    ] {
-        let root = root.join(name);
-        let expected: Expected =
-            serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap();
+    for root in fixtures::generated() {
+        let manifest = fixtures::manifest(&root);
         for load_order in [false, true] {
             let options = Options {
-                encoding: expected.options.encoding,
+                encoding: manifest.options.encoding,
                 load_order,
                 ..Options::default()
             };
             let files = inputs(&root);
             let (_dir, report) = run(&files, &options);
-            let at = format!("{name} load_order={load_order}");
+            let at = format!("{} load_order={load_order}", root.display());
             for kind in FIXED {
                 assert!(count(&report.input, kind) > 0, "{at}: no {kind:?} planted");
                 assert_eq!(

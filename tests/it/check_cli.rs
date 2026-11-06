@@ -6,19 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use serde::Deserialize;
+use clap::ValueEnum;
 use sqlca::finding::{Finding, FindingKind};
 
-#[derive(Deserialize)]
-struct Expected {
-    options: Options,
-    findings: Vec<Finding>,
-}
-
-#[derive(Deserialize)]
-struct Options {
-    encoding: String,
-}
+use crate::fixtures;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -87,11 +78,6 @@ fn untimed(stderr: &str) -> String {
         .collect()
 }
 
-#[expect(clippy::unwrap_used, reason = "a malformed manifest fails the test")]
-fn expected(root: &Path) -> Expected {
-    serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap()
-}
-
 #[test]
 fn the_text_output_of_a_generated_export() {
     let root = fixture("gen/oracle/separate-sqldev");
@@ -103,19 +89,16 @@ fn the_text_output_of_a_generated_export() {
 
 #[test]
 fn json_lines_equal_the_manifest_in_both_modes() {
-    for name in [
-        "separate-sqldev",
-        "single-all-crlf-1252",
-        "type-after-data-shuffled",
-    ] {
-        let root = fixture(&format!("gen/oracle/{name}"));
-        let manifest = expected(&root);
+    for root in fixtures::generated() {
+        let name = root.display();
+        let manifest = fixtures::manifest(&root);
+        let encoding = manifest.options.encoding.to_possible_value().unwrap();
         for load_order in [false, true] {
             let mut args = vec!["--format", "json", "--max-per-constraint", "0"];
             if load_order {
                 args.push("--load-order");
             }
-            let (code, stdout, stderr) = check_export(&root, &manifest.options.encoding, &args);
+            let (code, stdout, stderr) = check_export(&root, encoding.get_name(), &args);
             assert_eq!(code, 1, "{name}: {stderr}");
             let mut lines: Vec<serde_json::Value> = stdout
                 .lines()

@@ -4,14 +4,11 @@
 use super::rng::Rng;
 use super::schema::TableId;
 use super::value::Value;
-use crate::dialect::Rules;
 
 /// How the DDL is written.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DdlStyle<'a> {
     pub(crate) eol: &'a str,
-    pub(crate) storage: bool,
-    pub(crate) comments: bool,
     /// Primary and unique keys go into the table DDL; otherwise they are added after the data.
     pub(crate) keys_in_table: bool,
 }
@@ -62,7 +59,6 @@ pub(crate) enum Batch<'a> {
 }
 
 pub(crate) trait Render {
-    fn rules(&self) -> &'static Rules;
     /// Noise switches the dialect has no syntax for.
     fn unsupported_noise(&self) -> Vec<&'static str>;
     fn ddl(&self, item: DdlItem, style: &DdlStyle<'_>) -> Sql;

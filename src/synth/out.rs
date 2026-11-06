@@ -32,9 +32,6 @@ impl LineEnding {
 pub struct OutputFile {
     /// Relative to the output folder, with `/` separators.
     pub path: String,
-    pub schema: String,
-    pub ddl: bool,
-    pub data: bool,
     /// SQL statements, PL/SQL blocks and script commands in the file; comments and blank lines don't count.
     #[serde(default)]
     pub statements: u64,
@@ -54,12 +51,6 @@ pub(crate) struct Out {
     by_path: HashMap<String, usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Role {
-    Ddl,
-    Data,
-}
-
 impl Out {
     pub(crate) fn new(root: &Path, encoding: Encoding) -> Self {
         Self {
@@ -74,24 +65,18 @@ impl Out {
     pub(crate) fn write(
         &mut self,
         path: &str,
-        schema: &str,
-        role: Role,
         text: &str,
         statements: u64,
     ) -> io::Result<Location> {
         let index = match self.by_path.get(path) {
             Some(&i) => i,
-            None => self.open(path, schema)?,
+            None => self.open(path)?,
         };
         let encoding = self.encoding;
         let file = self
             .files
             .get_mut(index)
             .ok_or_else(|| io::Error::other(format!("output file {path} lost its slot")))?;
-        match role {
-            Role::Ddl => file.info.ddl = true,
-            Role::Data => file.info.data = true,
-        }
         file.info.statements += statements;
         let at = Location {
             file: file.info.path.clone(),
@@ -113,7 +98,7 @@ impl Out {
         Ok(at)
     }
 
-    fn open(&mut self, path: &str, schema: &str) -> io::Result<usize> {
+    fn open(&mut self, path: &str) -> io::Result<usize> {
         let full = self.root.join(path);
         if let Some(dir) = full.parent() {
             fs::create_dir_all(dir)?;
@@ -121,9 +106,6 @@ impl Out {
         let writer = BufWriter::new(File::create_new(&full)?);
         let info = OutputFile {
             path: path.to_owned(),
-            schema: schema.to_owned(),
-            ddl: false,
-            data: false,
             statements: 0,
         };
         self.files.push(Open {
@@ -156,30 +138,24 @@ mod tests {
     fn lines_count_from_the_text_written() {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Out::new(dir.path(), Encoding::Utf8);
-        assert_eq!(
-            out.write("a/x.sql", "APP", Role::Ddl, "one\r\ntwo\n", 2)
-                .unwrap()
-                .line,
-            1
-        );
-        assert_eq!(
-            out.write("a/x.sql", "APP", Role::Data, "'multi\nline';\n", 1)
-                .unwrap()
-                .line,
-            3
-        );
+        assert_eq!(out.write("a/x.sql", "one\r\ntwo\n", 2).unwrap().line, 1);
+        assert_eq!(out.write("a/x.sql", "'multi\nline';\n", 1).unwrap().line, 3);
         let files = out.finish().unwrap();
-        assert_eq!(files.len(), 1);
-        assert!(files.first().is_some_and(|f| f.ddl && f.data));
+        assert_eq!(
+            files,
+            [OutputFile {
+                path: "a/x.sql".to_owned(),
+                statements: 3,
+            }]
+        );
     }
 
     #[test]
     fn windows_1252_output_refuses_characters_it_cannot_encode() {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Out::new(dir.path(), Encoding::Windows1252);
-        out.write("x.sql", "APP", Role::Data, "Mäkinen €\n", 0)
-            .unwrap();
-        assert!(out.write("x.sql", "APP", Role::Data, "Ā\n", 0).is_err());
+        out.write("x.sql", "Mäkinen €\n", 0).unwrap();
+        assert!(out.write("x.sql", "Ā\n", 0).is_err());
         out.finish().unwrap();
         assert_eq!(
             fs::read(dir.path().join("x.sql")).unwrap(),

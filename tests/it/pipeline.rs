@@ -4,7 +4,6 @@
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
 use sqlca::catalog::{Catalog, CatalogBuilder, Origin};
 use sqlca::check::{self, StructureError};
 use sqlca::dialect::{DialectId, Pass, Runner};
@@ -13,15 +12,7 @@ use sqlca::input;
 use sqlca::source::{Encoding, Piece};
 use sqlca::statement::{Expr, InsertRow, ParseError, Statement};
 
-#[derive(Deserialize)]
-struct Expected {
-    options: Options,
-}
-
-#[derive(Deserialize)]
-struct Options {
-    encoding: Encoding,
-}
+use crate::fixtures;
 
 /// What the schema pass makes of a piece, or else the rows pass: each piece belongs to exactly one. The rows pass
 /// sees the schema pass's DDL only as a commit.
@@ -39,21 +30,17 @@ fn both_passes(piece: &Piece, encoding: Encoding) -> Result<Statement<'static>, 
 
 #[test]
 fn every_piece_of_every_export_belongs_to_exactly_one_pass() {
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let mut exports: Vec<(std::path::PathBuf, Encoding)> = [
-        "separate-sqldev",
-        "single-all-crlf-1252",
-        "type-after-data-shuffled",
-    ]
-    .iter()
-    .map(|f| {
-        let root = fixtures.join("gen/oracle").join(f);
-        let expected: Expected =
-            serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap();
-        (root, expected.options.encoding)
-    })
-    .collect();
-    exports.push((fixtures.join("sqlcl"), Encoding::Utf8));
+    let mut exports: Vec<(std::path::PathBuf, Encoding)> = fixtures::generated()
+        .into_iter()
+        .map(|root| {
+            let encoding = fixtures::manifest(&root).options.encoding;
+            (root, encoding)
+        })
+        .collect();
+    exports.push((
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sqlcl"),
+        Encoding::Utf8,
+    ));
     for (root, encoding) in exports {
         let order = fs::read_to_string(root.join("order.txt")).unwrap();
         let mut pieces = 0;

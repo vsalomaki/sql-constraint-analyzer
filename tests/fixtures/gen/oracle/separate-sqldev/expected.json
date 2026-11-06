@@ -34,163 +34,94 @@
   "files": [
     {
       "path": "ref/tables/COUNTRIES.sql",
-      "schema": "REF",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "ref/data/COUNTRIES.sql",
-      "schema": "REF",
-      "ddl": false,
-      "data": true,
       "statements": 13
     },
     {
       "path": "app/tables/DEPARTMENTS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 3
     },
     {
       "path": "app/tables/EMPLOYEES.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 5
     },
     {
       "path": "app/tables/PROJECTS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/tables/ASSIGNMENTS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/tables/TIMESHEETS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 4
     },
     {
       "path": "app/tables/LEGACY_NOTES.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/tables/AuditLog.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/ref_constraints/DEPARTMENTS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/ref_constraints/EMPLOYEES.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/ref_constraints/PROJECTS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/ref_constraints/ASSIGNMENTS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 2
     },
     {
       "path": "app/ref_constraints/TIMESHEETS.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/ref_constraints/LEGACY_NOTES.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/ref_constraints/AuditLog.sql",
-      "schema": "APP",
-      "ddl": true,
-      "data": false,
       "statements": 1
     },
     {
       "path": "app/data/DEPARTMENTS.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 12
     },
     {
       "path": "app/data/EMPLOYEES.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 34
     },
     {
       "path": "app/data/PROJECTS.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 11
     },
     {
       "path": "app/data/ASSIGNMENTS.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 47
     },
     {
       "path": "app/data/TIMESHEETS.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 108
     },
     {
       "path": "app/data/LEGACY_NOTES.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 6
     },
     {
       "path": "app/data/AuditLog.sql",
-      "schema": "APP",
-      "ddl": false,
-      "data": true,
       "statements": 7
     }
   ],
