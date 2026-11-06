@@ -70,6 +70,9 @@ struct Machine {
     /// Offset and number of the line being taken.
     offset: u64,
     line: u64,
+    /// Whether a SQL*Plus line that is a whole statement is taken without following its quotes and comments; tests
+    /// turn it off to compare.
+    whole_lines: bool,
 }
 
 impl Machine {
@@ -82,6 +85,7 @@ impl Machine {
             ended: VecDeque::new(),
             offset: 0,
             line: 1,
+            whole_lines: true,
         }
     }
 
@@ -197,7 +201,39 @@ impl Machine {
             }
             return;
         }
+        if !inside && self.whole_statement(content, indent) {
+            return;
+        }
         self.scan(line, content);
+    }
+
+    /// Takes a line that SQL*Plus runs as one statement: it starts one, with a word, and its last non-blank byte is
+    /// `;`, which ends it whatever quote or comment comes before. Exports write a row per line this way. A block
+    /// ends only at `/`, so its lines are scanned.
+    fn whole_statement(&mut self, content: &[u8], indent: usize) -> bool {
+        if !self.whole_lines || self.runner != Runner::SqlPlus || self.current.is_some() {
+            return false;
+        }
+        let Some(at) = content
+            .trim_ascii_end()
+            .len()
+            .checked_sub(1)
+            .filter(|&i| content.get(i) == Some(&b';'))
+        else {
+            return false;
+        };
+        let text = content.get(indent..at).unwrap_or_default();
+        if !text.first().is_some_and(u8::is_ascii_alphabetic) || head_kind(text) == PieceKind::Block
+        {
+            return false;
+        }
+        self.start(PieceKind::Sql, indent);
+        if let Some(current) = &mut self.current {
+            current.block = Some(false);
+            current.text = text.to_vec();
+        }
+        self.end_current(self.offset + to_u64(at) + 1);
+        true
     }
 
     /// Scans a line of SQL, ending statements where the runner does.
@@ -354,6 +390,13 @@ pub struct Splitter<R> {
 impl<R: BufRead> Splitter<R> {
     pub fn new(reader: R, runner: Runner) -> Self {
         Self::with_limit(reader, runner, MAX_PIECE_BYTES)
+    }
+
+    /// A splitter that follows every byte of every line, to check the whole-line shortcut against.
+    #[cfg(test)]
+    fn following_every_byte(mut self) -> Self {
+        self.machine.whole_lines = false;
+        self
     }
 
     /// A splitter that gives up on a line or piece longer than `limit` bytes.
@@ -904,6 +947,45 @@ mod properties {
                 last_end = end;
             }
         }
+
+        #[test]
+        fn whole_lines_split_as_following_every_byte_does(input in script(), lines in prop::collection::vec(row_line(), 0..8)) {
+            // Exported rows, mixed with anything.
+            let mut input = input;
+            for line in lines {
+                input.extend_from_slice(&line);
+            }
+            let split = |every_byte: bool| -> Vec<String> {
+                let splitter = Splitter::new(input.as_slice(), Runner::SqlPlus);
+                let splitter = if every_byte { splitter.following_every_byte() } else { splitter };
+                splitter
+                    .map(|piece| match piece {
+                        Ok(piece) => format!("{piece:?}"),
+                        Err(error) => format!("error: {error}"),
+                    })
+                    .collect()
+            };
+            prop_assert_eq!(split(false), split(true));
+        }
+    }
+
+    /// A line like an exported row: a word first, `;` last, and quotes, comments and `;` anywhere between.
+    fn row_line() -> impl Strategy<Value = Vec<u8>> {
+        let middle = prop::sample::select(b"';/-*\"qQ[] (),aN1".to_vec());
+        (
+            prop::sample::select(vec![
+                &b"Insert"[..],
+                b"  insert",
+                b"x",
+                b"BEGIN",
+                b"create procedure",
+                b"REM",
+                b"/",
+            ]),
+            prop::collection::vec(middle, 0..60),
+            prop::sample::select(vec![&b";\n"[..], b";\r\n", b"; \n", b";", b"\n"]),
+        )
+            .prop_map(|(head, middle, end)| [head, &middle, end].concat())
     }
 }
 

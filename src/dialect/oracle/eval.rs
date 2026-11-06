@@ -190,12 +190,18 @@ fn elements(mask: &str) -> impl Iterator<Item = Option<Element>> {
     std::iter::from_fn(move || {
         let &b = rest.first()?;
         let first = b.to_ascii_uppercase();
-        let (element, len) = match ELEMENTS.iter().find(|(name, _)| {
-            name.as_bytes().first() == Some(&first)
-                && rest
-                    .get(..name.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
-        }) {
+        // Most of a mask is separators and a few letters, so only names with this first letter are tried.
+        let named = if first.is_ascii_alphabetic() {
+            ELEMENTS.iter().find(|(name, _)| {
+                name.as_bytes().first() == Some(&first)
+                    && rest
+                        .get(..name.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
+            })
+        } else {
+            None
+        };
+        let (element, len) = match named {
             Some((name, element)) => (Some(*element), name.len()),
             None if is_separator(b) => (Some(Element::Separator), 1),
             None => (None, rest.len()),
