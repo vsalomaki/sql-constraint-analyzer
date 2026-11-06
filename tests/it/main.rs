@@ -5,6 +5,7 @@ mod fix;
 mod inputs;
 mod insert;
 mod pipeline;
+mod schemas;
 mod split;
 mod sqlcl;
 #[cfg(feature = "gen")]

@@ -182,6 +182,18 @@ impl Rules {
         }
     }
 
+    /// A folder's name as a schema: folded when it could be written unquoted, as written otherwise, as if quoted.
+    pub fn folder_schema(&self, folder: &str) -> String {
+        let mut chars = folder.chars();
+        let plain = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'));
+        if plain {
+            self.fold(folder)
+        } else {
+            folder.to_owned()
+        }
+    }
+
     pub fn qualified(&self, schema: &str, name: &str) -> String {
         format!(
             "{}.{}",
@@ -209,5 +221,15 @@ mod tests {
         assert_eq!(lower.qualified("app", "EMPLOYEES"), "app.\"EMPLOYEES\"");
         assert_eq!(rules.fold("Emp_ä"), "EMP_Ä");
         assert_eq!(lower.fold("Emp"), "emp");
+    }
+
+    #[test]
+    fn a_folder_names_a_schema_folded_when_it_could_be_written_unquoted() {
+        let rules = DialectId::Oracle.rules();
+        assert_eq!(rules.folder_schema("app"), "APP");
+        assert_eq!(rules.folder_schema("Hr_2$"), "HR_2$");
+        for odd in ["my-schema", "2024", "a b", "Äpp"] {
+            assert_eq!(rules.folder_schema(odd), odd);
+        }
     }
 }

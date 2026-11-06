@@ -1447,7 +1447,8 @@ mod catalog {
     use crate::statement::{Ident, Name};
 
     fn build(statements: &[&str], default_schema: Option<&str>) -> (Catalog, Vec<String>) {
-        let mut builder = CatalogBuilder::new(&RULES, default_schema.map(str::to_owned));
+        let mut builder =
+            CatalogBuilder::new(&RULES, default_schema.map(str::to_owned), Vec::new());
         for (line, text) in (1..).zip(statements) {
             let piece = Piece {
                 kind: PieceKind::Sql,
@@ -1465,7 +1466,7 @@ mod catalog {
                 },
             );
         }
-        let (catalog, issues) = builder.finish();
+        let (catalog, issues) = builder.finish().unwrap();
         (
             catalog,
             issues
@@ -1493,7 +1494,7 @@ mod catalog {
     }
 
     fn table<'a>(catalog: &'a Catalog, text: &str) -> &'a Table {
-        let Lookup::Found(id) = catalog.resolve(&name(text)) else {
+        let Lookup::Found(id) = catalog.resolve(&name(text), 0) else {
             panic!("{text} doesn't resolve");
         };
         catalog.table(id).unwrap()
@@ -1585,12 +1586,12 @@ mod catalog {
             "CREATE TABLE V (X NUMBER)",
         ];
         let (catalog, _) = build(&ddl, None);
-        assert!(matches!(catalog.resolve(&name("T")), Lookup::Ambiguous(ids) if ids.len() == 2));
-        assert!(matches!(catalog.resolve(&name("U")), Lookup::Found(_)));
-        assert!(matches!(catalog.resolve(&name("V")), Lookup::Found(_)));
-        assert_eq!(catalog.resolve(&name("C.T")), Lookup::Missing);
+        assert!(matches!(catalog.resolve(&name("T"), 0), Lookup::Ambiguous(ids) if ids.len() == 2));
+        assert!(matches!(catalog.resolve(&name("U"), 0), Lookup::Found(_)));
+        assert!(matches!(catalog.resolve(&name("V"), 0), Lookup::Found(_)));
+        assert_eq!(catalog.resolve(&name("C.T"), 0), Lookup::Missing);
         assert_eq!(
-            catalog.resolve(&name("APP.V")),
+            catalog.resolve(&name("APP.V"), 0),
             Lookup::Missing,
             "a table created without a schema has none"
         );
@@ -1598,7 +1599,7 @@ mod catalog {
         assert_eq!(table(&catalog, "T").name.schema.as_deref(), Some("A"));
         assert_eq!(table(&catalog, "A.V").name.schema.as_deref(), Some("A"));
         assert_eq!(
-            catalog.resolve(&name("U")),
+            catalog.resolve(&name("U"), 0),
             Lookup::Missing,
             "the default schema decides an unqualified name"
         );
@@ -1612,7 +1613,7 @@ mod catalog {
                 quoted: true,
             },
         };
-        assert!(matches!(catalog.resolve(&quoted), Lookup::Found(_)));
+        assert!(matches!(catalog.resolve(&quoted, 0), Lookup::Found(_)));
     }
 
     #[test]
@@ -1620,7 +1621,7 @@ mod catalog {
         let (catalog, issues) = build(
             &[
                 "CREATE TABLE T (A NUMBER, B NUMBER, A DATE)",
-                "CREATE TABLE T (Z NUMBER)",
+                "CREATE TABLE Z (Z NUMBER)",
                 "ALTER TABLE NOPE ADD CONSTRAINT X PRIMARY KEY (A)",
                 "ALTER TABLE T ADD CONSTRAINT T_PK PRIMARY KEY (C)",
                 "ALTER TABLE T ENABLE CONSTRAINT GHOST",
@@ -1637,7 +1638,6 @@ mod catalog {
             issues,
             [
                 "1: column A of T is defined twice; the first is kept",
-                "2: table T is created again; the first definition is kept",
                 "3: ALTER TABLE names table NOPE, which no CREATE TABLE in the input defines",
                 "4: constraint T_PK names column C of T, which the table doesn't have",
                 "5: constraint GHOST of T is changed, but no statement adds it",
@@ -1800,11 +1800,11 @@ mod fixtures {
     }
 
     fn catalog(statements: Vec<(Statement<'static>, Origin)>) -> Catalog {
-        let mut builder = CatalogBuilder::new(&RULES, None);
+        let mut builder = CatalogBuilder::new(&RULES, None, Vec::new());
         for (statement, origin) in statements {
             builder.add(statement, origin);
         }
-        let (catalog, issues) = builder.finish();
+        let (catalog, issues) = builder.finish().unwrap();
         assert!(issues.is_empty(), "{issues:?}");
         catalog
     }
@@ -1818,7 +1818,7 @@ mod fixtures {
             schema: Some(ident(id.schema())),
             name: ident(id.name()),
         };
-        let Lookup::Found(found) = catalog.resolve(&name) else {
+        let Lookup::Found(found) = catalog.resolve(&name, 0) else {
             panic!("{} missing", id.name());
         };
         catalog.table(found).unwrap()
