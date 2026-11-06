@@ -417,12 +417,11 @@ fn run_rounds(
 ) -> Result<Plan, FixError> {
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
     let mut removed = Vec::new();
-    let mut left = Vec::new();
     let mut first_report = None;
     let mut rounds = 0;
     observer.stage("check 1");
     let schema = check::schema(files, options, observer)?;
-    let last = loop {
+    let (last, left) = loop {
         if rounds > 0 {
             observer.stage(&format!("check {}", rounds + 1));
         }
@@ -446,9 +445,6 @@ fn run_rounds(
             left: skipped,
             waiting,
         } = targets(&report.findings, files, names, policy, &crowded);
-        if rounds == 0 {
-            left.extend(skipped);
-        }
         // A value set to NULL can make a unique key a duplicate, or take a key children point at.
         let mut settled = !waiting && !can_orphan(&targets, &report.referenced);
         let mut changed = false;
@@ -495,7 +491,7 @@ fn run_rounds(
             }
         }
         if !changed {
-            break Some(report);
+            break (Some(report), skipped);
         }
         if first_report.is_none() {
             first_report = Some(report);
@@ -503,7 +499,7 @@ fn run_rounds(
         rounds += 1;
         // Another round would find nothing new; the verify checks the output instead.
         if settled && !confirm {
-            break None;
+            break (None, skipped);
         }
     };
     Ok(Plan {

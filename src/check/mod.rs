@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub use structure::{Row, StructureError, resolve_row};
 
-use crate::catalog::{Catalog, CatalogBuilder, CreatedTwice, Issue, Kind, Origin, Parent};
+use crate::catalog::{Catalog, CatalogBuilder, CreatedTwice, Issue, Kind, Lookup, Origin, Parent};
 use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role};
@@ -384,7 +384,13 @@ fn check_rows(
                     }
                     let file = names.get(index).map_or("", String::as_str);
                     let mut matched = Vec::with_capacity(inserted.len());
-                    for row in inserted.iter().filter(|r| !is_removed(cuts, r.span)) {
+                    for row in &inserted {
+                        if is_removed(cuts, row.span) {
+                            if let Lookup::Found(table) = catalog.resolve(&row.table, index) {
+                                checker.removed(table);
+                            }
+                            continue;
+                        }
                         count += 1;
                         let at = rows::At {
                             file: index,
