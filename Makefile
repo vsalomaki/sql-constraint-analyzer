@@ -1,4 +1,4 @@
-.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop sqlcl-fixtures
+.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop sqlcl-fixtures perf
 
 GEN = cargo run -q -F gen --bin sqlca-gen -- --dialect oracle
 FIXTURES = tests/fixtures/gen/oracle
@@ -21,6 +21,10 @@ fixtures:
 	$(GEN) --out $(FIXTURES)/separate-sqldev --rows 20
 	$(GEN) --out $(FIXTURES)/single-all-crlf-1252 --rows 20 --layout single --noise all --line-endings crlf --encoding windows-1252
 	$(GEN) --out $(FIXTURES)/type-after-data-shuffled --rows 20 --layout type --noise all --constraints after-data --shuffle-order
+
+## Times sqlca check on a ~1 GB and a ~2.4 GB generated export in gen-out/ and checks the findings (Linux only).
+perf:
+	scripts/perf.sh
 
 ## Turns on the gitleaks pre-push hook for this clone.
 install-hooks:

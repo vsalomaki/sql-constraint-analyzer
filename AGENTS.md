@@ -28,6 +28,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
+| `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/` (reused while their options match), times `sqlca check` (release) on both in both modes, and fails unless the findings equal the manifest; prints wall time, MB/s and peak RSS (Linux only) |
 
 Run `make lint` and `make test` before calling a change done.
 
@@ -155,6 +156,7 @@ Linux, and `test` (a default-features build, then nextest with all features) on 
   checking the local version.
 - Check workflow edits with `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7`.
 - `.github/workflows/oracle.yml` runs `scripts/oracle/check.sh` on a runner, started by hand only (`workflow_dispatch`).
+- `.github/workflows/perf.yml` runs `make perf` the same way, by hand only. Its numbers are a trend, not a gate.
 - The repository setting "Require approval for all external contributors" holds a fork's run for approval as a
   second layer.
 

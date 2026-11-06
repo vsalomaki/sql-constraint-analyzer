@@ -211,7 +211,7 @@ fn run_inner(
             observer,
             |statement, origin| match statement {
                 Statement::Insert(inserted) => {
-                    let file = names.get(index).cloned().unwrap_or_default();
+                    let file = names.get(index).map_or("", String::as_str);
                     let mut matched = Vec::with_capacity(inserted.len());
                     for row in inserted.iter().filter(|r| !is_removed(cuts, r.span)) {
                         count += 1;
@@ -223,7 +223,7 @@ fn run_inner(
                         match resolve_row(&catalog, row) {
                             Ok(resolved) => matched.push((resolved, row, at)),
                             Err(error) => {
-                                checker.structure(error.finding(&catalog, row, &file), reference);
+                                checker.structure(error.finding(&catalog, row, file), reference);
                             }
                         }
                     }

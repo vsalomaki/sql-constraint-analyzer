@@ -8,25 +8,31 @@ use super::lex::{self, Token, TokenKind, is_word_byte};
 use crate::source::{Encoding, Piece, Span};
 use crate::statement::{Ident, Name, ParseError};
 
-/// The statement's first word upper-cased, past blanks and comments, without lexing the rest.
-pub(crate) fn first_word(text: &[u8]) -> Option<String> {
-    leading_words(text, 1).pop()
+/// Whether the statement's first word, past blanks and comments, is `keyword`, without lexing the rest.
+pub(crate) fn first_word_is(text: &[u8], keyword: &str) -> bool {
+    words(text)
+        .next()
+        .is_some_and(|w| w.eq_ignore_ascii_case(keyword.as_bytes()))
 }
 
 /// Up to `n` leading words upper-cased, past blanks and comments, without lexing the rest.
 pub(crate) fn leading_words(text: &[u8], n: usize) -> Vec<String> {
-    let mut words = Vec::new();
+    words(text)
+        .take(n)
+        .map(|word| String::from_utf8_lossy(word).to_ascii_uppercase())
+        .collect()
+}
+
+/// The leading words as written, past blanks and comments, up to the first byte that is neither.
+pub(crate) fn words(text: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut rest = text;
-    while words.len() < n {
+    std::iter::from_fn(move || {
         rest = past_blanks_and_comments(rest);
         let len = rest.iter().take_while(|&&b| is_word_byte(b)).count();
-        let Some((word, after)) = rest.split_at_checked(len).filter(|(w, _)| !w.is_empty()) else {
-            break;
-        };
-        words.push(String::from_utf8_lossy(word).to_ascii_uppercase());
+        let (word, after) = rest.split_at_checked(len).filter(|(w, _)| !w.is_empty())?;
         rest = after;
-    }
-    words
+        Some(word)
+    })
 }
 
 fn past_blanks_and_comments(text: &[u8]) -> &[u8] {
@@ -251,7 +257,7 @@ impl<'a> Cursor<'a> {
     pub(crate) fn ident_of(&self, token: Token) -> Option<Ident> {
         match token.kind {
             TokenKind::Word => Some(Ident {
-                value: RULES.fold(&self.token_text(token)),
+                value: RULES.fold(&self.encoding.decode(token.text(&self.piece.text))),
                 quoted: false,
             }),
             TokenKind::QuotedIdent => Some(Ident {

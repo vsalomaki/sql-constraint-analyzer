@@ -38,41 +38,46 @@ pub fn resolve_row<'a>(catalog: &Catalog, row: &'a InsertRow) -> Result<Row<'a>,
     let Some(table) = catalog.table(id) else {
         return Err(StructureError::UnknownTable);
     };
-    let positions: Vec<usize> = match &row.columns {
-        Some(names) => {
-            let found: Vec<Option<usize>> = names.iter().map(|n| table.column(&n.value)).collect();
-            let unknown: Vec<String> = names
-                .iter()
-                .zip(&found)
-                .filter(|(_, position)| position.is_none())
-                .map(|(n, _)| n.value.clone())
-                .collect();
-            if !unknown.is_empty() {
-                return Err(StructureError::UnknownColumns(unknown));
-            }
-            found.into_iter().flatten().collect()
-        }
-        None => table
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !c.invisible)
-            .map(|(position, _)| position)
-            .collect(),
-    };
-    if positions.len() != row.values.len() {
-        return Err(StructureError::ValueCount {
-            columns: positions.len(),
-            values: row.values.len(),
-        });
-    }
     let mut values = vec![None; table.columns.len()];
-    for (position, value) in positions.into_iter().zip(&row.values) {
-        if let Some(slot) = values.get_mut(position) {
+    if let Some(names) = &row.columns {
+        let found: Vec<Option<usize>> = names.iter().map(|n| table.column(&n.value)).collect();
+        let unknown: Vec<String> = names
+            .iter()
+            .zip(&found)
+            .filter(|(_, position)| position.is_none())
+            .map(|(n, _)| n.value.clone())
+            .collect();
+        if !unknown.is_empty() {
+            return Err(StructureError::UnknownColumns(unknown));
+        }
+        count_matches(names.len(), row)?;
+        for (position, value) in found.into_iter().flatten().zip(&row.values) {
+            if let Some(slot) = values.get_mut(position) {
+                *slot = Some(value);
+            }
+        }
+    } else {
+        count_matches(table.columns.iter().filter(|c| !c.invisible).count(), row)?;
+        let slots = values
+            .iter_mut()
+            .zip(&table.columns)
+            .filter(|(_, c)| !c.invisible);
+        for ((slot, _), value) in slots.zip(&row.values) {
             *slot = Some(value);
         }
     }
     Ok(Row { table: id, values })
+}
+
+fn count_matches(columns: usize, row: &InsertRow) -> Result<(), StructureError> {
+    if columns == row.values.len() {
+        Ok(())
+    } else {
+        Err(StructureError::ValueCount {
+            columns,
+            values: row.values.len(),
+        })
+    }
 }
 
 impl StructureError {

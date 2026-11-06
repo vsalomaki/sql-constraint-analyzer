@@ -2,7 +2,7 @@
 //! or several (`INSERT ALL INTO … VALUES (…) … SELECT … FROM DUAL`). An insert whose rows come from a query is
 //! skipped as not followed. Values are kept as written; [`super::eval`] says what they mean.
 
-use super::cursor::{Cursor, first_word};
+use super::cursor::{Cursor, first_word_is};
 use super::lex::{Token, TokenKind};
 use crate::source::{Encoding, Piece};
 use crate::statement::{Expr, Ident, InsertRow, Name, ParseError, Skip, Statement, Value};
@@ -15,7 +15,7 @@ const STOP_WORDS: [&str; 4] = ["INSERT", "INTO", "VALUES", "SELECT"];
 
 /// The insert `piece` holds, or `None` when it isn't an `INSERT`.
 pub fn parse_insert(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>, ParseError> {
-    if first_word(&piece.text).as_deref() != Some("INSERT") {
+    if !first_word_is(&piece.text, "INSERT") {
         return Ok(None);
     }
     let mut parser = Parser {
@@ -60,7 +60,7 @@ impl Parser<'_> {
                 Err(self.c.expected("VALUES or a query after the table"))
             };
         }
-        let (values, _) = self.values()?;
+        let (values, _) = self.values(columns.as_ref().map_or(0, Vec::len))?;
         if !self.c.at_end() {
             return Err(self
                 .c
@@ -84,7 +84,7 @@ impl Parser<'_> {
                 // Without VALUES the row is the query's select list.
                 return Ok(not_followed("INSERT ALL … SELECT"));
             }
-            let (values, end) = self.values()?;
+            let (values, end) = self.values(columns.as_ref().map_or(0, Vec::len))?;
             rows.push(InsertRow {
                 table,
                 columns,
@@ -168,12 +168,12 @@ impl Parser<'_> {
         }
     }
 
-    /// `(value, …)`, and the offset after its `)`.
-    fn values(&mut self) -> Result<(Vec<Value>, usize), ParseError> {
+    /// `(value, …)` of a row with `columns` listed, and the offset after its `)`.
+    fn values(&mut self, columns: usize) -> Result<(Vec<Value>, usize), ParseError> {
         if !self.c.eat_punct(b'(') {
             return Err(self.c.expected("`(` after VALUES"));
         }
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(columns);
         loop {
             let run = self.run();
             let tokens = self.c.tokens().get(run).unwrap_or_default();
@@ -274,40 +274,41 @@ impl Parser<'_> {
     fn call(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
         let open = tokens.iter().position(|&t| self.c.is_punct(t, b'('))?;
         let (head, rest) = tokens.split_at_checked(open)?;
-        let function = self
-            .dotted(head)?
-            .iter()
-            .map(|part| part.value.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
+        let function = match head {
+            [name] => self.c.ident_of(*name)?.value,
+            _ => self
+                .dotted(head)?
+                .iter()
+                .map(|part| part.value.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        };
         let inner = rest.get(1..rest.len().checked_sub(1)?)?;
-        let args = self
-            .split_args(inner)?
-            .into_iter()
-            .map(|arg| (!arg.is_empty()).then(|| self.expr(arg, depth + 1)))
-            .collect::<Option<_>>()?;
+        let mut args = Vec::new();
+        if !inner.is_empty() {
+            let (mut start, mut nesting) = (0, 0_usize);
+            for (i, &token) in inner.iter().enumerate() {
+                if self.c.is_punct(token, b'(') {
+                    nesting += 1;
+                } else if self.c.is_punct(token, b')') {
+                    // A `)` that closes the call early.
+                    nesting = nesting.checked_sub(1)?;
+                } else if nesting == 0 && self.c.is_punct(token, b',') {
+                    args.push(self.argument(inner.get(start..i)?, depth)?);
+                    start = i + 1;
+                }
+            }
+            if nesting > 0 {
+                return None;
+            }
+            args.push(self.argument(inner.get(start..)?, depth)?);
+        }
         Some(Expr::Call { function, args })
     }
 
-    /// A call's arguments, split at the commas outside parentheses; `None` when a `)` closes the call early.
-    fn split_args<'t>(&self, inner: &'t [Token]) -> Option<Vec<&'t [Token]>> {
-        if inner.is_empty() {
-            return Some(Vec::new());
-        }
-        let mut args = Vec::new();
-        let (mut start, mut depth) = (0, 0_usize);
-        for (i, &token) in inner.iter().enumerate() {
-            if self.c.is_punct(token, b'(') {
-                depth += 1;
-            } else if self.c.is_punct(token, b')') {
-                depth = depth.checked_sub(1)?;
-            } else if depth == 0 && self.c.is_punct(token, b',') {
-                args.push(inner.get(start..i)?);
-                start = i + 1;
-            }
-        }
-        args.push(inner.get(start..)?);
-        (depth == 0).then_some(args)
+    /// One argument of a call; `None` when it is empty.
+    fn argument(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
+        (!tokens.is_empty()).then(|| self.expr(tokens, depth + 1))
     }
 
     /// `[schema.]sequence.NEXTVAL`.
