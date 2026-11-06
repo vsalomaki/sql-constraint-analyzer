@@ -132,9 +132,11 @@ pub enum UniqueNulls {
 }
 
 /// The semantics a dialect gives the things the checker and the generator compare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Rules {
     pub fold: Fold,
+    /// Whether a name can be written unquoted, case aside.
+    pub unquoted: fn(&str) -> bool,
     pub ident_quote: char,
     pub empty_string_is_null: bool,
     /// `CHAR` values compare as if padded, so trailing spaces don't count.
@@ -167,13 +169,8 @@ impl Rules {
 
     /// An identifier as the dialect stores it, quoted when it isn't a plain name in the folded case.
     pub fn display_ident<'a>(&self, name: &'a str) -> Cow<'a, str> {
-        let folded = |c: char| match self.fold {
-            Fold::Upper => c.is_ascii_uppercase(),
-            Fold::Lower => c.is_ascii_lowercase(),
-        };
-        let mut chars = name.chars();
-        let plain = chars.next().is_some_and(folded)
-            && chars.all(|c| folded(c) || c.is_ascii_digit() || matches!(c, '_' | '$' | '#'));
+        // Unquoted, a name folds, so it shows bare only when folding keeps it: `ß` folds to `SS`.
+        let plain = (self.unquoted)(name) && *self.folded(Cow::Borrowed(name)) == *name;
         if plain {
             Cow::Borrowed(name)
         } else {
@@ -184,10 +181,7 @@ impl Rules {
 
     /// A folder's name as a schema: folded when it could be written unquoted, as written otherwise, as if quoted.
     pub fn folder_schema(&self, folder: &str) -> String {
-        let mut chars = folder.chars();
-        let plain = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'));
-        if plain {
+        if (self.unquoted)(folder) {
             self.fold(folder)
         } else {
             folder.to_owned()
@@ -214,6 +208,10 @@ mod tests {
         assert_eq!(rules.qualified("APP", "AuditLog"), "APP.\"AuditLog\"");
         assert_eq!(rules.display_ident("1ABC"), "\"1ABC\"");
         assert_eq!(rules.display_ident("A\"B"), "\"A\"\"B\"");
+        assert_eq!(rules.display_ident("EMP_Ä"), "EMP_Ä");
+        assert_eq!(rules.display_ident("ä"), "\"ä\"");
+        assert_eq!(rules.display_ident("ß"), "\"ß\"");
+        assert_eq!(rules.display_ident("_X"), "\"_X\"");
         let lower = Rules {
             fold: Fold::Lower,
             ..*rules
@@ -228,8 +226,36 @@ mod tests {
         let rules = DialectId::Oracle.rules();
         assert_eq!(rules.folder_schema("app"), "APP");
         assert_eq!(rules.folder_schema("Hr_2$"), "HR_2$");
-        for odd in ["my-schema", "2024", "a b", "Äpp"] {
+        assert_eq!(rules.folder_schema("Äpp"), "ÄPP");
+        for odd in ["my-schema", "2024", "a b", "_app", "€x"] {
             assert_eq!(rules.folder_schema(odd), odd);
         }
+    }
+
+    #[test]
+    fn a_folder_folds_as_its_name_unquoted_in_sql_does() {
+        let dialect = DialectId::Oracle;
+        let in_sql = |schema: &str| {
+            let piece = Piece {
+                kind: crate::source::PieceKind::Sql,
+                span: crate::source::Span { start: 0, end: 0 },
+                line: 1,
+                text: format!("CREATE TABLE {schema}.T (A NUMBER)").into_bytes(),
+            };
+            let Ok(Some(Statement::CreateTable { name, .. })) =
+                dialect.parse(&piece, Encoding::Utf8, Pass::Schema)
+            else {
+                panic!("{schema}");
+            };
+            name.schema.unwrap().value.into_owned()
+        };
+        for folder in ["ä", "app", "Äpp", "ß"] {
+            assert_eq!(
+                dialect.rules().folder_schema(folder),
+                in_sql(folder),
+                "{folder}"
+            );
+        }
+        assert_eq!(dialect.rules().folder_schema("ä"), "Ä");
     }
 }

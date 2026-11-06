@@ -83,16 +83,11 @@ pub struct Decimal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "the four independent Oracle constraint state switches"
-)]
 pub struct ConstraintState {
     /// `DISABLE` makes this false; a disabled constraint is never checked.
     pub enabled: bool,
     /// `NOVALIDATE` makes this false: rows already in the table when it is added are not checked.
     pub validated: bool,
-    pub deferrable: bool,
     pub initially_deferred: bool,
 }
 
@@ -101,7 +96,6 @@ impl Default for ConstraintState {
         Self {
             enabled: true,
             validated: true,
-            deferrable: false,
             initially_deferred: false,
         }
     }

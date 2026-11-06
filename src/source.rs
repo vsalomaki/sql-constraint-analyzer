@@ -7,6 +7,11 @@ pub struct Span {
     pub end: u64,
 }
 
+/// A length or index as a byte offset.
+pub(crate) fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceKind {
     /// A SQL statement.

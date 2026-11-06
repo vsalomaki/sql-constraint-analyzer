@@ -390,17 +390,21 @@ fn warning(warning: &Warning) -> String {
     }
 }
 
-/// `Result     4 findings (missing parent 3, duplicate key 1) · 2 warnings · 0 errors → exit 1`.
-pub fn result(report: &Report) -> String {
-    let kinds: Vec<String> = by_kind(&report.findings)
+/// ` (missing parent 3, duplicate key 1)`, or nothing when there are no counts.
+pub(crate) fn kind_counts(counts: &BTreeMap<FindingKind, usize>) -> String {
+    if counts.is_empty() {
+        return String::new();
+    }
+    let kinds: Vec<String> = counts
         .iter()
         .map(|(kind, n)| format!("{} {n}", kind_name(*kind)))
         .collect();
-    let kinds = if kinds.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", kinds.join(", "))
-    };
+    format!(" ({})", kinds.join(", "))
+}
+
+/// `Result     4 findings (missing parent 3, duplicate key 1) · 2 warnings · 0 errors → exit 1`.
+pub fn result(report: &Report) -> String {
+    let kinds = kind_counts(&by_kind(&report.findings));
     format!(
         "Result     {} findings{kinds} · {} warnings · {} errors → exit {}",
         report.findings.len(),

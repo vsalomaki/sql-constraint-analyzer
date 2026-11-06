@@ -2,7 +2,7 @@
 
 use std::io::{self, BufRead};
 
-use super::split::Splitter;
+use super::split::{Splitter, command};
 use crate::dialect::{Include, Runner};
 use crate::source::Encoding;
 use crate::source::{Piece, PieceKind};
@@ -35,8 +35,7 @@ fn parse(piece: &Piece, encoding: Encoding) -> Option<Include> {
         (false, rest)
     } else {
         let (word, rest) = line.split_once(char::is_whitespace)?;
-        let word = word.to_ascii_uppercase();
-        if !(word.len() >= 3 && "START".starts_with(&word)) {
+        if command(word.as_bytes()) != Some("START") {
             return None;
         }
         (false, rest)

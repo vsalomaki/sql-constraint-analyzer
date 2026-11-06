@@ -370,13 +370,7 @@ fn listing(catalog: &Catalog) -> Vec<String> {
             table.columns.len()
         ));
         for constraint in &table.constraints {
-            let columns = |c: &[usize], t: &Table| {
-                c.iter()
-                    .filter_map(|&i| t.columns.get(i))
-                    .map(|c| c.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+            let columns = |c: &[usize], t: &Table| t.column_names(c).join(", ");
             let what = match &constraint.kind {
                 Kind::PrimaryKey { columns: c } => format!("primary key ({})", columns(c, table)),
                 Kind::Unique { columns: c, index } => {
@@ -387,20 +381,11 @@ fn listing(catalog: &Catalog) -> Vec<String> {
                     let parent = match parent {
                         Parent::Key {
                             table: id,
-                            constraint,
+                            columns: key,
+                            ..
                         } => catalog
                             .table(*id)
-                            .map(|p| {
-                                let key =
-                                    p.constraints.get(*constraint).map_or(String::new(), |k| {
-                                        match &k.kind {
-                                            Kind::PrimaryKey { columns: c }
-                                            | Kind::Unique { columns: c, .. } => columns(c, p),
-                                            _ => String::new(),
-                                        }
-                                    });
-                                format!("{} ({key})", catalog.display(&p.name))
-                            })
+                            .map(|p| format!("{} ({})", catalog.display(&p.name), columns(key, p)))
                             .unwrap_or_default(),
                         Parent::Missing(name) => format!("{name}, not in the input"),
                     };

@@ -347,11 +347,8 @@ fn dotted<'a>(c: &Cursor<'a>, tokens: &[Token]) -> Option<Vec<Ident<'a>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::to_u64;
     use crate::source::{PieceKind, Span};
-
-    fn to_u64(n: usize) -> u64 {
-        u64::try_from(n).unwrap()
-    }
 
     /// A piece that starts at offset 100 on line 10, so offsets and lines are visibly absolute.
     fn piece(text: &str) -> Piece {

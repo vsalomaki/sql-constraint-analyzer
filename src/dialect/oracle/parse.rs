@@ -2,6 +2,7 @@
 //! takes inserts and names everything else as skipped, saying why the checker has no use for it.
 
 use super::cursor::leading_words;
+use super::split::command;
 use super::{ddl, insert};
 use crate::dialect::Pass;
 use crate::source::{Encoding, Piece, PieceKind};
@@ -36,10 +37,6 @@ pub fn parse(
 ) -> Result<Option<Statement<'_>>, ParseError> {
     match pass {
         Pass::Schema => ddl::parse_ddl(piece, encoding),
-        // The schema pass reads table DDL; for the rows pass it only ends the transaction.
-        Pass::Rows if piece.kind == PieceKind::Sql && ddl::is_table_ddl(&piece.text) => {
-            Ok(Some(Statement::Commit))
-        }
         Pass::Rows => rows(piece, encoding).map(Some),
     }
 }
@@ -98,7 +95,7 @@ fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> 
         // `EXEC[UTE]` runs a procedure, which may change rows; nothing after `EXIT` runs.
         PieceKind::Command => words
             .first()
-            .is_some_and(|w| (w.len() >= 4 && "EXECUTE".starts_with(w.as_str())) || is_exit(w)),
+            .is_some_and(|w| command(w.as_bytes()) == Some("EXECUTE") || is_exit(w)),
         // `/` runs the previous statement a second time.
         PieceKind::RunAgain => true,
         PieceKind::Unterminated => false,
@@ -223,7 +220,10 @@ mod tests {
             "CREATE SEQUENCE \"APP\".\"S\"",
             "ALTER TRIGGER X ENABLE",
             "CREATE TABLE T (A NUMBER)",
+            "CREATE GLOBAL TEMPORARY TABLE T (A NUMBER)",
             "ALTER TABLE T ADD PRIMARY KEY (A)",
+            "CREATE UNIQUE INDEX I ON T (A)",
+            "CREATE BITMAP INDEX I ON T (A)",
             "GRANT SELECT ON T TO U",
         ] {
             assert_eq!(

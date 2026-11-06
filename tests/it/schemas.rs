@@ -293,3 +293,23 @@ fn a_linked_file_is_in_the_folder_it_points_to() {
     );
     assert!(!out.exists(), "nothing is written");
 }
+
+#[test]
+fn a_folder_that_isnt_a_plain_name_is_its_schema_as_written() {
+    // `_app` can't be written unquoted, so its folder is the schema "_app", not "_APP".
+    let (_dir, report) = check_in_folders(
+        &[
+            (
+                "ddl.sql",
+                "CREATE TABLE \"_app\".T (ID NUMBER);\nCREATE TABLE \"_APP\".T (ID NUMBER PRIMARY KEY);\n",
+            ),
+            (
+                "_app/x.sql",
+                "INSERT INTO T VALUES (1);\nINSERT INTO T VALUES (1);\n",
+            ),
+        ],
+        &Options::default(),
+    );
+    let report = report.unwrap();
+    assert_eq!(found(&report), []);
+}
