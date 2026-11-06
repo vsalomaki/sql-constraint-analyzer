@@ -25,11 +25,29 @@ criteria = "safe-to-deploy"
 version = "0.11.3"
 notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Trait crate plus wrapper macros combining a hash core with block-buffer. forbid(unsafe_code), no_std, no build script, no statics; alloc, dev, mac, oid, zeroize and rand_core are off by default."
 
+[[audits.fastrand]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-run"
+delta = "2.3.0 -> 2.5.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Adds inclusive float generators, moves to the getrandom 0.4 API behind the js feature, reorganises features. No file, network, process or environment use; no build script."
+
+[[audits.float-cmp]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-run"
+delta = "0.9.0 -> 0.10.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Turns the margin API into a trait; float comparison only. No file, network, process or environment use; no build script."
+
 [[audits.hybrid-array]]
 who = "Ville Salomäki <vsalomaki@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.4.15"
 notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). No build script, proc macros or I/O; no default features. All unsafe is layout casting of the repr(transparent) Array<T, U> to and from [T; N], slices and MaybeUninit, resting on the ArraySize invariant (all 820 generated sizes checked, and asserted by the crate's tests). Slice-to-array casts check lengths first; try_from_fn drops only initialised elements on error or panic; split/flatten/unflatten move ownership exactly once. Soundness also relies on typenum's constants."
+
+[[audits.insta]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-run"
+version = "1.49.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Snapshot testing; no build script or network. Reads and writes .snap/.snap.new/pending snapshot files beside the tests, reads insta.yaml, and deletes only its own leftover pending files (by name prefix). Runs cargo metadata --no-deps to find the workspace root, rustfmt --emit=stdout on stdin to format failure output, and a diff tool only if INSTA_DIFF_TOOL is set. Reads INSTA_*/CI/cargo variables; its one write is INSTA_UPDATE=force when a deprecated variable asks. One unsafe pin projection, sound."
 
 [[audits.libc]]
 who = "Ville Salomäki <vsalomaki@gmail.com>"
@@ -42,6 +60,24 @@ who = "Ville Salomäki <vsalomaki@gmail.com>"
 criteria = "safe-to-deploy"
 version = "1.2.0"
 notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Reads the process's own memory use: /proc/self/statm or smaps (read-only), task_info on macOS, GetProcessMemoryInfo on Windows, kinfo_getproc on FreeBSD; results read only after success. No build script, network, writes or processes."
+
+[[audits.proptest]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-run"
+version = "1.12.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Property testing; reviewed with default features off plus std. No build script, network or processes; the fork/timeout runner is behind the off fork feature. On a failing case it appends the seed to proptest-regressions/<source>.txt (no truncate or delete) and reads it back later. Reads PROPTEST_* variables only. Its unsafe (RDRAND seeding, a scoped panic hook) is behind off features."
+
+[[audits.r-efi]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-run"
+version = "6.0.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). UEFI bindings, built only for target_os = uefi (through getrandom), never for our targets. no_std, no build script: type and function-pointer definitions; two unsafe Guid <-> [u8; 16] conversions, sound (same size, integer fields only)."
+
+[[audits.rand_xorshift]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-run"
+delta = "0.4.0 -> 0.5.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Ports to the rand_core 0.10 traits; the generator is unchanged. No file, network, process or environment use; no build script."
 
 [[audits.sha2]]
 who = "Ville Salomäki <vsalomaki@gmail.com>"
