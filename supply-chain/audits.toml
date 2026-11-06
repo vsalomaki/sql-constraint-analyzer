@@ -1,7 +1,35 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.bitflags]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.11.1 -> 2.13.2"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). New safe APIs (all_named, iter_equal_names) and macro refactoring; no new unsafe, dependencies or build script."
+
+[[audits.libc]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.2.190 -> 0.2.191"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). build.rs adds Emscripten-only cfg flags by emcc version; the rest are binding declarations (Apple Mach items no longer macOS-only, new structs and constants) and other platforms' bindings."
+
+[[audits.memory-stats]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.2.0"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Reads the process's own memory use: /proc/self/statm or smaps (read-only), task_info on macOS, GetProcessMemoryInfo on Windows, kinfo_getproc on FreeBSD; results read only after success. No build script, network, writes or processes."
+
+[[audits.terminal_size]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.4.4"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Reads the terminal size only: isatty/tcgetwinsize via rustix on Unix, GetConsoleScreenBufferInfo on Windows; unsafe limited to those calls and handle borrowing. No build script, no I/O beyond that; stty runs only in a test."
+
+[[audits.xxhash-rust]]
+who = "Ville Salomäki <vsalomaki@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.8.19"
+notes = "Reviewed with Claude (AI) assistance; the reviewer read the findings and approved them (see issue #35 in vsalomaki/sql-constraint-analyzer). Pure hashing: no I/O, FFI or build script. Unsafe pointer reads are bounded by their callers (length-dispatched short paths, bounds-checked SIMD indexing, streaming buffer fills only when the data fits); byte-array reads need no alignment; public secret APIs check length in release. Tested under Miri upstream."
 
 [[trusted.aho-corasick]]
 criteria = "safe-to-deploy"

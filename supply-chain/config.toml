@@ -22,10 +22,6 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-[[exemptions.bitflags]]
-version = "2.13.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.block-buffer]]
 version = "0.12.1"
 criteria = "safe-to-deploy"
@@ -54,14 +50,6 @@ criteria = "safe-to-deploy"
 version = "1.49.0"
 criteria = "safe-to-run"
 
-[[exemptions.libc]]
-version = "0.2.191"
-criteria = "safe-to-deploy"
-
-[[exemptions.memory-stats]]
-version = "1.2.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.proptest]]
 version = "1.12.0"
 criteria = "safe-to-run"
@@ -78,14 +66,6 @@ criteria = "safe-to-run"
 version = "0.11.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.terminal_size]]
-version = "0.4.4"
-criteria = "safe-to-deploy"
-
 [[exemptions.typenum]]
 version = "1.20.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.xxhash-rust]]
-version = "0.8.19"
 criteria = "safe-to-deploy"
