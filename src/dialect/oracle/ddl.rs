@@ -5,9 +5,8 @@ use super::cursor::{Cursor, words};
 use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
-    AlterAction, ColumnDef, ColumnDefault, ConstraintDef, ConstraintKind, ConstraintState,
-    DataType, Decimal, Expr, Ident, IndexColumn, Name, ParseError, Skip, StateChange, Statement,
-    TypeFamily,
+    AlterAction, ColumnDef, ConstraintDef, ConstraintKind, ConstraintState, DataType, Decimal,
+    Expr, Ident, IndexColumn, Name, ParseError, Skip, StateChange, Statement, TypeFamily,
 };
 
 /// The statement a table or index DDL piece makes, or `None` when the piece is something else.
@@ -308,7 +307,7 @@ fn written_type(c: &Cursor, start: usize) -> String {
 }
 
 /// A default value, up to the column's next clause.
-fn default_value(c: &mut Cursor) -> Result<ColumnDefault, ParseError> {
+fn default_value(c: &mut Cursor) -> Result<Expr<'static>, ParseError> {
     let start = c.pos();
     while !c.at_item_end() {
         let at_clause = c.at_any_word(&[
@@ -329,55 +328,11 @@ fn default_value(c: &mut Cursor) -> Result<ColumnDefault, ParseError> {
         }
         c.skip_token()?;
     }
-    let end = c.pos();
-    if end == start {
+    let tokens = c.tokens().get(start..c.pos()).unwrap_or_default();
+    if tokens.is_empty() {
         return Err(c.expected("a default value"));
     }
-    Ok(literal(c, start, end).map_or_else(
-        || ColumnDefault::Opaque(c.text(start, end)),
-        ColumnDefault::Value,
-    ))
-}
-
-/// The tokens from `start` to `end` as a literal, when they are one.
-fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr<'static>> {
-    let tokens: Vec<_> = (start..end).filter_map(|i| c.token(i)).collect();
-    let source = c.source();
-    let is_word = |t: &super::lex::Token, w: &str| {
-        t.kind == TokenKind::Word && t.text(source).eq_ignore_ascii_case(w.as_bytes())
-    };
-    match tokens.as_slice() {
-        [t] if is_word(t, "NULL") => Some(Expr::Null),
-        [t] if t.kind == TokenKind::Number => Some(Expr::Number(c.decode(t.text(source)).into())),
-        [t] => match t.kind {
-            TokenKind::String { national } | TokenKind::AltString { national } => {
-                Some(Expr::String {
-                    bytes: t.content(source).into_owned().into(),
-                    national,
-                })
-            }
-            _ => None,
-        },
-        [minus, t]
-            if minus.kind == TokenKind::Punct
-                && minus.text(source) == b"-"
-                && t.kind == TokenKind::Number =>
-        {
-            Some(Expr::Negate(Box::new(Expr::Number(
-                c.decode(t.text(source)).into(),
-            ))))
-        }
-        [ty, t]
-            if (is_word(ty, "DATE") || is_word(ty, "TIMESTAMP"))
-                && matches!(t.kind, TokenKind::String { .. }) =>
-        {
-            Some(Expr::Typed {
-                type_name: c.decode(ty.text(source)).to_ascii_uppercase().into(),
-                text: c.decode(&t.content(source)).into(),
-            })
-        }
-        _ => None,
-    }
+    Ok(super::insert::expr(c, tokens, 0).into_owned())
 }
 
 /// A constraint on a column; `None` for a bare `NULL`, which only says the column is nullable.
@@ -884,16 +839,13 @@ mod tests {
         );
         assert_eq!(
             columns[3].default,
-            Some(ColumnDefault::Value(Expr::String {
+            Some(Expr::String {
                 bytes: b"ACTIVE".to_vec().into(),
                 national: false
-            }))
+            })
         );
         assert!(!columns[3].default_on_null);
-        assert_eq!(
-            columns[4].default,
-            Some(ColumnDefault::Opaque("SYSTIMESTAMP".into()))
-        );
+        assert_eq!(columns[4].default, Some(Expr::Other("SYSTIMESTAMP".into())));
         assert!(columns[4].default_on_null);
         assert_eq!(
             constraints,
@@ -1025,28 +977,44 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_literals_or_kept_as_written() {
-        let cases: [(&str, ColumnDefault); 6] = [
-            ("DEFAULT 0", ColumnDefault::Value(Expr::Number("0".into()))),
+    fn defaults_take_the_shapes_values_do() {
+        let cases: [(&str, Expr); 7] = [
+            ("DEFAULT 0", Expr::Number("0".into())),
             (
                 "DEFAULT -1.5 NOT NULL",
-                ColumnDefault::Value(Expr::Negate(Box::new(Expr::Number("1.5".into())))),
+                Expr::Negate(Box::new(Expr::Number("1.5".into()))),
             ),
-            ("DEFAULT NULL NULL", ColumnDefault::Value(Expr::Null)),
+            ("DEFAULT NULL NULL", Expr::Null),
             (
                 "DEFAULT DATE '2024-01-31'",
-                ColumnDefault::Value(Expr::Typed {
+                Expr::Typed {
                     type_name: "DATE".into(),
                     text: "2024-01-31".into(),
-                }),
+                },
+            ),
+            (
+                "DEFAULT TO_DATE('2024-01-31', 'YYYY-MM-DD') NOT NULL",
+                Expr::Call {
+                    function: "TO_DATE".into(),
+                    args: vec![
+                        Expr::String {
+                            bytes: b"2024-01-31".to_vec().into(),
+                            national: false,
+                        },
+                        Expr::String {
+                            bytes: b"YYYY-MM-DD".to_vec().into(),
+                            national: false,
+                        },
+                    ],
+                },
             ),
             (
                 "DEFAULT \"APP\".\"S\".NEXTVAL",
-                ColumnDefault::Opaque("\"APP\".\"S\".NEXTVAL".into()),
+                Expr::NextValue(name("APP", "S")),
             ),
             (
                 "DEFAULT TRUNC(SYSDATE) + 1 CONSTRAINT X CHECK (C > 0)",
-                ColumnDefault::Opaque("TRUNC(SYSDATE) + 1".into()),
+                Expr::Other("TRUNC(SYSDATE) + 1".into()),
             ),
         ];
         for (written, expected) in cases {
@@ -1723,7 +1691,7 @@ mod fixtures {
     use crate::dialect::oracle::RULES;
     use crate::dialect::oracle::split::Splitter;
     use crate::source::{Encoding, PieceKind};
-    use crate::statement::{AlterAction, ColumnDefault, Expr, Ident, Name, Statement, TypeFamily};
+    use crate::statement::{AlterAction, Expr, Ident, Name, Statement, TypeFamily};
     use crate::synth::Manifest;
     use crate::synth::schema::{
         self, APP_TABLES, DefaultValue, EMPLOYEES_EMAIL_UIX, NotNull, REF_TABLES, State, TableId,
@@ -1863,13 +1831,11 @@ mod fixtures {
             assert_eq!(actual, expected, "{at}: {}", id.name());
             for (column, generated) in t.columns.iter().zip(id.columns()) {
                 let default = generated.default.map(|d| match d {
-                    DefaultValue::Text(text) => ColumnDefault::Value(Expr::String {
+                    DefaultValue::Text(text) => Expr::String {
                         bytes: text.as_bytes().to_vec().into(),
                         national: false,
-                    }),
-                    DefaultValue::CurrentTimestamp => {
-                        ColumnDefault::Opaque("SYSTIMESTAMP".to_owned())
-                    }
+                    },
+                    DefaultValue::CurrentTimestamp => Expr::Other("SYSTIMESTAMP".into()),
                 });
                 assert_eq!(column.default, default, "{at}: {}", column.name);
                 assert_eq!(

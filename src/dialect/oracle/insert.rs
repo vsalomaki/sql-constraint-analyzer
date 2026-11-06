@@ -187,7 +187,7 @@ impl<'a> Parser<'a> {
                 return Err(self.c.expected("a value"));
             };
             values.push(Value {
-                expr: self.expr(tokens, 0),
+                expr: expr(&self.c, tokens, 0),
                 span: self.c.span(first.start, last.end),
             });
             match self.c.peek() {
@@ -231,118 +231,115 @@ impl<'a> Parser<'a> {
             || self.c.word_at(ahead, "WITH")
             || self.c.punct_at(ahead, b'(')
     }
+}
 
-    /// A value by its shape; anything without one of the shapes below is kept as written.
-    fn expr(&self, tokens: &[Token], depth: usize) -> Expr<'a> {
-        self.shaped(tokens, depth)
-            .unwrap_or_else(|| Expr::Other(self.c.text_of(tokens)))
+/// A value by its shape; anything without one of the shapes below is kept as written.
+pub(super) fn expr<'a>(c: &Cursor<'a>, tokens: &[Token], depth: usize) -> Expr<'a> {
+    shaped(c, tokens, depth).unwrap_or_else(|| Expr::Other(c.text_of(tokens)))
+}
+
+fn shaped<'a>(c: &Cursor<'a>, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
+    if depth > MAX_DEPTH {
+        return None;
     }
+    match *tokens {
+        [token] => literal(c, token),
+        [minus, ref rest @ ..] if c.is_punct(minus, b'-') => {
+            Some(Expr::Negate(Box::new(shaped(c, rest, depth + 1)?)))
+        }
+        [keyword, string]
+            if (c.is_word(keyword, "DATE") || c.is_word(keyword, "TIMESTAMP"))
+                && string.kind == (TokenKind::String { national: false }) =>
+        {
+            Some(Expr::Typed {
+                type_name: RULES.folded(c.token_text(keyword)),
+                text: c.decoded(c.content(string)),
+            })
+        }
+        [.., last] if c.is_punct(last, b')') => call(c, tokens, depth),
+        _ => next_value(c, tokens),
+    }
+}
 
-    fn shaped(&self, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
-        if depth > MAX_DEPTH {
+fn literal<'a>(c: &Cursor<'a>, token: Token) -> Option<Expr<'a>> {
+    match token.kind {
+        TokenKind::Number => Some(Expr::Number(c.token_text(token))),
+        TokenKind::String { national } | TokenKind::AltString { national } => Some(Expr::String {
+            bytes: c.content(token),
+            national,
+        }),
+        _ if c.is_word(token, "NULL") => Some(Expr::Null),
+        _ if c.is_word(token, "DEFAULT") => Some(Expr::Default),
+        _ => None,
+    }
+}
+
+/// `name(args)`, where the `(` after the name closes at the last token.
+fn call<'a>(c: &Cursor<'a>, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
+    let open = tokens.iter().position(|&t| c.is_punct(t, b'('))?;
+    let (head, rest) = tokens.split_at_checked(open)?;
+    let function = match head {
+        [name] => c.ident_of(*name)?.value,
+        _ => Cow::Owned(
+            dotted(c, head)?
+                .iter()
+                .map(|part| &*part.value)
+                .collect::<Vec<_>>()
+                .join("."),
+        ),
+    };
+    let inner = rest.get(1..rest.len().checked_sub(1)?)?;
+    let mut args = Vec::new();
+    if !inner.is_empty() {
+        let (mut start, mut nesting) = (0, 0_usize);
+        for (i, &token) in inner.iter().enumerate() {
+            if c.is_punct(token, b'(') {
+                nesting += 1;
+            } else if c.is_punct(token, b')') {
+                // A `)` that closes the call early.
+                nesting = nesting.checked_sub(1)?;
+            } else if nesting == 0 && c.is_punct(token, b',') {
+                args.push(argument(c, inner.get(start..i)?, depth)?);
+                start = i + 1;
+            }
+        }
+        if nesting > 0 {
             return None;
         }
-        match *tokens {
-            [token] => self.literal(token),
-            [minus, ref rest @ ..] if self.c.is_punct(minus, b'-') => {
-                Some(Expr::Negate(Box::new(self.shaped(rest, depth + 1)?)))
-            }
-            [keyword, string]
-                if (self.c.is_word(keyword, "DATE") || self.c.is_word(keyword, "TIMESTAMP"))
-                    && string.kind == (TokenKind::String { national: false }) =>
-            {
-                Some(Expr::Typed {
-                    type_name: RULES.folded(self.c.token_text(keyword)),
-                    text: self.c.decoded(self.c.content(string)),
-                })
-            }
-            [.., last] if self.c.is_punct(last, b')') => self.call(tokens, depth),
-            _ => self.next_value(tokens),
-        }
+        args.push(argument(c, inner.get(start..)?, depth)?);
     }
+    Some(Expr::Call { function, args })
+}
 
-    fn literal(&self, token: Token) -> Option<Expr<'a>> {
-        match token.kind {
-            TokenKind::Number => Some(Expr::Number(self.c.token_text(token))),
-            TokenKind::String { national } | TokenKind::AltString { national } => {
-                Some(Expr::String {
-                    bytes: self.c.content(token),
-                    national,
-                })
-            }
-            _ if self.c.is_word(token, "NULL") => Some(Expr::Null),
-            _ if self.c.is_word(token, "DEFAULT") => Some(Expr::Default),
-            _ => None,
-        }
+/// One argument of a call; `None` when it is empty.
+fn argument<'a>(c: &Cursor<'a>, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
+    (!tokens.is_empty()).then(|| expr(c, tokens, depth + 1))
+}
+
+/// `[schema.]sequence.NEXTVAL`.
+fn next_value<'a>(c: &Cursor<'a>, tokens: &[Token]) -> Option<Expr<'a>> {
+    let mut parts = dotted(c, tokens)?;
+    let last = parts.pop()?;
+    if last.quoted || last.value != "NEXTVAL" {
+        return None;
     }
+    let name = parts.pop()?;
+    let schema = parts.pop();
+    parts
+        .is_empty()
+        .then_some(Expr::NextValue(Name { schema, name }))
+}
 
-    /// `name(args)`, where the `(` after the name closes at the last token.
-    fn call(&self, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
-        let open = tokens.iter().position(|&t| self.c.is_punct(t, b'('))?;
-        let (head, rest) = tokens.split_at_checked(open)?;
-        let function = match head {
-            [name] => self.c.ident_of(*name)?.value,
-            _ => Cow::Owned(
-                self.dotted(head)?
-                    .iter()
-                    .map(|part| &*part.value)
-                    .collect::<Vec<_>>()
-                    .join("."),
-            ),
-        };
-        let inner = rest.get(1..rest.len().checked_sub(1)?)?;
-        let mut args = Vec::new();
-        if !inner.is_empty() {
-            let (mut start, mut nesting) = (0, 0_usize);
-            for (i, &token) in inner.iter().enumerate() {
-                if self.c.is_punct(token, b'(') {
-                    nesting += 1;
-                } else if self.c.is_punct(token, b')') {
-                    // A `)` that closes the call early.
-                    nesting = nesting.checked_sub(1)?;
-                } else if nesting == 0 && self.c.is_punct(token, b',') {
-                    args.push(self.argument(inner.get(start..i)?, depth)?);
-                    start = i + 1;
-                }
-            }
-            if nesting > 0 {
-                return None;
-            }
-            args.push(self.argument(inner.get(start..)?, depth)?);
-        }
-        Some(Expr::Call { function, args })
-    }
-
-    /// One argument of a call; `None` when it is empty.
-    fn argument(&self, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
-        (!tokens.is_empty()).then(|| self.expr(tokens, depth + 1))
-    }
-
-    /// `[schema.]sequence.NEXTVAL`.
-    fn next_value(&self, tokens: &[Token]) -> Option<Expr<'a>> {
-        let mut parts = self.dotted(tokens)?;
-        let last = parts.pop()?;
-        if last.quoted || last.value != "NEXTVAL" {
-            return None;
-        }
-        let name = parts.pop()?;
-        let schema = parts.pop();
-        parts
-            .is_empty()
-            .then_some(Expr::NextValue(Name { schema, name }))
-    }
-
-    /// `a.b.c`: identifiers separated by dots.
-    fn dotted(&self, tokens: &[Token]) -> Option<Vec<Ident<'a>>> {
-        let mut parts = Vec::new();
-        let mut iter = tokens.iter();
-        loop {
-            parts.push(self.c.ident_of(*iter.next()?)?);
-            match iter.next() {
-                None => return Some(parts),
-                Some(&dot) if self.c.is_punct(dot, b'.') => {}
-                Some(_) => return None,
-            }
+/// `a.b.c`: identifiers separated by dots.
+fn dotted<'a>(c: &Cursor<'a>, tokens: &[Token]) -> Option<Vec<Ident<'a>>> {
+    let mut parts = Vec::new();
+    let mut iter = tokens.iter();
+    loop {
+        parts.push(c.ident_of(*iter.next()?)?);
+        match iter.next() {
+            None => return Some(parts),
+            Some(&dot) if c.is_punct(dot, b'.') => {}
+            Some(_) => return None,
         }
     }
 }

@@ -383,6 +383,19 @@ fn a_parent_key_the_checker_cant_know_makes_a_missing_parent_unverifiable() {
 }
 
 #[test]
+fn a_default_reads_as_the_same_value_written_in_the_row() {
+    let (report, findings) = check_sql(
+        "CREATE TABLE T (ID NUMBER, D DATE DEFAULT TO_DATE('2024-01-31', 'YYYY-MM-DD'), \
+         CONSTRAINT T_UK UNIQUE (ID, D));\n\
+         INSERT INTO T (ID) VALUES (1);\n\
+         INSERT INTO T (ID, D) VALUES (1, DATE '2024-01-31');\n",
+        false,
+    );
+    assert_eq!(findings, [(FindingKind::DuplicateKey, 3, false)]);
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}
+
+#[test]
 fn rows_before_an_enable_novalidate_are_not_judged_by_it() {
     let script = |enable: &str| {
         format!(
