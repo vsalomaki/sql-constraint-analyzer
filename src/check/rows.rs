@@ -13,8 +13,18 @@ use crate::catalog::{Catalog, Column, Constraint, Kind, Origin, Parent, Table, T
 use crate::dialect::{DialectId, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::source::Encoding;
-use crate::statement::{DataType, Expr, InsertRow};
+use crate::statement::{DataType, Expr, InsertRow, TypeFamily};
 use crate::value::{self, Canonical, Literal};
+
+/// Whether a value no constraint reads still counts: a string, or the default, in a date column may be text read as
+/// ISO, which the run reports. Only a string or a default can be text.
+fn may_be_date_text(column: &Column, expr: Option<&Expr<'_>>) -> bool {
+    matches!(
+        column.data_type.family,
+        TypeFamily::Date | TypeFamily::Timestamp
+    ) && (column.default_on_null
+        || matches!(expr, None | Some(Expr::Default | Expr::String { .. })))
+}
 
 /// Where a row is: its file's position in the run, its offset there, and its line.
 #[derive(Debug, Clone, Copy)]
@@ -145,6 +155,8 @@ pub(super) struct Checker<'a> {
     unverifiable: FxMap<(TableId, usize), Undecided>,
     no_parent: FxMap<(TableId, usize), u64>,
     dates: FxMap<(TableId, usize), u64>,
+    /// By table: whether some constraint reads each column.
+    read: FxMap<TableId, Vec<bool>>,
 }
 
 impl<'a> Checker<'a> {
@@ -169,6 +181,10 @@ impl<'a> Checker<'a> {
             unverifiable: FxMap::default(),
             no_parent: FxMap::default(),
             dates: FxMap::default(),
+            read: catalog
+                .ids()
+                .filter_map(|id| Some((id, catalog.table(id)?.read_columns())))
+                .collect(),
         }
     }
 
@@ -255,11 +271,22 @@ impl<'a> Checker<'a> {
             return Vec::new();
         };
         *self.rows.entry(matched.table).or_default() += 1;
+        let read = self.read.get(&matched.table);
         let literals: Vec<Literal<'v>> = table
             .columns
             .iter()
             .zip(&matched.values)
-            .map(|(column, value)| self.literal(column, value.map(|v| &v.expr), encoding))
+            .enumerate()
+            .map(|(position, (column, value))| {
+                let expr = value.map(|v| &v.expr);
+                let read = read.and_then(|r| r.get(position)).copied().unwrap_or(true);
+                if read || may_be_date_text(column, expr) {
+                    self.literal(column, expr, encoding)
+                } else {
+                    // No check reads it.
+                    Literal::Unknown(String::new())
+                }
+            })
             .collect();
         if !reference {
             for (position, (column, literal)) in table.columns.iter().zip(&literals).enumerate() {

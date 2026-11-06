@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 
 use super::RULES;
+use super::lex::same_ignoring_case;
 use crate::source::Encoding;
 use crate::statement::Expr;
 use crate::value::{self, Literal};
@@ -127,36 +128,43 @@ enum Element {
     Separator,
 }
 
-/// Longer names first, so `HH24` isn't read as `HH` and `MONTH` not as `MON`.
-const ELEMENTS: &[(&str, Element)] = &[
-    ("HH24", Element::Hour24),
-    ("HH12", Element::Hour12),
-    ("HH", Element::Hour12),
-    ("MONTH", Element::MonthName),
-    ("MON", Element::MonthAbbreviation),
-    ("MM", Element::Month),
-    ("MI", Element::Minute),
-    ("DD", Element::Day),
-    ("YYYY", Element::Year),
-    ("RRRR", Element::RoundedYear),
-    ("RR", Element::RoundedYear),
-    ("SS", Element::Second),
-    ("FF1", Element::Fraction(1)),
-    ("FF2", Element::Fraction(2)),
-    ("FF3", Element::Fraction(3)),
-    ("FF4", Element::Fraction(4)),
-    ("FF5", Element::Fraction(5)),
-    ("FF6", Element::Fraction(6)),
-    ("FF7", Element::Fraction(7)),
-    ("FF8", Element::Fraction(8)),
-    ("FF9", Element::Fraction(9)),
-    ("FF", Element::Fraction(9)),
-    ("X", Element::Radix),
-    ("A.M.", Element::Meridian),
-    ("P.M.", Element::Meridian),
-    ("AM", Element::Meridian),
-    ("PM", Element::Meridian),
-];
+/// The element names starting with the upper-case `letter`, longer names first, so `HH24` isn't read as `HH` and
+/// `MONTH` not as `MON`.
+fn named(letter: u8) -> &'static [(&'static str, Element)] {
+    match letter {
+        b'H' => &[
+            ("HH24", Element::Hour24),
+            ("HH12", Element::Hour12),
+            ("HH", Element::Hour12),
+        ],
+        b'M' => &[
+            ("MONTH", Element::MonthName),
+            ("MON", Element::MonthAbbreviation),
+            ("MM", Element::Month),
+            ("MI", Element::Minute),
+        ],
+        b'D' => &[("DD", Element::Day)],
+        b'Y' => &[("YYYY", Element::Year)],
+        b'R' => &[("RRRR", Element::RoundedYear), ("RR", Element::RoundedYear)],
+        b'S' => &[("SS", Element::Second)],
+        b'F' => &[
+            ("FF1", Element::Fraction(1)),
+            ("FF2", Element::Fraction(2)),
+            ("FF3", Element::Fraction(3)),
+            ("FF4", Element::Fraction(4)),
+            ("FF5", Element::Fraction(5)),
+            ("FF6", Element::Fraction(6)),
+            ("FF7", Element::Fraction(7)),
+            ("FF8", Element::Fraction(8)),
+            ("FF9", Element::Fraction(9)),
+            ("FF", Element::Fraction(9)),
+        ],
+        b'X' => &[("X", Element::Radix)],
+        b'A' => &[("A.M.", Element::Meridian), ("AM", Element::Meridian)],
+        b'P' => &[("P.M.", Element::Meridian), ("PM", Element::Meridian)],
+        _ => &[],
+    }
+}
 
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -190,17 +198,10 @@ fn elements(mask: &str) -> impl Iterator<Item = Option<Element>> {
     std::iter::from_fn(move || {
         let &b = rest.first()?;
         let first = b.to_ascii_uppercase();
-        // Most of a mask is separators and a few letters, so only names with this first letter are tried.
-        let named = if first.is_ascii_alphabetic() {
-            ELEMENTS.iter().find(|(name, _)| {
-                name.as_bytes().first() == Some(&first)
-                    && rest
-                        .get(..name.len())
-                        .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
-            })
-        } else {
-            None
-        };
+        let named = named(first).iter().find(|(name, _)| {
+            rest.get(..name.len())
+                .is_some_and(|head| same_ignoring_case(head, name.as_bytes()))
+        });
         let (element, len) = match named {
             Some((name, element)) => (Some(*element), name.len()),
             None if is_separator(b) => (Some(Element::Separator), 1),
@@ -233,7 +234,7 @@ fn digits(rest: &mut &[u8], max: usize) -> Option<(u32, usize)> {
 fn word(rest: &mut &[u8], words: &[&str]) -> Option<usize> {
     let (index, len) = words.iter().enumerate().find_map(|(i, w)| {
         rest.get(..w.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(w.as_bytes()))
+            .is_some_and(|head| same_ignoring_case(head, w.as_bytes()))
             .then_some((i, w.len()))
     })?;
     *rest = rest.get(len..).unwrap_or_default();

@@ -13,7 +13,7 @@ use crate::statement::{Ident, Name, ParseError};
 pub(crate) fn first_word_is(text: &[u8], keyword: &str) -> bool {
     words(text)
         .next()
-        .is_some_and(|w| w.eq_ignore_ascii_case(keyword.as_bytes()))
+        .is_some_and(|w| lex::same_ignoring_case(w, keyword.as_bytes()))
 }
 
 /// Up to `n` leading words upper-cased, past blanks and comments, without lexing the rest.
@@ -113,12 +113,8 @@ impl<'a> Cursor<'a> {
     }
 
     pub(crate) fn is_word(&self, token: Token, keyword: &str) -> bool {
-        // The length first: most tokens tested against a keyword are another word.
         token.kind == TokenKind::Word
-            && token.end - token.start == keyword.len()
-            && token
-                .text(&self.piece.text)
-                .eq_ignore_ascii_case(keyword.as_bytes())
+            && lex::same_ignoring_case(token.text(&self.piece.text), keyword.as_bytes())
     }
 
     pub(crate) fn is_punct(&self, token: Token, c: u8) -> bool {

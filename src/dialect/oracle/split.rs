@@ -20,7 +20,7 @@
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read};
 
-use super::lex::{Delimiter, alternative_delimiter, is_word_byte};
+use super::lex::{Delimiter, alternative_delimiter, is_word_byte, same_ignoring_case};
 use crate::source::{Piece, PieceKind, Span, to_u64};
 
 pub use crate::dialect::Runner;
@@ -561,7 +561,7 @@ fn head_words(text: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 fn is(word: &[u8], keyword: &str) -> bool {
-    word.eq_ignore_ascii_case(keyword.as_bytes())
+    same_ignoring_case(word, keyword.as_bytes())
 }
 
 /// Whether a piece is a block, from its first words.
@@ -657,6 +657,26 @@ const COMMANDS: &[(&str, &str)] = &[
     ("XQUERY", "XQUERY"),
 ];
 
+/// By initial letter, the range of `COMMANDS` that starts with it; every line asks.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    reason = "built at compile time over a list of fewer than 256 commands in order, each with an initial A to Z"
+)]
+const COMMAND_RANGES: [(u8, u8); 26] = {
+    let mut ranges = [(0, 0); 26];
+    let mut i = 0;
+    while i < COMMANDS.len() {
+        let letter = (COMMANDS[i].1.as_bytes()[0] - b'A') as usize;
+        if ranges[letter].1 == 0 {
+            ranges[letter].0 = i as u8;
+        }
+        ranges[letter].1 = i as u8 + 1;
+        i += 1;
+    }
+    ranges
+};
+
 /// A script command, from the first word of a line with nothing in progress.
 fn is_command(trimmed: &[u8]) -> bool {
     if trimmed.starts_with(b"@") || trimmed.starts_with(b"!") {
@@ -681,14 +701,17 @@ fn is_command(trimmed: &[u8]) -> bool {
 
 /// The full name of the SQL\*Plus command `word` names, in any case and any accepted abbreviation.
 pub(crate) fn command(word: &[u8]) -> Option<&'static str> {
-    let initial = word.first().map(u8::to_ascii_uppercase);
-    COMMANDS.iter().find_map(|&(shortest, full)| {
-        (full.as_bytes().first() == initial.as_ref()
-            && word.len() >= shortest.len()
+    let initial = word.first()?.to_ascii_uppercase();
+    let &(from, to) = COMMAND_RANGES.get(usize::from(initial.checked_sub(b'A')?))?;
+    let same = COMMANDS
+        .get(usize::from(from)..usize::from(to))
+        .unwrap_or_default();
+    same.iter().find_map(|&(shortest, full)| {
+        (word.len() >= shortest.len()
             && full
                 .as_bytes()
                 .get(..word.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(word)))
+                .is_some_and(|prefix| same_ignoring_case(prefix, word)))
         .then_some(full)
     })
 }
@@ -696,6 +719,15 @@ pub(crate) fn command(word: &[u8]) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_are_in_order_for_the_lookup_by_initial() {
+        let initials: Vec<u8> = COMMANDS
+            .iter()
+            .map(|(_, full)| full.as_bytes()[0])
+            .collect();
+        assert!(initials.is_sorted(), "{initials:?}");
+    }
     use PieceKind::{Block, Command, RunAgain, Sql, Unterminated};
 
     fn split_with(runner: Runner, text: &str) -> Vec<(PieceKind, u64, String)> {

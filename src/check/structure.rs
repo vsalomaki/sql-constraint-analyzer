@@ -44,7 +44,19 @@ pub fn resolve_row<'a>(
     };
     let mut values = vec![None; table.columns.len()];
     if let Some(names) = &row.columns {
-        let found: Vec<Option<usize>> = names.iter().map(|n| table.column(&n.value)).collect();
+        // Exports list the columns in the table's order, so the column at the same place is tried first.
+        let found: Vec<Option<usize>> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let in_place = table.columns.get(i).is_some_and(|c| c.name == n.value);
+                if in_place {
+                    Some(i)
+                } else {
+                    table.column(&n.value)
+                }
+            })
+            .collect();
         let unknown: Vec<String> = names
             .iter()
             .zip(&found)

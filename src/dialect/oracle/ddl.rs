@@ -40,7 +40,7 @@ pub fn parse_ddl(
 
 /// Whether a statement is table or index DDL, by its first words, without lexing it.
 fn is_table_ddl(text: &[u8]) -> bool {
-    let is = |word: &[u8], keyword: &str| word.eq_ignore_ascii_case(keyword.as_bytes());
+    let is = |word: &[u8], keyword: &str| super::lex::same_ignoring_case(word, keyword.as_bytes());
     let mut words = words(text).take(4);
     match words.next() {
         Some(w) if is(w, "ALTER") => words.next().is_some_and(|w| is(w, "TABLE")),
