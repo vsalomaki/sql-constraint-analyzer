@@ -248,6 +248,306 @@ fn keep_last() -> Policy {
     }
 }
 
+fn null_fk() -> Policy {
+    Policy {
+        on_fk: fix::OnFk::Null,
+        ..Policy::default()
+    }
+}
+
+/// A script as one data file, fixed with `--on-fk null`.
+fn fix_null(sql: &str) -> (tempfile::TempDir, Vec<InputFile>, FixReport) {
+    fix_scripts(&[("t.sql", sql)], &Options::default(), null_fk(), false)
+}
+
+const PARENT: &str = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\nINSERT INTO P VALUES (1);\n";
+
+#[test]
+fn a_missing_parent_is_set_to_null_and_the_original_kept_in_the_rejects() {
+    let (dir, _, report) = fix_null(&format!(
+        "{PARENT}CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+         INSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2, 9);\n"
+    ));
+    assert!(
+        output(&report)
+            .ends_with("INSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2, NULL);\n"),
+        "{}",
+        output(&report)
+    );
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+    let [change] = report.removed.as_slice() else {
+        panic!("{:#?}", report.removed);
+    };
+    assert_eq!(change.line, 5);
+    let nulled: Vec<&str> = change.nulled.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(nulled, ["P_ID"]);
+    assert!(fix::summary(&report).contains("1 kept with a foreign key set to NULL"));
+    let reports = dir.path().join("out/sqlca-report");
+    let rejects = fs::read_to_string(reports.join("rejects.sql")).unwrap();
+    assert!(rejects.contains("kept with P_ID set to NULL"), "{rejects}");
+    assert!(
+        rejects.contains("INSERT INTO C VALUES (2, 9);"),
+        "{rejects}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(reports.join("fix-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(json["removed"][0]["nulled"], serde_json::json!(["P_ID"]));
+}
+
+#[test]
+fn a_foreign_key_that_cant_hold_null_drops_the_row_and_says_why() {
+    for (column, insert, why) in [
+        (
+            "P_ID NUMBER NOT NULL REFERENCES P",
+            "INSERT INTO C VALUES (2, 9);",
+            "P_ID is NOT NULL",
+        ),
+        (
+            "P_ID NUMBER DEFAULT ON NULL 9 REFERENCES P",
+            "INSERT INTO C VALUES (2, 9);",
+            "P_ID takes its default in place of NULL",
+        ),
+        (
+            "P_ID NUMBER DEFAULT 9 REFERENCES P",
+            "INSERT INTO C (ID) VALUES (2);",
+            "the row leaves P_ID out, so its default applies",
+        ),
+    ] {
+        let (_dir, _, report) = fix_null(&format!(
+            "{PARENT}CREATE TABLE C (ID NUMBER PRIMARY KEY, {column});\nINSERT INTO C VALUES (1, 1);\n{insert}\n"
+        ));
+        let [removal] = report.removed.as_slice() else {
+            panic!("{column}: {:#?}", report.removed);
+        };
+        assert!(removal.nulled.is_empty(), "{column}");
+        assert!(
+            removal.reasons[0]
+                .text
+                .ends_with(&format!("; the row went, since {why}")),
+            "{column}: {}",
+            removal.reasons[0].text
+        );
+        assert!(!output(&report).contains(insert), "{column}");
+        assert!(
+            report.output.findings.is_empty(),
+            "{column}: {:?}",
+            report.output.findings
+        );
+    }
+    let (_dir, _, report) = fix_null(&format!(
+        "{PARENT}CREATE TABLE C (P_ID NUMBER PRIMARY KEY REFERENCES P);\n\
+         INSERT INTO C VALUES (1);\nINSERT INTO C VALUES (9);\n"
+    ));
+    assert!(
+        report.removed[0].reasons[0]
+            .text
+            .ends_with("; the row went, since P_ID is part of the primary key")
+    );
+}
+
+#[test]
+fn a_disabled_primary_key_lets_its_column_be_set_to_null() {
+    let script = |state: &str| {
+        format!(
+            "{PARENT}CREATE TABLE C (X NUMBER, PRIMARY KEY (X){state}, FOREIGN KEY (X) REFERENCES P);\n\
+             INSERT INTO C VALUES (1);\nINSERT INTO C VALUES (9);\n"
+        )
+    };
+    let (_dir, _, report) = fix_null(&script(" DISABLE NOVALIDATE"));
+    assert!(
+        output(&report).ends_with("INSERT INTO C VALUES (NULL);\n"),
+        "{}",
+        output(&report)
+    );
+    let (_dir, _, report) = fix_null(&script(""));
+    assert!(report.removed[0].nulled.is_empty(), "{:#?}", report.removed);
+}
+
+#[test]
+fn a_constraint_enabled_after_the_row_without_validating_lets_it_be_set_to_null() {
+    for (declared, enable, nulled) in [
+        (
+            "CONSTRAINT C_NN NOT NULL DISABLE",
+            "ENABLE NOVALIDATE CONSTRAINT C_NN",
+            true,
+        ),
+        (
+            "CONSTRAINT C_NN NOT NULL DISABLE",
+            "ENABLE VALIDATE CONSTRAINT C_NN",
+            false,
+        ),
+        (
+            "CONSTRAINT C_PK PRIMARY KEY DISABLE",
+            "ENABLE NOVALIDATE CONSTRAINT C_PK",
+            true,
+        ),
+        (
+            "CONSTRAINT C_PK PRIMARY KEY DISABLE",
+            "ENABLE VALIDATE CONSTRAINT C_PK",
+            false,
+        ),
+    ] {
+        let (_dir, _, report) = fix_null(&format!(
+            "{PARENT}CREATE TABLE C (X NUMBER {declared}, CONSTRAINT C_FK FOREIGN KEY (X) REFERENCES P);\n\
+             INSERT INTO C VALUES (9);\nALTER TABLE C {enable};\nINSERT INTO C VALUES (1);\n"
+        ));
+        let [action] = report.removed.as_slice() else {
+            panic!("{declared} / {enable}: {:#?}", report.removed);
+        };
+        assert_eq!(!action.nulled.is_empty(), nulled, "{declared} / {enable}");
+        assert!(
+            report.output.findings.is_empty(),
+            "{declared} / {enable}: {:?}",
+            report.output.findings
+        );
+    }
+}
+
+#[test]
+fn every_column_of_a_composite_foreign_key_is_set_to_null() {
+    let (_dir, _, report) = fix_null(
+        "CREATE TABLE P (A NUMBER, B NUMBER, PRIMARY KEY (A, B));\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, A NUMBER, B NUMBER, FOREIGN KEY (A, B) REFERENCES P);\n\
+         INSERT INTO P VALUES (1, 2);\nINSERT INTO C VALUES (1, 7, 8);\n",
+    );
+    assert!(output(&report).ends_with("INSERT INTO C VALUES (1, NULL, NULL);\n"));
+    assert!(report.output.findings.is_empty());
+}
+
+#[test]
+fn a_row_set_to_null_then_removed_is_one_removal_with_its_original() {
+    let (dir, _, report) = fix_null(&format!(
+        "{PARENT}CREATE TABLE Q (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, Q_ID NUMBER NOT NULL REFERENCES Q);\n\
+         INSERT INTO Q VALUES (1, NULL);\nINSERT INTO Q VALUES (2, 5);\n\
+         INSERT INTO C VALUES (1, 9, 1);\nINSERT INTO C VALUES (2, 1, 2);\n"
+    ));
+    let removed: Vec<(u64, usize, usize)> = report
+        .removed
+        .iter()
+        .map(|r| (r.line, r.round, r.nulled.len()))
+        .collect();
+    assert_eq!(removed, [(5, 1, 0), (7, 2, 0)], "{:#?}", report.removed);
+    let kinds: Vec<FindingKind> = report.removed[1].reasons.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [FindingKind::FkMissingParent, FindingKind::FkMissingParent]
+    );
+    assert!(!output(&report).contains("(1, 9, 1)") && !output(&report).contains("NULL, 1)"));
+    let rejects = fs::read_to_string(dir.path().join("out/sqlca-report/rejects.sql")).unwrap();
+    assert_eq!(
+        rejects.matches("INSERT INTO C VALUES (1, 9, 1);").count(),
+        1,
+        "{rejects}"
+    );
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn two_foreign_keys_set_to_null_in_different_rounds_are_one_change() {
+    let (_dir, _, report) = fix_null(&format!(
+        "{PARENT}CREATE TABLE Q (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, Q_ID NUMBER REFERENCES Q);\n\
+         INSERT INTO Q VALUES (1, NULL);\nINSERT INTO Q VALUES (2, 5);\n\
+         INSERT INTO C VALUES (1, 9, 1);\n"
+    ));
+    let changes: Vec<(u64, usize, Vec<&str>)> = report
+        .removed
+        .iter()
+        .filter(|r| !r.nulled.is_empty())
+        .map(|r| {
+            (
+                r.line,
+                r.round,
+                r.nulled.iter().map(|(c, _)| c.as_str()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [(7, 1, vec!["P_ID", "Q_ID"])],
+        "{:#?}",
+        report.removed
+    );
+    assert!(output(&report).ends_with("INSERT INTO C VALUES (1, NULL, NULL);\n"));
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn a_null_that_makes_a_unique_key_a_duplicate_is_caught_in_a_later_round() {
+    let (_dir, _, report) = fix_null(&format!(
+        "{PARENT}CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, K NUMBER, UNIQUE (P_ID, K));\n\
+         INSERT INTO C VALUES (1, NULL, 5);\nINSERT INTO C VALUES (2, 9, 5);\n"
+    ));
+    let removed: Vec<(u64, usize, usize)> = report
+        .removed
+        .iter()
+        .map(|r| (r.line, r.round, r.nulled.len()))
+        .collect();
+    assert_eq!(removed, [(5, 2, 0)], "{:#?}", report.removed);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn a_row_of_an_insert_all_is_set_to_null_in_place() {
+    let (_dir, _, report) = fix_null(&format!(
+        "{PARENT}CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+         INSERT ALL\n  INTO C VALUES (1, 1)\n  INTO C VALUES (2, 9)\nSELECT * FROM dual;\n"
+    ));
+    assert!(
+        output(&report)
+            .ends_with("  INTO C VALUES (1, 1)\n  INTO C VALUES (2, NULL)\nSELECT * FROM dual;\n"),
+        "{}",
+        output(&report)
+    );
+    assert!(report.removed[0].clause);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn an_annotated_null_says_why_inside_a_comment() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            &format!(
+                "{PARENT}CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\nINSERT INTO C VALUES (2, 9);\n"
+            ),
+        )],
+        &Options::default(),
+        null_fk(),
+        true,
+    );
+    assert!(
+        output(&report).ends_with(
+            "INSERT INTO C VALUES (2, NULL /* sqlca fix set P_ID to NULL; see rejects.sql */);\n"
+        ),
+        "{}",
+        output(&report)
+    );
+    assert!(report.output.findings.is_empty() && report.output.errors.is_empty());
+}
+
 #[test]
 fn keep_last_keeps_the_last_row_of_each_key_in_run_order() {
     let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY, V VARCHAR2(9));\n";
@@ -1152,7 +1452,7 @@ mod generated {
     use sqlca::finding::FindingKind;
     use sqlca::synth::{self, Layout, LineEnding, Noise, Placement};
 
-    use super::{FIXED, Policy, assert_restores, count, fix, inputs, keep_last, run_with};
+    use super::{FIXED, Policy, assert_restores, count, fix, inputs, keep_last, null_fk, run_with};
 
     fn assert_fixed(options: &synth::Options) {
         assert_fixed_with(options, Policy::default(), false);
@@ -1218,7 +1518,8 @@ mod generated {
             // A planted duplicate is a later row with children of its own nowhere, so under keep-first the export
             // orphans nothing: one round for missing parents and NULLs, one for the duplicates waiting on them.
             // Keep-last removes the first row, whose other keys can be parents.
-            if policy.on_duplicate == fix::OnDuplicate::KeepFirst {
+            if policy.on_duplicate == fix::OnDuplicate::KeepFirst && policy.on_fk == fix::OnFk::Drop
+            {
                 assert_eq!(report.rounds, 2, "{at}: generated exports orphan nothing");
             }
             assert_eq!(
@@ -1249,7 +1550,7 @@ mod generated {
     }
 
     #[test]
-    fn generated_exports_are_fixed_with_annotations_and_under_keep_last() {
+    fn generated_exports_are_fixed_with_annotations_under_keep_last_and_null_fks() {
         for seed in 1..=3 {
             for (layout, noise, line_ending) in [
                 (Layout::Single, Noise::sqldev(), LineEnding::Lf),
@@ -1266,6 +1567,7 @@ mod generated {
                 };
                 assert_fixed_with(&options, Policy::default(), true);
                 assert_fixed_with(&options, keep_last(), true);
+                assert_fixed_with(&options, null_fk(), true);
             }
         }
     }

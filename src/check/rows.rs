@@ -256,38 +256,21 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether a constraint judges a row: enabled, and either enabled before the row or validating the rows that
-    /// were there when it was enabled.
     fn applies(constraint: &Constraint, at: At) -> bool {
-        constraint.state.enabled && (at.after(constraint.enabled_at) || constraint.state.validated)
+        constraint.judges(at.file, at.offset)
     }
 
     /// NULL in a NOT NULL column or a primary key column: one finding per column.
     fn not_null(&mut self, table: &Table, literals: &[Literal], row: &InsertRow, at: At) {
-        let mut reported: Vec<usize> = Vec::new();
-        let not_nulls = table.constraints.iter().filter_map(|c| match &c.kind {
-            Kind::NotNull { column } => Some((c, std::slice::from_ref(column))),
-            _ => None,
-        });
-        let primary = table.constraints.iter().filter_map(|c| match &c.kind {
-            Kind::PrimaryKey { columns } => Some((c, columns.as_slice())),
-            _ => None,
-        });
-        for (constraint, columns) in not_nulls.chain(primary) {
-            if !Self::applies(constraint, at) {
+        for (column, literal) in literals.iter().enumerate() {
+            if !self.is_null(literal) {
                 continue;
             }
-            for &column in columns {
-                if literals.get(column).is_some_and(|l| self.is_null(l))
-                    && !reported.contains(&column)
-                {
-                    reported.push(column);
-                    let mut finding =
-                        self.finding(FindingKind::NotNull, table, constraint, &[column]);
-                    finding.file = Some(self.file(at.file));
-                    finding.line = Some(row.line);
-                    self.findings.push(finding);
-                }
+            if let Some(constraint) = table.forbids_null(column, at.file, at.offset) {
+                let mut finding = self.finding(FindingKind::NotNull, table, constraint, &[column]);
+                finding.file = Some(self.file(at.file));
+                finding.line = Some(row.line);
+                self.findings.push(finding);
             }
         }
     }

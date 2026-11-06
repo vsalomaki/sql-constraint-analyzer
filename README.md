@@ -1,23 +1,23 @@
 # sql-constraint-analyzer
 
-`sqlca` checks Oracle SQL exports (table DDL, constraints and `INSERT` statements, as SQL Developer writes them) for
-rows that violate the declared constraints, foreign keys above all, and can write fixed copies.
+`sqlca` checks SQL exports (table DDL, constraints and `INSERT` statements) for rows that violate the declared
+constraints, foreign keys above all, and writes fixed copies.
 
 > **Status:** early development. `sqlca check`, `sqlca inputs` and `sqlca fix` (`--out DIR` or `--in-place`, with
-> `--dry-run`, `--on-duplicate keep-last`, `--fix-assumed` and `--annotate`) work; `--on-fk null` is next.
+> `--dry-run`, `--on-duplicate keep-last`, `--on-fk null`, `--fix-assumed` and `--annotate`) work.
 
-## What it will do
+## What it does
 
-Oracle comes first; other SQL dialects are meant to plug in the same way later (`--dialect`).
+- Reads DDL and data files of any size (GBs), streaming, in the order given.
+- Builds the schema from `CREATE TABLE`, `ALTER TABLE … ADD CONSTRAINT` and `CREATE UNIQUE INDEX`.
+- Reports every row that breaks a foreign key, a primary or unique key (duplicates), or a NOT NULL column, with
+  `file:line`, by the database's own rules: which values count as NULL, how identifiers fold, how partly NULL keys
+  compare, and constraint states such as disabled or deferred.
+- Optionally checks the load order too: a child row inserted before its parent.
+- Fixes: writes corrected files to another folder or in place, with every removed or changed row kept in a rejects
+  file and a report of each change.
 
-- Read DDL and data files of any size (GBs), streaming, in the order given.
-- Build the schema from `CREATE TABLE`, `ALTER TABLE … ADD CONSTRAINT`, `CREATE UNIQUE INDEX`.
-- Report every row that breaks a foreign key, a primary key or unique key (duplicates), or a NOT NULL column, with
-  `file:line:col`, following Oracle's rules (`''` is NULL, an FK with a NULL column is satisfied, identifier case
-  folding, constraint states such as `DISABLE` and `DEFERRABLE`).
-- Optionally check the load order too: a child row inserted before its parent.
-- Fix: write corrected files to another folder or in place, with every removed row kept in a rejects file and a
-  report of each change.
+Oracle is the supported dialect today. Others are meant to plug in the same way.
 
 ```sh
 sqlca check 'export/*.sql'                       # report violations
@@ -28,6 +28,7 @@ sqlca fix 'export/*.sql' --out fixed/            # write fixed copies; removed r
 sqlca fix 'export/*.sql' --in-place --dry-run    # print what an in-place fix would change; write nothing
 sqlca fix 'export/*.sql' --in-place              # rewrite the inputs, keeping <file>.orig and ./sqlca-fix-<time>/
 sqlca fix 'export/*.sql' --out fixed/ --on-duplicate keep-last --annotate  # keep each key's last row; comment removals
+sqlca fix 'export/*.sql' --out fixed/ --on-fk null  # keep rows with a missing parent, their foreign key set to NULL
 sqlca inputs --script load.sql                   # show what would be read, and in what order
 ```
 
@@ -52,8 +53,8 @@ Once per clone, `make install-hooks` turns on a pre-push hook that scans outgoin
 
 ## Test data
 
-The repository holds only synthetic data: exports written by `sqlca-gen`, and exports of synthetic data made with
-Oracle's own tools. Real exports are never committed.
+The repository holds only synthetic data: exports written by `sqlca-gen`, and exports of synthetic data made with the
+database's own tools. Real exports are never committed.
 
 ## License
 

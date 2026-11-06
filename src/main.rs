@@ -212,9 +212,13 @@ struct FixArgs {
     #[arg(long)]
     no_report: bool,
 
-    /// A row whose parent key exists nowhere in the input: drop it, or keep it.
+    /// A row whose parent key exists nowhere in the input: drop it, set the foreign key's columns to NULL, or keep
+    /// it.
+    ///
+    /// With null, a row is still dropped when a column of the key can't hold NULL (NOT NULL, part of the primary key,
+    /// an identity or DEFAULT ON NULL column) or the row leaves it out, so its default applies; the report says which.
     #[arg(long, value_enum, default_value_t)]
-    on_fk: fix::OnRow,
+    on_fk: fix::OnFk,
 
     /// The rows of a duplicate primary or unique key: drop the later ones (keep-first), drop all but the last in the
     /// order the files run (keep-last), or keep them all.

@@ -15,7 +15,7 @@ use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::Finding;
 use crate::input::{self, InputError, InputFile, Role};
 use crate::source::{Encoding, Piece, Span};
-use crate::statement::{Skip, Statement};
+use crate::statement::{Expr, Skip, Statement};
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -133,20 +133,27 @@ pub struct Schema {
     report: Report,
 }
 
+impl Schema {
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+}
+
 /// The schema pass of `run`, for `run_without` to check rows against as often as it is asked.
 pub fn schema(files: &[InputFile], options: &Options) -> Result<Schema, InputError> {
     read_schema(files, options, &mut Quiet)
 }
 
-/// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there.
-/// `removed` is by file position, each file's spans sorted and apart.
+/// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there and
+/// the values at its `nulled` spans were NULL. Both are by file position, each file's spans sorted and apart.
 pub fn run_without(
     files: &[InputFile],
     options: &Options,
     schema: &Schema,
     removed: &[Vec<Span>],
+    nulled: &[Vec<Span>],
 ) -> Result<Report, InputError> {
-    check_rows(files, options, schema, removed, &mut Quiet)
+    check_rows(files, options, schema, removed, nulled, &mut Quiet)
 }
 
 /// Whether `span` lies inside one of the sorted, separate `cuts`.
@@ -165,7 +172,7 @@ fn run_inner(
     observer: &mut dyn Observer,
 ) -> Result<Report, InputError> {
     let schema = read_schema(files, options, observer)?;
-    check_rows(files, options, &schema, removed, observer)
+    check_rows(files, options, &schema, removed, &[], observer)
 }
 
 /// The files a pass reads, and their bytes in all.
@@ -222,6 +229,7 @@ fn check_rows(
     options: &Options,
     schema: &Schema,
     removed: &[Vec<Span>],
+    nulled: &[Vec<Span>],
     observer: &mut dyn Observer,
 ) -> Result<Report, InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
@@ -244,6 +252,7 @@ fn check_rows(
         }
         let reference = file.role == Role::Reference;
         let cuts = removed.get(index).map_or(&[][..], Vec::as_slice);
+        let nulls = nulled.get(index).map_or(&[][..], Vec::as_slice);
         read(
             &reading,
             file,
@@ -252,7 +261,13 @@ fn check_rows(
             &mut report,
             observer,
             |statement, origin| match statement {
-                Statement::Insert(inserted) => {
+                Statement::Insert(mut inserted) => {
+                    if !nulls.is_empty() {
+                        let values = inserted.iter_mut().flat_map(|r| &mut r.values);
+                        for value in values.filter(|v| nulls.binary_search(&v.span).is_ok()) {
+                            value.expr = Expr::Null;
+                        }
+                    }
                     let file = names.get(index).map_or("", String::as_str);
                     let mut matched = Vec::with_capacity(inserted.len());
                     for row in inserted.iter().filter(|r| !is_removed(cuts, r.span)) {

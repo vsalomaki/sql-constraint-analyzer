@@ -103,6 +103,32 @@ impl Table {
     pub fn column(&self, name: &str) -> Option<usize> {
         self.columns.iter().position(|c| c.name == name)
     }
+
+    /// The constraint that forbids NULL in the column at `position` for a row at `offset` in the file at `file` in
+    /// the run: a NOT NULL, else a primary key, that judges the row.
+    pub fn forbids_null(&self, position: usize, file: usize, offset: u64) -> Option<&Constraint> {
+        let judging = |c: &&Constraint| c.judges(file, offset);
+        let not_null = self
+            .constraints
+            .iter()
+            .filter(judging)
+            .find(|c| matches!(c.kind, Kind::NotNull { column } if column == position));
+        not_null.or_else(|| {
+            self.constraints.iter().filter(judging).find(
+                |c| matches!(&c.kind, Kind::PrimaryKey { columns } if columns.contains(&position)),
+            )
+        })
+    }
+}
+
+impl Constraint {
+    /// Whether the constraint judges a row at `offset` in the file at `file` in the run: enabled, and either enabled
+    /// before the row or validating the rows that were there when it was enabled.
+    pub fn judges(&self, file: usize, offset: u64) -> bool {
+        self.state.enabled
+            && ((file, offset) > (self.enabled_at.file, self.enabled_at.offset)
+                || self.state.validated)
+    }
 }
 
 /// How a name in a statement resolves.
