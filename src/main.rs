@@ -111,19 +111,8 @@ struct CheckArgs {
     #[command(flatten)]
     input: InputArgs,
 
-    /// The schema of unqualified table names. Folded like an unquoted name unless written in double quotes.
-    ///
-    /// Without it, an unqualified name means its folder's schema (see --folder-schema) when that has the table, else
-    /// the only table of that name in any schema; a name several schemas have is reported as ambiguous.
-    #[arg(long, value_name = "NAME")]
-    default_schema: Option<String>,
-
-    /// Which folder names the schema of an unqualified table name, below the folder all inputs share.
-    ///
-    /// `a/x.sql` with `immediate` and `a/tables/x.sql` with `top` are in schema A; a file in the shared folder itself
-    /// has no folder schema. A folder name that couldn't be written unquoted is the schema's name as written.
-    #[arg(long, value_enum, default_value_t)]
-    folder_schema: check::FolderSchema,
+    #[command(flatten)]
+    names: NameArgs,
 
     /// Also report children inserted before their parent, judging rows in the order the files run.
     ///
@@ -161,7 +150,25 @@ struct CheckArgs {
     verbose: bool,
 }
 
-impl CheckArgs {
+/// How unqualified table names find their table.
+#[derive(Debug, Args)]
+struct NameArgs {
+    /// The schema of unqualified table names. Folded like an unquoted name unless written in double quotes.
+    ///
+    /// Without it, an unqualified name means its folder's schema (see --folder-schema) when that has the table, else
+    /// the only table of that name in any schema; a name several schemas have is reported as ambiguous.
+    #[arg(long, value_name = "NAME")]
+    default_schema: Option<String>,
+
+    /// Which folder names the schema of an unqualified table name, below the folder all inputs share.
+    ///
+    /// `a/x.sql` with `immediate` and `a/tables/x.sql` with `top` are in schema A; a file in the shared folder itself
+    /// has no folder schema. A folder name that couldn't be written unquoted is the schema's name as written.
+    #[arg(long, value_enum, default_value_t)]
+    folder_schema: check::FolderSchema,
+}
+
+impl NameArgs {
     /// The default schema as the dialect stores it: quoted names as written, others folded.
     fn default_schema(&self, dialect: DialectId) -> Option<String> {
         let rules = dialect.rules();
@@ -174,15 +181,25 @@ impl CheckArgs {
         )
     }
 
+    /// The check's options for these inputs, with the rest at their defaults.
     fn options(&self, spec: &InputSpec) -> check::Options {
         check::Options {
             dialect: spec.dialect,
             runner: spec.runner,
             encoding: spec.encoding,
             default_schema: self.default_schema(spec.dialect),
+            folder_schema: self.folder_schema,
+            ..check::Options::default()
+        }
+    }
+}
+
+impl CheckArgs {
+    fn options(&self, spec: &InputSpec) -> check::Options {
+        check::Options {
             load_order: self.load_order,
             commit_check: !self.no_commit_check,
-            folder_schema: self.folder_schema,
+            ..self.names.options(spec)
         }
     }
 
@@ -324,9 +341,28 @@ struct InputsArgs {
     #[command(flatten)]
     input: InputArgs,
 
-    /// text (default), or JSON Lines: one object per file with position, role, path, bytes and order.
+    #[command(flatten)]
+    names: NameArgs,
+
+    /// List the data files parents-first: each after the data files holding rows its foreign keys point at.
+    ///
+    /// Reads every data file. A file with table DDL keeps its place and no file moves across it, as where a
+    /// constraint is declared decides which rows it judges. Files that don't depend on each other keep the order
+    /// given; a cycle is broken at the earliest file given in it. A key whose parent rows still come later is named in
+    /// a warning. A foreign key that is disabled, checked only at commit, or points at its own table doesn't order
+    /// files. A statement it can't read is an error and exits 1, as the order may miss what it holds; a file it can't
+    /// read to the end exits 2.
+    #[arg(long)]
+    dependency_order: bool,
+
+    /// text (default); JSON Lines, one object per file with position, role, path, bytes and order; or paths, the
+    /// data files' paths alone, one per line, for --files-from (give --schema and --reference files again).
     #[arg(long, value_enum, default_value_t)]
     format: Format,
+
+    /// Like --format paths, with each path ended by a NUL byte, for --files-from - -0.
+    #[arg(long, conflicts_with = "format")]
+    print0: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -341,6 +377,7 @@ enum Format {
     #[default]
     Text,
     Json,
+    Paths,
 }
 
 fn main() -> ExitCode {
@@ -357,15 +394,54 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<ExitCode> {
     match &cli.command {
-        Command::Inputs(args) => {
-            let resolved = input::resolve(&args.input.spec(), &mut io::stdin().lock())?;
-            write_header(&resolved, err)?;
-            input::write_listing(&resolved.files, args.format == Format::Json, out)?;
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Inputs(args) => inputs(args, out, err),
         Command::Check(args) => check(args, out, err),
         Command::Fix(args) => fix(args, out, err),
     }
+}
+
+fn inputs(args: &InputsArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<ExitCode> {
+    let spec = args.input.spec();
+    let mut resolved = input::resolve(&spec, &mut io::stdin().lock())?;
+    write_header(&resolved, err)?;
+    let mut code = 0;
+    if args.dependency_order {
+        resolved.require_data()?;
+        let display = if io::stderr().is_terminal() {
+            progress::Display::Live {
+                width: terminal_width(),
+            }
+        } else {
+            progress::Display::Off
+        };
+        let mut progress = progress::Progress::new(display, false, err);
+        let ordered =
+            check::dependency_order(&resolved.files, &args.names.options(&spec), &mut progress);
+        progress.finish();
+        let ordered = ordered?;
+        for error in ordered.unreadable.iter().chain(&ordered.errors) {
+            writeln!(err, "error: {}", report::problem(error))?;
+        }
+        if !ordered.unreadable.is_empty() {
+            return Ok(ExitCode::from(2));
+        }
+        for issue in &ordered.catalog {
+            writeln!(err, "warning: {}", report::problem(issue))?;
+        }
+        for unmet in &ordered.unmet {
+            writeln!(err, "warning: {unmet}")?;
+        }
+        resolved.files = ordered.files;
+        code = u8::from(!ordered.errors.is_empty());
+    }
+    let listing = match (args.print0, args.format) {
+        (true, _) => input::Listing::Paths { end: b'\0' },
+        (false, Format::Paths) => input::Listing::Paths { end: b'\n' },
+        (false, Format::Json) => input::Listing::Json,
+        (false, Format::Text) => input::Listing::Text,
+    };
+    input::write_listing(&resolved.files, listing, out)?;
+    Ok(ExitCode::from(code))
 }
 
 fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<ExitCode> {

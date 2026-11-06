@@ -13,7 +13,8 @@ constraints, foreign keys above all, and writes fixed copies.
 - Reports every row that breaks a foreign key, a primary or unique key (duplicates), or a NOT NULL column, with
   `file:line`, by the database's own rules: which values count as NULL, how identifiers fold, how partly NULL keys
   compare, and constraint states such as disabled or deferred.
-- Optionally checks the load order too: a child row inserted before its parent.
+- Optionally checks the load order too: a child row inserted before its parent. `sqlca inputs --dependency-order`
+  lists the data files parents-first, for `--files-from`, when the file order is the cause.
 - Checks several exports at once: an unqualified table name means its folder's schema first (`a/x.sql` is in
   schema A), so two exports with the same table names stay apart. `--folder-schema top` takes the first folder
   instead (for `a/tables/`, `a/data/`), `off` turns it off, and `--default-schema` overrides it. A table created
@@ -40,7 +41,52 @@ sqlca fix 'export/*.sql' --in-place              # rewrite the inputs, keeping <
 sqlca fix 'export/*.sql' --out fixed/ --on-duplicate keep-last --annotate  # keep each key's last row; comment removals
 sqlca fix 'export/*.sql' --out fixed/ --on-fk null  # keep rows with a missing parent, their foreign key set to NULL
 sqlca inputs --script load.sql                   # show what would be read, and in what order
+sqlca inputs 'export/*.sql' --dependency-order --format paths > order.txt  # data files parents-first
 ```
+
+## Giving the inputs
+
+`check`, `fix` and `inputs` read their files in the order given. Order matters: a constraint applies from where it
+is declared, and `--load-order` judges rows in that order. Name the main inputs in one of three ways:
+
+| Form | Order | Example |
+|---|---|---|
+| Paths or glob patterns | Each pattern's matches version-sorted (`2_a.sql` before `10_a.sql`); patterns in the order given | `sqlca check 'export/tables/*.sql' 'export/data/**/*.sql'` |
+| `--files-from LIST` | As listed, one literal path per line; `-` reads the list from stdin, `-0` takes NUL separators | `find export -name '*.sql' \| sort \| sqlca check --files-from -` |
+| `--script FILE` | A SQL\*Plus master script's `@`, `@@` and `START` lines, followed recursively | `sqlca check --script export/load.sql` |
+
+- Quote glob patterns: `sqlca` expands them itself, including `**`. A pattern that matches nothing, or a missing
+  file, stops the run.
+- In a `--files-from` list, entries are relative to the working directory, blank lines are skipped and CRLF line
+  ends are fine. File names with spaces or newlines need `-0`: `find export -name '*.sql' -print0 | sqlca check
+  --files-from - -0`.
+- `--schema PATHS` adds DDL files read before everything else. `--reference PATHS` adds another schema's DDL and
+  data, which supply parent keys and are not checked themselves. Both take every value that follows, so give them
+  last or write `--schema=FILE`.
+- `--encoding windows-1252` reads files that aren't UTF-8. `--runner sqlcl` splits statements as SQLcl and SQL
+  Developer do, at any `;` outside strings and comments; the default follows SQL\*Plus.
+
+`sqlca inputs` takes the same options and shows what a run would read: each file's position, role, size and why it
+is there, as text or `--format json`.
+
+### Loading parents first
+
+When `check --load-order` reports children inserted before their parents because of the file order,
+`--dependency-order` lists the data files so that each comes after the files holding the rows its foreign keys point
+at. `--format paths` prints only those paths, ready for `--files-from`. Pass `--schema` and `--reference` again:
+
+```sh
+sqlca inputs 'export/**/*.sql' --dependency-order --format paths > order.txt
+sqlca check --load-order --files-from order.txt
+
+sqlca inputs 'export/**/*.sql' --dependency-order --print0 | sqlca check --load-order --files-from - -0
+```
+
+A file with table DDL in it keeps its place, and no file moves across it, since where a constraint is declared
+decides which rows it judges: with SQL Developer's layout, the files in `data/` are reordered among themselves.
+Files that don't depend on each other keep their order, and so do files inserting into the same table, since the
+first row of a key is the one a duplicate leaves in place. A cycle is broken at the earliest file given in it. A key
+whose parent rows still come later is named in a warning. Rows within one file are never reordered.
 
 ## Install
 

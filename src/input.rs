@@ -90,6 +90,8 @@ pub enum OrderSource {
     GlobMatches,
     ListedIn(String),
     IncludedBy(PathBuf),
+    /// Data files reordered so that parent rows load first.
+    ParentsFirst,
 }
 
 impl fmt::Display for OrderSource {
@@ -99,6 +101,7 @@ impl fmt::Display for OrderSource {
             Self::GlobMatches => f.write_str("version-sorted glob matches"),
             Self::ListedIn(list) => write!(f, "as listed in {list}"),
             Self::IncludedBy(script) => write!(f, "as included by {}", script.display()),
+            Self::ParentsFirst => f.write_str("parents first"),
         }
     }
 }
@@ -508,8 +511,20 @@ fn inspect(path: &Path) -> Result<u64, InputError> {
     Ok(meta.len())
 }
 
+/// How `sqlca inputs` lists the files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listing {
+    Text,
+    /// JSON Lines, one object per file.
+    Json,
+    /// The data files' paths alone, each ended by `end`, as `--files-from` reads them.
+    Paths {
+        end: u8,
+    },
+}
+
 /// The listing `sqlca inputs` prints: one line per file in processing order.
-pub fn write_listing(files: &[InputFile], json: bool, out: &mut dyn Write) -> io::Result<()> {
+pub fn write_listing(files: &[InputFile], listing: Listing, out: &mut dyn Write) -> io::Result<()> {
     #[derive(Serialize)]
     struct Line<'a> {
         position: usize,
@@ -518,10 +533,17 @@ pub fn write_listing(files: &[InputFile], json: bool, out: &mut dyn Write) -> io
         bytes: u64,
         order: String,
     }
+    if let Listing::Paths { end } = listing {
+        for file in files.iter().filter(|f| f.role == Role::Data) {
+            out.write_all(file.path.as_os_str().as_encoded_bytes())?;
+            out.write_all(&[end])?;
+        }
+        return Ok(());
+    }
     for (index, file) in files.iter().enumerate() {
         let position = index + 1;
         let path = file.path.to_string_lossy();
-        if json {
+        if listing == Listing::Json {
             let line = Line {
                 position,
                 role: file.role,
