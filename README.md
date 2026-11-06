@@ -4,7 +4,7 @@
 rows that violate the declared constraints, foreign keys above all, and can write fixed copies.
 
 > **Status:** early development. `sqlca check`, `sqlca inputs` and `sqlca fix` (`--out DIR` or `--in-place`, with
-> `--dry-run`) work; more fix policies are next.
+> `--dry-run`, `--on-duplicate keep-last`, `--fix-assumed` and `--annotate`) work; `--on-fk null` is next.
 
 ## What it will do
 
@@ -27,6 +27,7 @@ sqlca check 'export/*.sql' --format json > findings.jsonl  # JSON Lines; progres
 sqlca fix 'export/*.sql' --out fixed/            # write fixed copies; removed rows in fixed/sqlca-report/rejects.sql
 sqlca fix 'export/*.sql' --in-place --dry-run    # print what an in-place fix would change; write nothing
 sqlca fix 'export/*.sql' --in-place              # rewrite the inputs, keeping <file>.orig and ./sqlca-fix-<time>/
+sqlca fix 'export/*.sql' --out fixed/ --on-duplicate keep-last --annotate  # keep each key's last row; comment removals
 sqlca inputs --script load.sql                   # show what would be read, and in what order
 ```
 

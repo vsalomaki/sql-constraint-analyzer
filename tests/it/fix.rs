@@ -53,7 +53,8 @@ fn count(report: &check::Report, kind: FindingKind) -> usize {
     report.findings.iter().filter(|f| f.kind == kind).count()
 }
 
-/// Each input's bytes equal its output's with the removed bytes put back where they were.
+/// Each input's bytes equal its output's with the removed bytes put back where they were, in place of what the output
+/// has there instead.
 #[expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,
@@ -71,8 +72,14 @@ fn assert_restores(files: &[InputFile], report: &FixReport) {
             let start = usize::try_from(removal.span.start).unwrap();
             let kept = start - at_original;
             rebuilt.extend_from_slice(&output[at_output..at_output + kept]);
-            rebuilt.extend_from_slice(&removal.text);
             at_output += kept;
+            let replaced = &output[at_output..at_output + removal.replacement.len()];
+            assert!(
+                replaced == removal.replacement,
+                "{name}: no replacement at {start}"
+            );
+            rebuilt.extend_from_slice(&removal.text);
+            at_output += removal.replacement.len();
             at_original = usize::try_from(removal.span.end).unwrap();
         }
         rebuilt.extend_from_slice(&output[at_output..]);
@@ -80,17 +87,29 @@ fn assert_restores(files: &[InputFile], report: &FixReport) {
     }
 }
 
+fn run(files: &[InputFile], options: &Options) -> (tempfile::TempDir, FixReport) {
+    run_with(files, options, Policy::default(), false)
+}
+
 #[expect(
     clippy::unwrap_used,
     reason = "a fixture or folder that fails fails the test"
 )]
-fn run(files: &[InputFile], options: &Options) -> (tempfile::TempDir, FixReport) {
+fn run_with(
+    files: &[InputFile],
+    options: &Options,
+    policy: Policy,
+    annotate: bool,
+) -> (tempfile::TempDir, FixReport) {
     let out = tempfile::tempdir().unwrap();
     let report = fix::fix(
         files,
         options,
-        Policy::default(),
-        &fix::Target::out(out.path().join("fixed")),
+        policy,
+        &fix::Target {
+            annotate,
+            ..fix::Target::out(out.path().join("fixed"))
+        },
     )
     .unwrap();
     (out, report)
@@ -153,30 +172,395 @@ fn committed_exports_are_fixed_and_restored_by_their_rejects() {
 }
 
 /// A script as one data file, fixed into a fresh folder.
+fn fix_sql(sql: &str) -> (tempfile::TempDir, Vec<InputFile>, FixReport) {
+    fix_scripts(
+        &[("t.sql", sql)],
+        &Options::default(),
+        Policy::default(),
+        false,
+    )
+}
+
+/// The scripts, by name, in one folder, fixed into a fresh folder: a name under `ref/` is a reference file.
 #[expect(
     clippy::unwrap_used,
     reason = "a fixture or folder that fails fails the test"
 )]
-fn fix_sql(sql: &str) -> (tempfile::TempDir, Vec<InputFile>, FixReport) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("in").join("t.sql");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, sql).unwrap();
-    let files = vec![InputFile {
-        path,
-        role: Role::Data,
-        bytes: u64::try_from(sql.len()).unwrap(),
-        order: OrderSource::Given,
-    }];
+fn fix_scripts(
+    scripts: &[(&str, &str)],
+    options: &Options,
+    policy: Policy,
+    annotate: bool,
+) -> (tempfile::TempDir, Vec<InputFile>, FixReport) {
+    let (dir, files) = write_scripts(scripts);
     let report = fix::fix(
         &files,
-        &Options::default(),
-        Policy::default(),
-        &fix::Target::out(dir.path().join("out")),
+        options,
+        policy,
+        &fix::Target {
+            annotate,
+            ..fix::Target::out(dir.path().join("out"))
+        },
     )
     .unwrap();
     assert_restores(&files, &report);
     (dir, files, report)
+}
+
+#[expect(clippy::unwrap_used, reason = "a folder that fails fails the test")]
+fn write_scripts(scripts: &[(&str, &str)]) -> (tempfile::TempDir, Vec<InputFile>) {
+    let dir = tempfile::tempdir().unwrap();
+    let files = scripts
+        .iter()
+        .map(|(name, sql)| {
+            let path = dir.path().join("in").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, sql).unwrap();
+            InputFile {
+                path,
+                role: if name.starts_with("ref/") {
+                    Role::Reference
+                } else {
+                    Role::Data
+                },
+                bytes: u64::try_from(sql.len()).unwrap(),
+                order: OrderSource::Given,
+            }
+        })
+        .collect();
+    (dir, files)
+}
+
+/// The written outputs' text, by input position.
+#[expect(clippy::unwrap_used, reason = "an output that fails fails the test")]
+fn outputs(report: &FixReport) -> Vec<String> {
+    report
+        .files
+        .iter()
+        .map(|f| fs::read_to_string(&f.path).unwrap())
+        .collect()
+}
+
+fn keep_last() -> Policy {
+    Policy {
+        on_duplicate: fix::OnDuplicate::KeepLast,
+        ..Policy::default()
+    }
+}
+
+#[test]
+fn keep_last_keeps_the_last_row_of_each_key_in_run_order() {
+    let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY, V VARCHAR2(9));\n";
+    let a = format!("{ddl}INSERT INTO T VALUES (1, 'a');\nINSERT INTO T VALUES (2, 'x');\n");
+    let b = "INSERT INTO T VALUES (1, 'b');\nINSERT INTO T VALUES (1, 'c');\nINSERT INTO T VALUES (2, 'y');\n";
+    let (_dir, _, report) = fix_scripts(
+        &[("a.sql", &a), ("b.sql", b)],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    assert_eq!(
+        outputs(&report),
+        [
+            ddl.to_owned(),
+            "INSERT INTO T VALUES (1, 'c');\nINSERT INTO T VALUES (2, 'y');\n".to_owned()
+        ]
+    );
+    assert_eq!(report.rounds, 1, "{:#?}", report.removed);
+    assert!(
+        report
+            .removed
+            .iter()
+            .all(|r| r.reasons.len() == 1 && r.reasons[0].kind == FindingKind::DuplicateKey)
+    );
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+    assert!(report.left.is_empty(), "{:?}", report.left);
+}
+
+#[test]
+fn duplicates_wait_until_the_row_to_keep_is_known() {
+    // The row each policy would keep loses its parent two rounds later; the other row is the one that stays.
+    let ddl = "CREATE TABLE G (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+               CREATE TABLE P (ID NUMBER PRIMARY KEY, G_ID NUMBER REFERENCES G);\n\
+               CREATE TABLE T (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+               INSERT INTO G VALUES (1, 1);\nINSERT INTO G VALUES (2, NULL);\n\
+               INSERT INTO P VALUES (1, 1);\nINSERT INTO P VALUES (2, 2);\n";
+    let (valid, doomed) = (
+        "INSERT INTO T VALUES (1, 1);\n",
+        "INSERT INTO T VALUES (1, 2);\n",
+    );
+    for (on_duplicate, rows) in [
+        (fix::OnDuplicate::KeepFirst, format!("{valid}{doomed}")),
+        (fix::OnDuplicate::KeepFirst, format!("{doomed}{valid}")),
+        (fix::OnDuplicate::KeepLast, format!("{valid}{doomed}")),
+        (fix::OnDuplicate::KeepLast, format!("{doomed}{valid}")),
+    ] {
+        let policy = Policy {
+            on_duplicate,
+            ..Policy::default()
+        };
+        let (_dir, _, report) = fix_scripts(
+            &[("t.sql", &format!("{ddl}{rows}"))],
+            &Options::default(),
+            policy,
+            false,
+        );
+        let at = format!("{on_duplicate:?} {rows:?}");
+        assert!(
+            output(&report).ends_with(&format!("(1, 1);\n{valid}")),
+            "{at}"
+        );
+        assert!(report.output.findings.is_empty(), "{at}");
+    }
+}
+
+#[test]
+fn keep_last_tells_unnamed_keys_apart() {
+    let ddl = "CREATE TABLE T (A NUMBER UNIQUE, B NUMBER UNIQUE);\n";
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            &format!(
+                "{ddl}INSERT INTO T VALUES (1, 10);\nINSERT INTO T VALUES (1, 20);\n\
+                 INSERT INTO T VALUES (30, 1);\nINSERT INTO T VALUES (40, 1);\n"
+            ),
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    assert_eq!(
+        output(&report),
+        format!("{ddl}INSERT INTO T VALUES (1, 20);\nINSERT INTO T VALUES (40, 1);\n")
+    );
+}
+
+#[test]
+fn keep_last_waits_while_the_last_row_goes_for_another_reason() {
+    // The last row of key 1 has a NULL; removing it with the others would lose the key.
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+             INSERT INTO T VALUES (1, 5);\nINSERT INTO T VALUES (1, 6);\nINSERT INTO T VALUES (1, NULL);\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(2, 2), (4, 1)], "{:#?}", report.removed);
+    assert!(output(&report).ends_with(");\nINSERT INTO T VALUES (1, 6);\n"));
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+
+    // Row 3 is the last of key 1 and goes as an earlier row of 'b': key 1 waits for it.
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (ID NUMBER PRIMARY KEY, C VARCHAR2(1) UNIQUE);\n\
+             INSERT INTO T VALUES (1, 'a');\nINSERT INTO T VALUES (1, 'b');\nINSERT INTO T VALUES (2, 'b');\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(3, 1)], "{:#?}", report.removed);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn keep_last_leaves_a_key_whose_rows_it_cant_all_reach() {
+    let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY);\n";
+    let (_dir, _, report) = fix_scripts(
+        &[
+            ("ref/r.sql", "INSERT INTO T VALUES (1);\n"),
+            ("t.sql", &format!("{ddl}INSERT INTO T VALUES (1);\n")),
+        ],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    assert!(report.removed.is_empty(), "{:#?}", report.removed);
+    assert_eq!(report.left.len(), 1);
+    assert!(
+        report.left[0].why.contains("reference file"),
+        "{:?}",
+        report.left
+    );
+
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            &format!(
+                "{ddl}INSERT ALL INTO T VALUES (1) INTO T VALUES (2) SELECT 1 FROM DUAL;\n\
+                 INSERT INTO T VALUES (1);\nINSERT INTO T VALUES (1);\n"
+            ),
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    assert!(report.removed.is_empty(), "{:#?}", report.removed);
+    assert_eq!(report.left.len(), 2, "{:?}", report.left);
+    assert!(
+        report
+            .left
+            .iter()
+            .all(|l| l.why.contains("shares its line"))
+    );
+}
+
+#[test]
+fn findings_on_dates_read_from_text_are_fixed_when_told() {
+    let sql = "CREATE TABLE T (D DATE PRIMARY KEY);\nINSERT INTO T VALUES ('2024-01-02');\nINSERT INTO T VALUES (DATE '2024-01-02');\n";
+    for (on_duplicate, line) in [
+        (fix::OnDuplicate::KeepFirst, 3),
+        (fix::OnDuplicate::KeepLast, 2),
+    ] {
+        let policy = Policy {
+            on_duplicate,
+            fix_assumed: true,
+            ..Policy::default()
+        };
+        let (_dir, _, report) = fix_scripts(&[("t.sql", sql)], &Options::default(), policy, false);
+        let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+        assert_eq!(removed, [line], "{on_duplicate:?}");
+        assert!(
+            report.left.is_empty(),
+            "{on_duplicate:?}: {:?}",
+            report.left
+        );
+        assert!(report.output.findings.is_empty(), "{on_duplicate:?}");
+
+        let (_dir, _, report) = fix_scripts(
+            &[("t.sql", sql)],
+            &Options::default(),
+            Policy {
+                fix_assumed: false,
+                ..policy
+            },
+            false,
+        );
+        assert!(report.removed.is_empty(), "{on_duplicate:?}");
+        assert_eq!(report.left.len(), 1, "{on_duplicate:?}");
+    }
+}
+
+#[test]
+fn annotations_mark_each_removal_and_parse_as_comments_under_both_runners() {
+    use sqlca::dialect::Runner;
+    let ddl =
+        "CREATE TABLE T (ID NUMBER CONSTRAINT T_PK PRIMARY KEY);\nINSERT INTO T VALUES (1);\n";
+    let note = |what: &str| {
+        format!("sqlca fix removed {what} here (duplicate key of T_PK); see rejects.sql")
+    };
+    let row = note("a row");
+    let insert = note("an INSERT");
+    let both = [Runner::SqlPlus, Runner::Sqlcl];
+    let cases: [(&[Runner], String, String); 7] = [
+        (
+            &both,
+            "INSERT ALL\nINTO T VALUES (1) -- note\nINTO T VALUES (2)\nSELECT 1 FROM DUAL;\n"
+                .to_owned(),
+            format!("INSERT ALL\n/* {row} */ -- note\nINTO T VALUES (2)\nSELECT 1 FROM DUAL;\n"),
+        ),
+        (
+            &both,
+            "INSERT INTO T VALUES (2);\nINSERT INTO T VALUES (1);".to_owned(),
+            format!("INSERT INTO T VALUES (2);\n/* {insert} */"),
+        ),
+        (
+            &both,
+            "INSERT ALL\n  INTO T VALUES (1)\n  INTO T VALUES (2)\nSELECT 1 FROM DUAL;\n"
+                .to_owned(),
+            format!("INSERT ALL\n  -- {row}\n  INTO T VALUES (2)\nSELECT 1 FROM DUAL;\n"),
+        ),
+        (
+            &both,
+            "INSERT ALL\r\n  INTO T VALUES (2)\r\n  INTO T VALUES (1)\r\nSELECT 1 FROM DUAL;\r\n"
+                .to_owned(),
+            format!("INSERT ALL\r\n  INTO T VALUES (2)\r\n  -- {row}\r\nSELECT 1 FROM DUAL;\r\n"),
+        ),
+        (
+            &both,
+            "INSERT ALL INTO T VALUES (1)\n  INTO T VALUES (2) SELECT 1 FROM DUAL;\n".to_owned(),
+            format!("INSERT ALL /* {row} */\n  INTO T VALUES (2) SELECT 1 FROM DUAL;\n"),
+        ),
+        (
+            &both,
+            "  INSERT INTO T VALUES (1);\nINSERT INTO T VALUES (2);\n".to_owned(),
+            format!("  -- {insert}\nINSERT INTO T VALUES (2);\n"),
+        ),
+        (
+            &[Runner::Sqlcl],
+            "INSERT INTO T VALUES (1); COMMIT;\nINSERT INTO T VALUES (2);".to_owned(),
+            format!("/* {insert} */ COMMIT;\nINSERT INTO T VALUES (2);"),
+        ),
+    ];
+    for (runners, sql, expected) in cases {
+        for runner in runners {
+            let options = Options {
+                runner: *runner,
+                ..Options::default()
+            };
+            let input = format!("{ddl}{sql}");
+            let (_dir, _, report) =
+                fix_scripts(&[("t.sql", &input)], &options, Policy::default(), true);
+            let at = format!("{runner:?} {sql:?}");
+            assert_eq!(output(&report), format!("{ddl}{expected}"), "{at}");
+            assert!(
+                report.output.findings.is_empty(),
+                "{at}: {:?}",
+                report.output.findings
+            );
+            assert!(
+                report.output.errors.is_empty(),
+                "{at}: {:?}",
+                report.output.errors
+            );
+            assert_eq!(report.output.rows, 2, "{at}");
+        }
+    }
+}
+
+#[test]
+fn an_annotation_holds_no_newline_substitution_or_early_comment_end() {
+    let sql = "SET DEFINE OFF\nCREATE TABLE T (ID NUMBER CONSTRAINT \"A*/B\nC&D\" PRIMARY KEY);\nSET DEFINE ON\n\
+               INSERT INTO T VALUES (1);\nINSERT ALL INTO T VALUES (1)\n  INTO T VALUES (2) SELECT 1 FROM DUAL;\n";
+    let (_dir, _, report) = fix_scripts(
+        &[("t.sql", sql)],
+        &Options::default(),
+        Policy::default(),
+        true,
+    );
+    let replacement = String::from_utf8(report.removed[0].replacement.clone()).unwrap();
+    let inner = replacement
+        .strip_prefix("/* ")
+        .and_then(|r| r.strip_suffix(" */\n"))
+        .unwrap();
+    assert!(
+        !inner.contains("*/") && !inner.contains('\n') && !inner.contains('&'),
+        "{replacement}"
+    );
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+    assert_eq!(report.output.rows, 2);
 }
 
 #[expect(
@@ -296,10 +680,6 @@ fn the_originals_are_never_changed_even_through_hard_links() {
 }
 
 /// The scripts as data files in one folder, by name, fixed into `out` under the same temporary folder.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a folder the test can't write fails the test"
-)]
 fn fix_files(
     scripts: &[(&str, &str)],
 ) -> (
@@ -307,21 +687,7 @@ fn fix_files(
     Vec<InputFile>,
     Result<FixReport, fix::FixError>,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let files = scripts
-        .iter()
-        .map(|(name, sql)| {
-            let path = dir.path().join("in").join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, sql).unwrap();
-            InputFile {
-                path,
-                role: Role::Data,
-                bytes: u64::try_from(sql.len()).unwrap(),
-                order: OrderSource::Given,
-            }
-        })
-        .collect::<Vec<_>>();
+    let (dir, files) = write_scripts(scripts);
     let report = fix::fix(
         &files,
         &Options::default(),
@@ -539,6 +905,7 @@ fn in_place(backup: Option<&str>, report: fix::ReportPlace) -> fix::Target {
         },
         report,
         dry_run: false,
+        annotate: false,
     }
 }
 
@@ -758,17 +1125,21 @@ fn the_report_goes_where_it_is_told_or_nowhere() {
 
 #[cfg(feature = "gen")]
 mod generated {
-    use sqlca::check::Options;
+    use sqlca::check::{self, Options};
     use sqlca::finding::FindingKind;
-    use sqlca::synth::{self, Layout, Placement};
+    use sqlca::synth::{self, Layout, LineEnding, Noise, Placement};
 
-    use super::{FIXED, assert_restores, count, inputs, run};
+    use super::{FIXED, Policy, assert_restores, count, fix, inputs, keep_last, run_with};
+
+    fn assert_fixed(options: &synth::Options) {
+        assert_fixed_with(options, Policy::default(), false);
+    }
 
     #[expect(
         clippy::unwrap_used,
         reason = "a failed generation or a missing file fails the test"
     )]
-    fn assert_fixed(options: &synth::Options) {
+    fn assert_fixed_with(options: &synth::Options, policy: Policy, annotate: bool) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("export");
         synth::generate(options, &root).unwrap();
@@ -779,8 +1150,26 @@ mod generated {
                 load_order,
                 ..Options::default()
             };
-            let (_out, report) = run(&files, &check);
-            let at = format!("{options:?} load_order={load_order}");
+            let (_out, report) = run_with(&files, &check, policy, annotate);
+            let at = format!("{options:?} {policy:?} annotate={annotate} load_order={load_order}");
+            if annotate {
+                // The annotated output reads as the plain one does.
+                let (_plain_out, plain) = run_with(&files, &check, policy, false);
+                assert_eq!(report.output.rows, plain.output.rows, "{at}");
+                assert_eq!(report.output.unused, plain.output.unused, "{at}");
+                assert_eq!(
+                    report.output.errors.len(),
+                    plain.output.errors.len(),
+                    "{at}"
+                );
+                let kinds =
+                    |r: &check::Report| r.findings.iter().map(|f| f.kind).collect::<Vec<_>>();
+                assert_eq!(kinds(&report.output), kinds(&plain.output), "{at}");
+                assert!(
+                    report.removed.iter().all(|r| !r.replacement.is_empty()),
+                    "{at}"
+                );
+            }
             let empty_parent = count(&report.input, FindingKind::ParentTableEmpty);
             for kind in FIXED {
                 assert_eq!(count(&report.output, kind), 0, "{at}: {kind:?}");
@@ -803,7 +1192,12 @@ mod generated {
                 .filter(|f| f.kind == FindingKind::FkLoadOrder)
                 .filter(|f| !removed.contains(&(f.file.clone().unwrap(), f.line.unwrap())))
                 .count();
-            assert_eq!(report.rounds, 1, "{at}: generated exports orphan nothing");
+            // A planted duplicate is a later row with children of its own nowhere, so under keep-first the export
+            // orphans nothing: one round for missing parents and NULLs, one for the duplicates waiting on them.
+            // Keep-last removes the first row, whose other keys can be parents.
+            if policy.on_duplicate == fix::OnDuplicate::KeepFirst {
+                assert_eq!(report.rounds, 2, "{at}: generated exports orphan nothing");
+            }
             assert_eq!(
                 count(&report.output, FindingKind::FkLoadOrder),
                 surviving,
@@ -827,6 +1221,28 @@ mod generated {
                         ..synth::Options::default()
                     });
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_exports_are_fixed_with_annotations_and_under_keep_last() {
+        for seed in 1..=3 {
+            for (layout, noise, line_ending) in [
+                (Layout::Single, Noise::sqldev(), LineEnding::Lf),
+                (Layout::Separate, Noise::sqldev(), LineEnding::Lf),
+                (Layout::Single, Noise::all(), LineEnding::Crlf),
+            ] {
+                let options = synth::Options {
+                    seed,
+                    rows: 40,
+                    layout,
+                    noise,
+                    line_ending,
+                    ..synth::Options::default()
+                };
+                assert_fixed_with(&options, Policy::default(), true);
+                assert_fixed_with(&options, keep_last(), true);
             }
         }
     }

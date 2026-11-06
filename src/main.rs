@@ -216,13 +216,24 @@ struct FixArgs {
     #[arg(long, value_enum, default_value_t)]
     on_fk: fix::OnRow,
 
-    /// The later rows of a duplicate primary or unique key: drop them (keep-first), or keep them all.
+    /// The rows of a duplicate primary or unique key: drop the later ones (keep-first), drop all but the last in the
+    /// order the files run (keep-last), or keep them all.
     #[arg(long, value_enum, default_value_t)]
     on_duplicate: fix::OnDuplicate,
 
     /// A row with NULL in a NOT NULL column: drop it, or keep it.
     #[arg(long, value_enum, default_value_t)]
     on_not_null: fix::OnRow,
+
+    /// Also act on findings whose key rests on an assumption: a date written as plain text, read as YYYY-MM-DD.
+    ///
+    /// Off by default: such findings are left in place and listed for review, since the text may mean another date.
+    #[arg(long)]
+    fix_assumed: bool,
+
+    /// Leave a one-line comment where each row or statement was removed, saying why and pointing to rejects.sql.
+    #[arg(long)]
+    annotate: bool,
 }
 
 impl FixArgs {
@@ -243,6 +254,7 @@ impl FixArgs {
             destination,
             report,
             dry_run: self.dry_run,
+            annotate: self.annotate,
         }
     }
 }
@@ -389,6 +401,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         on_fk: args.on_fk,
         on_duplicate: args.on_duplicate,
         on_not_null: args.on_not_null,
+        fix_assumed: args.fix_assumed,
     };
     let result = fix::fix(&resolved.files, &options, policy, &target)?;
 
