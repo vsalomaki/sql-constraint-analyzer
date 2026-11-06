@@ -1,8 +1,8 @@
 //! The checks a matched row goes through: NOT NULL, primary and unique keys, then foreign keys, and what is left to
 //! resolve once every row is in. Keys are compared by a 128-bit hash of their canonical values.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use xxhash_rust::xxh3::Xxh3;
 
@@ -92,6 +92,8 @@ pub(super) struct Checker<'a> {
     /// What makes a key map less than certain, by key; lookups against it inherit the doubt.
     doubt: HashMap<(TableId, usize), Doubt>,
     rows: HashMap<TableId, u64>,
+    /// Tables with rows `fix` removed: a parent among them had rows, so its children lack theirs.
+    removed: HashSet<TableId>,
     pending: Vec<Pending>,
     findings: Vec<Finding>,
     unverifiable: HashMap<(TableId, usize), Undecided>,
@@ -115,6 +117,7 @@ impl<'a> Checker<'a> {
             keys: HashMap::new(),
             doubt: HashMap::new(),
             rows: HashMap::new(),
+            removed: HashSet::new(),
             pending: Vec::new(),
             findings: Vec::new(),
             unverifiable: HashMap::new(),
@@ -161,6 +164,11 @@ impl<'a> Checker<'a> {
     }
 
     /// A structure finding, or nothing for a reference row.
+    /// A row of `table` that `fix` removed.
+    pub(super) fn removed(&mut self, table: TableId) {
+        self.removed.insert(table);
+    }
+
     pub(super) fn structure(&mut self, finding: Finding, reference: bool) {
         if !reference {
             self.findings.push(finding);
@@ -482,7 +490,9 @@ impl<'a> Checker<'a> {
             }
             let kind = if found {
                 FindingKind::FkLoadOrder
-            } else if self.rows.get(&pending.parent.0).copied().unwrap_or(0) == 0 {
+            } else if self.rows.get(&pending.parent.0).copied().unwrap_or(0) == 0
+                && !self.removed.contains(&pending.parent.0)
+            {
                 *empty
                     .entry((pending.table, pending.constraint))
                     .or_default() += 1;

@@ -998,6 +998,78 @@ fn rows_sharing_a_line_are_left_for_review() {
 }
 
 #[test]
+fn rows_a_later_round_leaves_are_left_for_review() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, N NUMBER NOT NULL);\n\
+         CREATE TABLE C (ID NUMBER, P_ID NUMBER REFERENCES P);\n\
+         INSERT INTO P VALUES (1, NULL);\nINSERT INTO P VALUES (2, 2);\n\
+         INSERT ALL INTO C VALUES (1, 1) INTO C VALUES (2, 1) SELECT 1 FROM DUAL;\n",
+    );
+    assert_eq!(report.removed.len(), 1, "{:#?}", report.removed);
+    assert_eq!(count(&report.output, FindingKind::FkMissingParent), 2);
+    assert_eq!(report.left.len(), 2, "{:#?}", report.left);
+    assert!(
+        report
+            .left
+            .iter()
+            .all(|l| l.finding.kind == FindingKind::FkMissingParent
+                && l.why.contains("several rows"))
+    );
+}
+
+#[test]
+fn a_child_goes_with_the_last_row_of_its_parent_table() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, N NUMBER NOT NULL);\n\
+         CREATE TABLE C (ID NUMBER, P_ID NUMBER REFERENCES P);\n\
+         INSERT INTO P VALUES (1, NULL);\nINSERT INTO C VALUES (1, 1);\n",
+    );
+    assert_eq!(report.removed.len(), 2, "{:#?}", report.removed);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:#?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn rows_left_for_review_stay_when_a_later_round_empties_their_parent_table() {
+    let (dir, files) = write_scripts(&[(
+        "t.sql",
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, N NUMBER NOT NULL);\n\
+         CREATE TABLE C (ID NUMBER, P_ID NUMBER REFERENCES P);\n\
+         INSERT INTO P VALUES (1, NULL);\n\
+         INSERT ALL INTO C VALUES (1, 9) INTO C VALUES (2, 9) SELECT 1 FROM DUAL;\n",
+    )]);
+    let out = dir.path().join("out");
+    for dry_run in [true, false] {
+        let report = fix::fix(
+            &files,
+            &Options::default(),
+            Policy::default(),
+            &fix::Target {
+                dry_run,
+                ..fix::Target::out(&out)
+            },
+        )
+        .unwrap();
+        assert_eq!(report.removed.len(), 1, "{:#?}", report.removed);
+        assert_eq!(
+            report.left.len(),
+            2,
+            "dry run {dry_run}: {:#?}",
+            report.left
+        );
+        assert!(
+            report
+                .left
+                .iter()
+                .all(|l| l.finding.kind == FindingKind::FkMissingParent)
+        );
+    }
+}
+
+#[test]
 fn findings_on_dates_read_from_text_are_left_for_review() {
     let (_dir, _, report) = fix_sql(
         "CREATE TABLE T (D DATE PRIMARY KEY);\nINSERT INTO T VALUES ('2024-01-02');\nINSERT INTO T VALUES (DATE '2024-01-02');\n",
