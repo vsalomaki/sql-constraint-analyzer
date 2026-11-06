@@ -297,7 +297,7 @@ fn json_lines_carry_position_role_path_bytes_and_order() {
 }
 
 #[test]
-fn check_runs_and_fix_accepts_the_input_options_but_is_not_built_yet() {
+fn check_and_fix_accept_the_input_options() {
     let dir = workspace(&[("a.sql", b"")]);
     let args = ["a.sql", "--encoding", "windows-1252", "--runner", "sqlcl"];
     sqlca_in(&dir)
@@ -307,19 +307,20 @@ fn check_runs_and_fix_accepts_the_input_options_but_is_not_built_yet() {
         .code(0)
         .stderr(contains("Result     0 findings"));
     sqlca_in(&dir)
-        .arg("fix")
+        .args(["fix", "--out", "fixed"])
         .args(args)
         .assert()
-        .code(2)
-        .stderr(contains("is not implemented yet"));
+        .code(0)
+        .stderr(contains("Fixed      0 rows in 0 rounds"));
 }
 
 #[test]
 fn check_and_fix_refuse_schema_files_without_data() {
     let dir = workspace(&[("schema.sql", b""), ("ref.sql", b"")]);
-    for command in ["check", "fix"] {
+    for command in [&["check"][..], &["fix", "--out", "fixed"]] {
         sqlca_in(&dir)
-            .args([command, "--schema", "schema.sql", "--reference", "ref.sql"])
+            .args(command)
+            .args(["--schema", "schema.sql", "--reference", "ref.sql"])
             .assert()
             .code(2)
             .stderr(contains("no data files to check"));

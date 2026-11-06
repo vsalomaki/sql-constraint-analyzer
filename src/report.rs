@@ -133,7 +133,8 @@ pub fn exit_code(report: &Report) -> u8 {
     }
 }
 
-fn kind_name(kind: FindingKind) -> &'static str {
+/// A finding kind in words, as summaries count it.
+pub fn kind_name(kind: FindingKind) -> &'static str {
     match kind {
         FindingKind::FkMissingParent => "missing parent",
         FindingKind::FkLoadOrder => "child before parent",
@@ -283,13 +284,15 @@ fn rate(bytes: u64, secs: f64) -> u64 {
 /// Everything about the run that isn't a finding, and the result line, for stderr.
 pub fn write_run(
     report: &Report,
-    phases: &Phases,
+    phases: Option<&Phases>,
     omitted: &Omitted,
     verbosity: Verbosity,
     err: &mut dyn Write,
 ) -> io::Result<()> {
     if verbosity != Verbosity::Quiet {
-        write_phases(report, phases, err)?;
+        if let Some(phases) = phases {
+            write_phases(report, phases, err)?;
+        }
         for error in report.unreadable.iter().chain(&report.errors) {
             writeln!(err, "error: {}", problem(error))?;
         }
