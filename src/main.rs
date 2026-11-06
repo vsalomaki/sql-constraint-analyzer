@@ -2,8 +2,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Context as _;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use sqlca::check;
 use sqlca::dialect::{DialectId, Runner};
 use sqlca::input::{self, InputSpec, Resolved};
@@ -171,6 +170,8 @@ impl CheckArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group(ArgGroup::new("destination").required(true).args(["out", "in_place"])))]
+#[expect(clippy::struct_excessive_bools, reason = "each is a command-line flag")]
 struct FixArgs {
     #[command(flatten)]
     check: CheckArgs,
@@ -178,7 +179,38 @@ struct FixArgs {
     /// Write fixed copies under DIR, a new or empty folder, keeping the inputs' paths relative to the folder they
     /// share; the originals stay untouched. Unchanged files are hard links where the file system allows.
     #[arg(long, value_name = "DIR")]
-    out: PathBuf,
+    out: Option<PathBuf>,
+
+    /// Rewrite the input files themselves. Each changed file is written beside the original and renamed over it,
+    /// so an interrupted run leaves the old file or the new one, never half of each.
+    #[arg(long)]
+    in_place: bool,
+
+    /// With --in-place: keep each changed original as <file><SUFFIX> first (default .orig).
+    #[arg(
+        long,
+        value_name = "SUFFIX",
+        value_parser = backup_suffix,
+        conflicts_with_all = ["out", "no_backup"]
+    )]
+    backup: Option<String>,
+
+    /// With --in-place: keep no backups.
+    #[arg(long, conflicts_with = "out")]
+    no_backup: bool,
+
+    /// Run the fix and print the report it would write to stdout (JSON with --format json); write nothing.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Where rejects.sql and the fix reports go, a new or empty folder. Default: DIR/sqlca-report with --out,
+    /// ./sqlca-fix-<UTC time> with --in-place.
+    #[arg(long, value_name = "DIR", conflicts_with = "no_report")]
+    report_dir: Option<PathBuf>,
+
+    /// Write no report folder. Refused with --in-place --no-backup: the removed rows would be kept nowhere.
+    #[arg(long)]
+    no_report: bool,
 
     /// A row whose parent key exists nowhere in the input: drop it, or keep it.
     #[arg(long, value_enum, default_value_t)]
@@ -191,6 +223,36 @@ struct FixArgs {
     /// A row with NULL in a NOT NULL column: drop it, or keep it.
     #[arg(long, value_enum, default_value_t)]
     on_not_null: fix::OnRow,
+}
+
+impl FixArgs {
+    fn target(&self) -> fix::Target {
+        let destination = match &self.out {
+            Some(out) => fix::Destination::Out(out.clone()),
+            None => fix::Destination::InPlace {
+                backup: (!self.no_backup)
+                    .then(|| self.backup.clone().unwrap_or_else(|| ".orig".to_owned())),
+            },
+        };
+        let report = match (&self.report_dir, self.no_report) {
+            (_, true) => fix::ReportPlace::Off,
+            (Some(dir), false) => fix::ReportPlace::At(dir.clone()),
+            (None, false) => fix::ReportPlace::Default,
+        };
+        fix::Target {
+            destination,
+            report,
+            dry_run: self.dry_run,
+        }
+    }
+}
+
+/// A backup suffix makes a new name in the same folder.
+fn backup_suffix(suffix: &str) -> Result<String, String> {
+    if suffix.is_empty() || suffix.contains(['/', '\\']) {
+        return Err("give a suffix such as .orig: not empty, without / or \\".to_owned());
+    }
+    Ok(suffix.to_owned())
 }
 
 #[derive(Debug, Args)]
@@ -299,6 +361,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
     resolved.require_data()?;
     let verbosity = check.verbosity();
     let quiet = verbosity == report::Verbosity::Quiet;
+    let target = args.target();
     if !quiet {
         let mode = if check.load_order {
             "load-order mode"
@@ -307,11 +370,13 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         };
         writeln!(err, "sqlca {} · fix · {mode}", env!("CARGO_PKG_VERSION"))?;
         write_header(&resolved, err)?;
-        writeln!(
-            err,
-            "Output     fixed copies under {}, originals untouched",
-            args.out.display()
-        )?;
+        writeln!(err, "Output     {}", fix::destination_text(&target))?;
+        if target.dry_run {
+            writeln!(
+                err,
+                "Dry run    nothing is written; the report goes to stdout"
+            )?;
+        }
     }
     let options = check::Options {
         dialect: spec.dialect,
@@ -325,31 +390,26 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         on_duplicate: args.on_duplicate,
         on_not_null: args.on_not_null,
     };
-    let result = fix::fix(&resolved.files, &options, policy, &args.out)?;
-    let folder = args.out.join(fix::REPORT_FOLDER);
-    // A new folder only: on a case-insensitive file system an input's copied folder can already have this name.
-    std::fs::create_dir(&folder).with_context(|| {
-        format!(
-            "cannot make the report folder {}: something in the output already has that name",
-            folder.display()
-        )
-    })?;
-    fix::write_file(&folder.join("rejects.sql"), |w| {
-        fix::write_rejects(&result.removed, w)
-    })?;
-    fix::write_file(&folder.join("fix-report.txt"), |w| {
-        fix::write_report(&result, &args.out, w)
-    })?;
+    let result = fix::fix(&resolved.files, &options, policy, &target)?;
 
-    let omitted = report::write_findings(
-        &result.output.findings,
-        check.format,
-        check.max_per_constraint,
-        out,
-    )?;
-    if check.format == report::Format::Json {
-        report::write_json_summary(&result.output, &omitted, out)?;
-    }
+    let omitted = if target.dry_run {
+        match check.format {
+            report::Format::Text => fix::write_report(&result, out)?,
+            report::Format::Json => fix::write_json_report(&result, out)?,
+        }
+        report::Omitted::default()
+    } else {
+        let omitted = report::write_findings(
+            &result.output.findings,
+            check.format,
+            check.max_per_constraint,
+            out,
+        )?;
+        if check.format == report::Format::Json {
+            report::write_json_summary(&result.output, &omitted, out)?;
+        }
+        omitted
+    };
     if !quiet {
         writeln!(err, "{}", fix::summary(&result))?;
         for left in &result.left {
@@ -360,7 +420,10 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
                 left.why
             )?;
         }
-        writeln!(err, "Report     {}", folder.display())?;
+        if let Some(folder) = &result.report {
+            let would = if target.dry_run { " (would be)" } else { "" };
+            writeln!(err, "Report     {}{would}", folder.display())?;
+        }
     }
     report::write_run(&result.output, None, &omitted, verbosity, err)?;
     Ok(ExitCode::from(report::exit_code(&result.output)))

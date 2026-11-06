@@ -81,38 +81,44 @@ pub fn write_json_summary(
     out: &mut dyn Write,
 ) -> io::Result<()> {
     #[derive(Serialize)]
-    struct Summary<'a> {
-        findings: usize,
-        by_kind: BTreeMap<FindingKind, usize>,
-        omitted: u64,
-        rows: u64,
-        errors: usize,
-        warnings: usize,
-        exit: u8,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        problems: Vec<&'a Problem>,
-    }
-    #[derive(Serialize)]
     struct Line<'a> {
         summary: Summary<'a>,
     }
     let line = Line {
-        summary: Summary {
-            findings: report.findings.len(),
-            by_kind: by_kind(&report.findings),
-            omitted: omitted.values().sum(),
-            rows: report.rows,
-            errors: report.errors.len() + report.unreadable.len(),
-            warnings: warning_count(report),
-            exit: exit_code(report),
-            problems: report.unreadable.iter().chain(&report.errors).collect(),
-        },
+        summary: summary(report, omitted),
     };
     writeln!(
         out,
         "{}",
         serde_json::to_string(&line).map_err(io::Error::other)?
     )
+}
+
+/// A run's counts and exit code, for JSON.
+#[derive(Debug, Serialize)]
+pub struct Summary<'a> {
+    findings: usize,
+    by_kind: BTreeMap<FindingKind, usize>,
+    omitted: u64,
+    rows: u64,
+    errors: usize,
+    warnings: usize,
+    exit: u8,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    problems: Vec<&'a Problem>,
+}
+
+pub fn summary<'a>(report: &'a Report, omitted: &Omitted) -> Summary<'a> {
+    Summary {
+        findings: report.findings.len(),
+        by_kind: by_kind(&report.findings),
+        omitted: omitted.values().sum(),
+        rows: report.rows,
+        errors: report.errors.len() + report.unreadable.len(),
+        warnings: warning_count(report),
+        exit: exit_code(report),
+        problems: report.unreadable.iter().chain(&report.errors).collect(),
+    }
 }
 
 fn by_kind(findings: &[Finding]) -> BTreeMap<FindingKind, usize> {
