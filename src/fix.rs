@@ -2,8 +2,8 @@
 //!
 //! The output is always the original bytes minus a growing set of removed ranges, so everything not removed stays
 //! byte-identical and the removed bytes, kept in `rejects.sql`, restore the input exactly. Rounds repeat the check on
-//! the output: a removed parent can orphan its children, which the next round removes. A round that removes nothing
-//! ends the run, and its check is the verified result.
+//! the input with the removed rows skipped: a removed parent can orphan its children, which the next round removes.
+//! Once a round removes nothing, the output is written and checked again, and that check is the verified result.
 //!
 //! Rows are found again by file and line: the fix re-reads each file it changes anyway, so findings carry no spans.
 
@@ -114,39 +114,24 @@ pub fn fix(
         .collect::<Result<_, _>>()?;
     let written = destinations(&originals, out)?;
     let names: Vec<String> = files.iter().map(|f| check::display(&f.path)).collect();
-    let outputs: Vec<InputFile> = files
-        .iter()
-        .zip(&written)
-        .map(|(f, path)| InputFile {
-            path: path.clone(),
-            ..f.clone()
-        })
-        .collect();
-    let output_names: Vec<String> = outputs.iter().map(|f| check::display(&f.path)).collect();
 
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
-    for (original, path) in originals.iter().zip(&written) {
-        splice(original, &[], path)?;
-    }
     let mut removed = Vec::new();
     let mut left = Vec::new();
     let mut first_report = None;
     let mut rounds = 0;
-    let output = loop {
-        let report = check::run(&outputs, options)?;
-        let (targets, skipped) = targets(&report.findings, &output_names, policy);
+    let last = loop {
+        let report = check::run_without(files, options, &cuts)?;
+        let (targets, skipped) = targets(&report.findings, &names, policy);
         if rounds == 0 {
             left.extend(skipped);
         }
-        let mut changed = BTreeSet::new();
+        let mut changed = false;
         for (index, lines) in &targets {
-            let (Some(output), Some(file)) = (outputs.get(*index), files.get(*index)) else {
+            let (Some(file), Some(file_cuts)) = (files.get(*index), cuts.get_mut(*index)) else {
                 continue;
             };
-            let located = locate(output, options, lines)?;
-            let Some(file_cuts) = cuts.get_mut(*index) else {
-                continue;
-            };
+            let located = locate(file, options, lines, file_cuts)?;
             for unlocated in located.ambiguous {
                 if rounds == 0 {
                     left.extend(lines.get(&unlocated).into_iter().flatten().map(|f| Left {
@@ -155,12 +140,8 @@ pub fn fix(
                     }));
                 }
             }
-            // This round's cuts are found in the output as the last round left it, so they map back through the
-            // cuts as they were then.
-            let before = file_cuts.clone();
             for cut in located.cuts {
-                let span = to_original(cut.span, &before);
-                let span = extend_to_line_end(&file.path, span)?;
+                let span = extend_to_line_end(&file.path, cut.span)?;
                 insert_cut(file_cuts, span);
                 let name = names.get(*index).cloned().unwrap_or_default();
                 // A statement going whole takes the rows an earlier round cut from it, reasons and all.
@@ -183,27 +164,33 @@ pub fn fix(
                     round: rounds + 1,
                     text: Vec::new(),
                 });
-                changed.insert(*index);
+                changed = true;
             }
         }
-        if first_report.is_none() {
-            first_report = Some(report.clone());
-        }
-        if changed.is_empty() {
+        if !changed {
             break report;
         }
-        rounds += 1;
-        for index in changed {
-            if let (Some(original), Some(path), Some(file_cuts)) =
-                (originals.get(index), written.get(index), cuts.get(index))
-            {
-                splice(original, file_cuts, path)?;
-            }
+        if first_report.is_none() {
+            first_report = Some(report);
         }
+        rounds += 1;
     };
+
+    for ((original, path), file_cuts) in originals.iter().zip(&written).zip(&cuts) {
+        splice(original, file_cuts, path)?;
+    }
+    let outputs: Vec<InputFile> = files
+        .iter()
+        .zip(&written)
+        .map(|(f, path)| InputFile {
+            path: path.clone(),
+            ..f.clone()
+        })
+        .collect();
+    let output = check::run(&outputs, options)?;
     describe_removals(&mut removed, files)?;
     Ok(FixReport {
-        input: first_report.unwrap_or_default(),
+        input: first_report.unwrap_or(last),
         output,
         rounds,
         removed,
@@ -323,14 +310,15 @@ struct Located {
     ambiguous: Vec<u64>,
 }
 
-/// The cuts that remove the target rows from `output`: a row's clause, or its whole statement when every row of
-/// the statement goes.
+/// The cuts that remove the target rows from `file`: a row's clause, or its whole statement when every row of the
+/// statement left after the earlier `cuts` goes.
 fn locate(
-    output: &InputFile,
+    file: &InputFile,
     options: &check::Options,
     lines: &BTreeMap<u64, Vec<&Finding>>,
+    cuts: &[Span],
 ) -> Result<Located, FixError> {
-    let opened = input::open(&output.path)?;
+    let opened = input::open(&file.path)?;
     let mut rows_per_line: BTreeMap<u64, usize> = BTreeMap::new();
     let mut statements = Vec::new();
     for piece in options
@@ -340,11 +328,12 @@ fn locate(
         let Ok(piece) = piece else {
             break;
         };
-        let Ok(Some(Statement::Insert(rows))) =
+        let Ok(Some(Statement::Insert(mut rows))) =
             options.dialect.parse(&piece, options.encoding, Pass::Rows)
         else {
             continue;
         };
+        rows.retain(|r| !check::is_removed(cuts, r.span));
         for row in &rows {
             *rows_per_line.entry(row.line).or_default() += 1;
         }
@@ -367,7 +356,7 @@ fn locate(
                 .flatten()
                 .map(|f| Reason {
                     kind: f.kind,
-                    // Without places: they are the output's of this round, while removals are told in the input's.
+                    // Without places: the removal says where the row was.
                     text: crate::report::describe(&Finding {
                         file: None,
                         line: None,
@@ -399,32 +388,6 @@ fn locate(
         }
     }
     Ok(Located { cuts, ambiguous })
-}
-
-/// A span in the current output as a span in the original: each earlier cut before an end shifts it by its length,
-/// so a span that encloses an earlier cut grows by it.
-fn to_original(span: Span, cuts: &[Span]) -> Span {
-    Span {
-        start: original_position(span.start, cuts, true),
-        end: original_position(span.end, cuts, false),
-    }
-}
-
-/// A cut exactly at the position lies before a span's start (the span begins after it) and after its end.
-fn original_position(at: u64, cuts: &[Span], start: bool) -> u64 {
-    let mut shift = 0;
-    for cut in cuts {
-        let before = if start {
-            cut.start <= at + shift
-        } else {
-            cut.start < at + shift
-        };
-        if !before {
-            break;
-        }
-        shift += cut.end - cut.start;
-    }
-    at + shift
 }
 
 /// Adds a cut to the sorted, non-overlapping set, merging any it touches.

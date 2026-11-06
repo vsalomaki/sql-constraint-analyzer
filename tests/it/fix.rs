@@ -219,6 +219,25 @@ fn a_duplicate_of_a_removed_row_is_kept() {
 }
 
 #[test]
+fn what_the_output_still_has_is_told_at_the_output_even_when_nothing_was_removed() {
+    let (_dir, files, report) = fix_sql(
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nINSERT INTO U VALUES (1);\n",
+    );
+    assert_eq!(report.rounds, 0);
+    let place = |r: &check::Report| {
+        r.findings
+            .iter()
+            .map(|f| f.file.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(place(&report.input), [Some(check::display(&files[0].path))]);
+    assert_eq!(
+        place(&report.output),
+        [Some(check::display(&report.written[0]))]
+    );
+}
+
+#[test]
 fn an_insert_all_loses_its_bad_rows_and_goes_whole_when_none_is_left() {
     let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY);\n";
     let (_dir, _, report) = fix_sql(&format!(
@@ -413,7 +432,6 @@ mod generated {
 
     #[expect(
         clippy::unwrap_used,
-        clippy::indexing_slicing,
         reason = "a failed generation or a missing file fails the test"
     )]
     fn assert_fixed(options: &synth::Options) {
@@ -442,13 +460,7 @@ mod generated {
             let removed: std::collections::BTreeSet<(String, u64)> = report
                 .removed
                 .iter()
-                .map(|r| {
-                    let index = files
-                        .iter()
-                        .position(|f| sqlca::check::display(&f.path) == r.file)
-                        .unwrap();
-                    (sqlca::check::display(&report.written[index]), r.line)
-                })
+                .map(|r| (r.file.clone(), r.line))
                 .collect();
             let surviving = report
                 .input
