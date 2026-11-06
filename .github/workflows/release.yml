@@ -1,0 +1,133 @@
+name: Release
+
+# A `v*` tag builds `sqlca` for each platform and creates a draft release to review and publish by hand.
+# A manual run is a dry run: it builds the archives and keeps them as workflow artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    # Same gate as every job here; a tag push or a manual run always passes it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Read the version from Cargo.toml
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check the tag is v + that version
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match Cargo.toml's version $VERSION"
+            exit 1
+          fi
+
+  build:
+    needs: version
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux ships both: gnu is faster (musl's allocator slows `check` by about a third), musl is static and
+        # runs anywhere. gnu builds on 22.04 so it needs only glibc 2.35.
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, bin: sqlca, archive: tar.gz }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, bin: sqlca, archive: tar.gz }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, bin: sqlca, archive: tar.gz }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, bin: sqlca, archive: tar.gz }
+          - { target: aarch64-apple-darwin, os: macos-15, bin: sqlca, archive: tar.gz }
+          - { target: x86_64-pc-windows-msvc, os: windows-2025, bin: sqlca.exe, archive: zip }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+      NAME: sqlca-${{ needs.version.outputs.version }}-${{ matrix.target }}
+      BIN: target/${{ matrix.target }}/dist/${{ matrix.bin }}
+      # Links the C runtime in, so Windows needs no Visual C++ redistributable.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain from rust-toolchain.toml, with the target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Build
+        run: cargo build --locked --profile dist --target "$TARGET" --bin sqlca
+      - name: Check it reports the version
+        run: test "$("$BIN" --version)" = "sqlca $VERSION"
+      - name: Archive the binary, LICENSE and README.md
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          # Keeps macOS tar from adding `._*` metadata files.
+          COPYFILE_DISABLE: 1
+        run: |
+          mkdir "$NAME"
+          cp "$BIN" LICENSE README.md "$NAME/"
+          if [ "$ARCHIVE" = zip ]; then
+            7z a -tzip "$NAME.zip" "$NAME"
+          else
+            tar -czf "$NAME.tar.gz" "$NAME"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    # Tag pushes only; a manual run stops at the build artifacts.
+    if: >-
+      github.event_name == 'push' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sqlca-*
+          merge-multiple: true
+          path: dist
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- sqlca-* > SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes dist/*

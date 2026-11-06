@@ -32,6 +32,30 @@ sqlca fix 'export/*.sql' --out fixed/ --on-fk null  # keep rows with a missing p
 sqlca inputs --script load.sql                   # show what would be read, and in what order
 ```
 
+## Install
+
+Download the archive for your platform from [Releases](https://github.com/vsalomaki/sql-constraint-analyzer/releases)
+and put `sqlca` on your `PATH`.
+
+| Platform | Target |
+|---|---|
+| Linux x86_64 / aarch64, glibc 2.35+ | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
+| Linux x86_64 / aarch64, static | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
+| macOS aarch64 | `aarch64-apple-darwin` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+
+On Linux, pick `gnu`: it is faster (`check` runs about a third slower on musl). Pick `musl` where `gnu` won't run,
+such as Alpine or a distribution older than glibc 2.35; it is static and runs anywhere.
+
+Check the download against `SHA256SUMS` and the build provenance GitHub signed:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS       # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+gh attestation verify sqlca-<version>-<target>.tar.gz --repo vsalomaki/sql-constraint-analyzer
+```
+
+The macOS binary is not notarized: if Gatekeeper blocks it, `xattr -d com.apple.quarantine sqlca`.
+
 ## Building
 
 Rust 1.98.1 (pinned in `rust-toolchain.toml`; rustup picks it up).
