@@ -4,46 +4,14 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde::Deserialize;
 use sqlca::check::{self, Options, Report};
 use sqlca::finding::{Finding, FindingKind};
 use sqlca::input::{InputFile, OrderSource, Role};
 use sqlca::source::Encoding;
 
-#[derive(Deserialize)]
-struct Expected {
-    options: ExpectedOptions,
-    findings: Vec<Finding>,
-}
-
-#[derive(Deserialize)]
-struct ExpectedOptions {
-    encoding: Encoding,
-}
-
-/// The export's files in `order.txt` order, `ref/` ones as reference files.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a fixture without order.txt fails the test"
-)]
-fn inputs(root: &Path) -> Vec<InputFile> {
-    fs::read_to_string(root.join("order.txt"))
-        .unwrap()
-        .lines()
-        .map(|path| InputFile {
-            path: root.join(path),
-            role: if path.starts_with("ref/") {
-                Role::Reference
-            } else {
-                Role::Data
-            },
-            bytes: 0,
-            order: OrderSource::Given,
-        })
-        .collect()
-}
+use crate::fixtures::{self, inputs};
 
 /// Runs the check on an export and returns its findings with paths relative to the export, as the manifest has them.
 #[expect(
@@ -101,23 +69,10 @@ fn difference(found: &BTreeSet<Finding>, expected: &BTreeSet<Finding>) -> String
     format!("missing {missing:#?}\nextra {extra:#?}")
 }
 
-fn committed() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gen/oracle");
-    [
-        "separate-sqldev",
-        "single-all-crlf-1252",
-        "type-after-data-shuffled",
-    ]
-    .iter()
-    .map(|f| root.join(f))
-    .collect()
-}
-
 #[test]
 fn committed_exports_give_exactly_the_planted_findings_in_both_modes() {
-    for root in committed() {
-        let manifest: Expected =
-            serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap();
+    for root in fixtures::generated() {
+        let manifest = fixtures::manifest(&root);
         for load_order in [false, true] {
             let at = format!("{} load_order={load_order}", root.display());
             let (report, found) = check(&root, manifest.options.encoding, load_order);

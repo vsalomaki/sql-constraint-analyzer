@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-use super::out::{Out, OutputFile, Role};
+use super::out::{Out, OutputFile};
 use super::render::{Batch, DdlItem, DdlStyle, Edge, Insert, Render};
 use super::rng::Rng;
 use super::schema::{
@@ -46,11 +46,12 @@ fn file_path(layout: Layout, schema: &str, section: Section, object: &str) -> St
 /// Writes the whole export; returns the files in load order and the findings they must produce.
 pub(crate) fn write_export(
     options: &Options,
+    render: &dyn Render,
     root: &Path,
     omitted: &[TableId],
     uncommitted: &[TableId],
 ) -> io::Result<(Vec<OutputFile>, Vec<Finding>)> {
-    let mut w = Writer::new(options, root, omitted, uncommitted);
+    let mut w = Writer::new(options, render, root, omitted, uncommitted);
     let sizes = Sizes::from_rows(options.rows);
     let mut order_rng = Rng::new(options.seed, 0);
     for (schema, tables) in [(REF_SCHEMA, &REF_TABLES[..]), (APP_SCHEMA, &APP_TABLES[..])] {
@@ -141,8 +142,8 @@ fn missing_id(k: u64) -> Value {
 
 #[derive(Debug, Clone, Copy)]
 enum Target {
-    /// The parent is the normal row with this index.
-    Row(TableId, u64),
+    /// The parent table's normal row with this index.
+    Row(u64),
     /// No parent row has this key.
     Missing,
 }
@@ -234,7 +235,7 @@ struct Writer<'o> {
     uncommitted: &'o [TableId],
     /// By file path.
     open: BTreeMap<String, OpenRows>,
-    render: Box<dyn Render>,
+    render: &'o dyn Render,
     rules: &'static Rules,
     out: Out,
     eol: &'static str,
@@ -254,19 +255,18 @@ struct Writer<'o> {
 impl<'o> Writer<'o> {
     fn new(
         options: &'o Options,
+        render: &'o dyn Render,
         root: &Path,
         omitted: &'o [TableId],
         uncommitted: &'o [TableId],
     ) -> Self {
-        let render = options.dialect.render(options.noise);
-        let rules = render.rules();
         Self {
             options,
             omitted,
             uncommitted,
             open: BTreeMap::new(),
             render,
-            rules,
+            rules: options.dialect.rules(),
             out: Out::new(root, options.encoding),
             eol: options.line_ending.as_str(),
             findings: Vec::new(),
@@ -285,8 +285,6 @@ impl<'o> Writer<'o> {
     fn style(&self) -> DdlStyle<'static> {
         DdlStyle {
             eol: self.eol,
-            storage: self.options.noise.storage_clauses,
-            comments: self.options.noise.comments,
             keys_in_table: self.options.constraints == Placement::BeforeData,
         }
     }
@@ -304,8 +302,7 @@ impl<'o> Writer<'o> {
         }
         let path = file_path(self.options.layout, schema, section, object);
         let text = format!("{}{}", sql.text, self.eol);
-        self.out
-            .write(&path, schema, Role::Ddl, &text, sql.statements)?;
+        self.out.write(&path, &text, sql.statements)?;
         // DDL commits the rows before it.
         self.open.remove(&path);
         Ok(())
@@ -388,24 +385,24 @@ impl<'o> Writer<'o> {
     /// Whether a commit after the current table's rows would roll back: a deferred foreign key, in place before the
     /// data and checked at commit, of this table or one written before it, whose parent's rows aren't written yet.
     fn commit_rolls_back(&self) -> bool {
-        self.rules.deferrable_foreign_keys
-            && !self.after_data()
+        !self.after_data()
             && self.loaded.iter().chain([&self.table]).any(|&table| {
                 schema::constraints_of(table).any(|c| {
-                    matches!(c.kind, Kind::Foreign { deferred: true, parent, .. }
-                        if parent != self.table && !self.loaded.contains(&parent))
+                    self.deferred(c)
+                        && matches!(c.kind, Kind::Foreign { parent, .. }
+                            if parent != self.table && !self.loaded.contains(&parent))
                 })
             })
     }
 
+    /// Whether `fk` is checked at commit rather than per row.
+    fn deferred(&self, fk: &Constraint) -> bool {
+        self.rules.deferrable_foreign_keys
+            && matches!(fk.kind, Kind::Foreign { deferred: true, .. })
+    }
+
     fn write_data(&mut self, text: &str, statements: u64) -> io::Result<Location> {
-        self.out.write(
-            &self.data_path,
-            self.table.schema(),
-            Role::Data,
-            text,
-            statements,
-        )
+        self.out.write(&self.data_path, text, statements)
     }
 
     fn close_group(&mut self) -> io::Result<()> {
@@ -438,8 +435,7 @@ impl<'o> Writer<'o> {
     }
 
     fn checks_load_order(&self, fk: &Constraint) -> bool {
-        let deferred = matches!(fk.kind, Kind::Foreign { deferred: true, .. });
-        !self.after_data() && fk.state != State::Disabled && !deferred
+        !self.after_data() && fk.state != State::Disabled && !self.deferred(fk)
     }
 
     fn parent_loaded(&self, parent: TableId, index: u64, current: u64) -> bool {
@@ -509,8 +505,9 @@ impl<'o> Writer<'o> {
             }
             let kind = match target {
                 Target::Missing if self.checks_end_state(fk) => FindingKind::FkMissingParent,
-                Target::Row(table, index)
-                    if self.checks_load_order(fk) && !self.parent_loaded(table, index, current) =>
+                Target::Row(index)
+                    if self.checks_load_order(fk)
+                        && !self.parent_loaded(parent, index, current) =>
                 {
                     FindingKind::FkLoadOrder
                 }
@@ -805,7 +802,7 @@ fn departments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
         DeptPlant::DuplicateId,
         DeptPlant::NullId,
     ];
-    if w.options.deferred_violations && w.rules.deferrable_foreign_keys {
+    if w.options.deferred_violations && w.deferred(&schema::DEPARTMENTS_MANAGER_FK) {
         kinds.push(DeptPlant::MissingManager);
     }
     let refs = |manager: Target, country: Target| {
@@ -839,14 +836,7 @@ fn departments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 },
             ),
         ]);
-        let first = w.normal(
-            d,
-            &row,
-            &refs(
-                Target::Row(TableId::Employees, manager),
-                Target::Row(TableId::Countries, country),
-            ),
-        )?;
+        let first = w.normal(d, &row, &refs(Target::Row(manager), Target::Row(country)))?;
         for plant in plants {
             let k = w.next_extra();
             let mut cells = vec![
@@ -1006,13 +996,10 @@ fn employees(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
         };
         let (row, dept) = employee_row(w, s, e, manager);
         let refs = [
-            (
-                &schema::EMPLOYEES_DEPT_FK,
-                Target::Row(TableId::Departments, dept),
-            ),
+            (&schema::EMPLOYEES_DEPT_FK, Target::Row(dept)),
             (
                 &schema::EMPLOYEES_MANAGER_FK,
-                Target::Row(TableId::Employees, manager.unwrap_or(e)),
+                Target::Row(manager.unwrap_or(e)),
             ),
         ];
         let first = w.normal(e, &row, &refs)?;
@@ -1031,7 +1018,7 @@ fn employee_extra(
     first: Option<&Location>,
 ) -> io::Result<()> {
     let k = w.next_extra();
-    let mut cells = vec![
+    let mut row = Row::new(vec![
         ("EMP_ID", int(s.extra_emp_id(k))),
         ("FIRST_NAME", Value::text("Extra")),
         ("LAST_NAME", Value::text(format!("Row {k}"))),
@@ -1040,17 +1027,17 @@ fn employee_extra(
         ("MANAGER_ID", Value::Null),
         ("HIRE_DATE", day(&mut w.rng, 2010, 3000)),
         ("STATUS", Value::text("ACTIVE")),
-    ];
+    ]);
+    let cells = &mut row.cells;
     let mut found = Vec::new();
-    let mut row_shape = (true, None, false);
     match plant {
-        EmpPlant::MissingDept => set(&mut cells, "DEPT_ID", missing_id(k)),
-        EmpPlant::MissingManager => set(&mut cells, "MANAGER_ID", missing_id(k)),
-        EmpPlant::ForwardManager => set(&mut cells, "MANAGER_ID", int(emp_id(e + 1))),
-        EmpPlant::DuplicateId => set(&mut cells, "EMP_ID", int(emp_id(e))),
-        EmpPlant::DuplicateEmail => set(&mut cells, "EMAIL", Value::text(email(e))),
-        EmpPlant::NullEmail => set(&mut cells, "EMAIL", Value::Null),
-        EmpPlant::EmptyEmail => set(&mut cells, "EMAIL", Value::text("")),
+        EmpPlant::MissingDept => set(cells, "DEPT_ID", missing_id(k)),
+        EmpPlant::MissingManager => set(cells, "MANAGER_ID", missing_id(k)),
+        EmpPlant::ForwardManager => set(cells, "MANAGER_ID", int(emp_id(e + 1))),
+        EmpPlant::DuplicateId => set(cells, "EMP_ID", int(emp_id(e))),
+        EmpPlant::DuplicateEmail => set(cells, "EMAIL", Value::text(email(e))),
+        EmpPlant::NullEmail => set(cells, "EMAIL", Value::Null),
+        EmpPlant::EmptyEmail => set(cells, "EMAIL", Value::text("")),
         EmpPlant::UnknownColumn => {
             if let Some(cell) = cells.iter_mut().find(|(c, _)| *c == "EMAIL") {
                 cell.0 = "EMAIL_ADDR";
@@ -1062,23 +1049,17 @@ fn employee_extra(
             ));
         }
         EmpPlant::ValueCount => {
-            row_shape.2 = true;
+            row.drop_last_value = true;
             found.push(Plant::new(FindingKind::ValueCountMismatch, None, &[]));
         }
         EmpPlant::UnknownTable => {
-            row_shape.1 = Some("EMPLOYEES_ARCHIVE");
+            row.table_name = Some("EMPLOYEES_ARCHIVE");
             found.push(Plant {
                 table: Some(w.rules.qualified(APP_SCHEMA, "EMPLOYEES_ARCHIVE")),
                 ..Plant::new(FindingKind::UnknownTable, None, &[])
             });
         }
     }
-    let row = Row {
-        column_list: row_shape.0,
-        table_name: row_shape.1,
-        drop_last_value: row_shape.2,
-        ..Row::new(cells)
-    };
     match plant {
         EmpPlant::DuplicateId => found.push(Plant::duplicate(
             schema::EMPLOYEES_PK.qualified(w.rules),
@@ -1097,7 +1078,7 @@ fn employee_extra(
     }
     // The forward reference is valid in the end state, and a load-order finding while the FK is enforced.
     let manager = if plant == EmpPlant::ForwardManager {
-        Target::Row(TableId::Employees, e + 1)
+        Target::Row(e + 1)
     } else {
         Target::Missing
     };
@@ -1151,14 +1132,7 @@ fn projects(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             ),
             ("START_DATE", day(&mut w.rng, 2000, 9000)),
         ]);
-        let first = w.normal(
-            p,
-            &row,
-            &[(
-                &schema::PROJECTS_DEPT_FK,
-                Target::Row(TableId::Departments, dept),
-            )],
-        )?;
+        let first = w.normal(p, &row, &[(&schema::PROJECTS_DEPT_FK, Target::Row(dept))])?;
         for plant in plants {
             let k = w.next_extra();
             let mut cells = vec![
@@ -1253,10 +1227,7 @@ fn assignments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 ("ROLE", role),
                 ("ASSIGNED_ON", day(&mut w.rng, 2000, 9000)),
             ]);
-            let target = refs(
-                Target::Row(TableId::Employees, e),
-                Target::Row(TableId::Projects, project),
-            );
+            let target = refs(Target::Row(e), Target::Row(project));
             firsts.push(w.normal(2 * e + j, &row, &target)?);
         }
         for plant in plants {
@@ -1301,8 +1272,8 @@ fn assignments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 _ => Vec::new(),
             };
             let target = refs(
-                emp.map_or(Target::Missing, |e| Target::Row(TableId::Employees, e)),
-                project.map_or(Target::Missing, |p| Target::Row(TableId::Projects, p)),
+                emp.map_or(Target::Missing, Target::Row),
+                project.map_or(Target::Missing, Target::Row),
             );
             w.extra(&row, &target, found)?;
         }
@@ -1357,10 +1328,7 @@ fn timesheets(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             last = w.normal(
                 a,
                 &row,
-                &[(
-                    &schema::TIMESHEETS_ASSIGNMENT_FK,
-                    Target::Row(TableId::Assignments, a),
-                )],
+                &[(&schema::TIMESHEETS_ASSIGNMENT_FK, Target::Row(a))],
             )?;
         }
         for plant in plants {
@@ -1411,7 +1379,7 @@ fn timesheets(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             let target = if missing {
                 Target::Missing
             } else {
-                Target::Row(TableId::Assignments, a)
+                Target::Row(a)
             };
             w.extra(&row, &[(&schema::TIMESHEETS_ASSIGNMENT_FK, target)], found)?;
         }
@@ -1426,10 +1394,7 @@ fn legacy_notes(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
         let (emp, target) = if i.is_multiple_of(3) {
             (missing_id(i + 1), Target::Missing)
         } else {
-            (
-                int(emp_id(i % s.employees)),
-                Target::Row(TableId::Employees, i % s.employees),
-            )
+            (int(emp_id(i % s.employees)), Target::Row(i % s.employees))
         };
         let text = if multiline {
             format!("Rivi 1\nRivi 2: muistiinpano {i}")
@@ -1477,14 +1442,7 @@ fn audit_log(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             ("LOGGED_AT", timestamp(&mut w.rng)),
             ("DETAIL", Value::text(detail)),
         ]);
-        w.normal(
-            i,
-            &row,
-            &[(
-                &schema::AUDITLOG_EMP_FK,
-                Target::Row(TableId::Employees, emp),
-            )],
-        )?;
+        w.normal(i, &row, &[(&schema::AUDITLOG_EMP_FK, Target::Row(emp))])?;
         for () in plants {
             let k = w.next_extra();
             let row = Row::new(vec![

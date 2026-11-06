@@ -3,52 +3,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde::Deserialize;
 use sqlca::dialect::oracle::{RULES, eval, insert};
-use sqlca::finding::{Finding, FindingKind};
+use sqlca::finding::FindingKind;
 use sqlca::source::Encoding;
 use sqlca::statement::{DataType, InsertRow, Skip, Statement, TypeFamily};
 use sqlca::value::{self, Canonical};
 
-/// The parts of a generator manifest (`expected.json`) these tests read.
-#[derive(Deserialize)]
-struct Expected {
-    options: Options,
-    files: Vec<OutputFile>,
-    findings: Vec<Finding>,
-}
-
-#[derive(Deserialize)]
-struct Options {
-    encoding: Encoding,
-}
-
-#[derive(Deserialize)]
-struct OutputFile {
-    path: String,
-}
-
-const GENERATED: [&str; 3] = [
-    "separate-sqldev",
-    "single-all-crlf-1252",
-    "type-after-data-shuffled",
-];
-
-fn generated(fixture: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/gen/oracle")
-        .join(fixture)
-}
-
-#[expect(
-    clippy::unwrap_used,
-    reason = "a malformed fixture fails the test that reads it"
-)]
-fn expected(root: &Path) -> Expected {
-    serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap()
-}
+use crate::fixtures;
 
 /// Every statement of `path` the INSERT parser reads, in file order; a parse error fails the test.
 #[expect(
@@ -182,9 +145,9 @@ fn key(row: &InsertRow, names: &[String], encoding: Encoding) -> Option<Vec<Opti
 
 #[test]
 fn every_generated_insert_parses_into_the_rows_and_lines_the_manifest_names() {
-    for fixture in GENERATED {
-        let root = generated(fixture);
-        let expected = expected(&root);
+    for root in fixtures::generated() {
+        let fixture = root.display();
+        let expected = fixtures::manifest(&root);
         let encoding = expected.options.encoding;
         let mut by_line: BTreeMap<(String, u64), InsertRow> = BTreeMap::new();
         for file in &expected.files {

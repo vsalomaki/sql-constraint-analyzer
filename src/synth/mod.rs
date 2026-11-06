@@ -262,7 +262,8 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     }
     fs::create_dir_all(root)?;
 
-    let (files, findings) = data::write_export(options, root, &omitted, &uncommitted)?;
+    let (files, findings) =
+        data::write_export(options, render.as_ref(), root, &omitted, &uncommitted)?;
 
     let eol = options.line_ending.as_str();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -301,5 +302,25 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown noise switch `nope`")
         );
+    }
+
+    #[test]
+    fn every_noise_field_has_a_switch_named_as_its_key() {
+        let all = serde_json::to_value(Noise::all()).unwrap();
+        let fields = all.as_object().unwrap();
+        assert!(fields.values().all(|v| *v == true), "{all}");
+        for (name, switch) in NOISE_SWITCHES {
+            let mut noise = Noise::default();
+            *switch(&mut noise) = true;
+            let value = serde_json::to_value(noise).unwrap();
+            let on: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, v)| **v == true)
+                .map(|(k, _)| k.as_str())
+                .collect();
+            assert_eq!(on, [name]);
+        }
     }
 }
