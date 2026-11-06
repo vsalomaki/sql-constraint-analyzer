@@ -22,7 +22,7 @@ fixtures:
 	$(GEN) --out $(FIXTURES)/single-all-crlf-1252 --rows 20 --layout single --noise all --line-endings crlf --encoding windows-1252
 	$(GEN) --out $(FIXTURES)/type-after-data-shuffled --rows 20 --layout type --noise all --constraints after-data --shuffle-order
 
-## Times sqlca check on a ~1 GB and a ~2.4 GB generated export in gen-out/ and checks the findings (Linux only).
+## Times sqlca check and fix on a ~1 GB and a ~2.4 GB generated export in gen-out/ and checks their output (Linux only).
 perf:
 	scripts/perf.sh
 

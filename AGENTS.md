@@ -28,7 +28,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect, and only what `sqlca fix` leaves in its output; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
-| `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/` (reused while their options match), times `sqlca check` (release) on both in both modes, and fails unless the findings equal the manifest; prints wall time, MB/s and peak RSS (Linux only) |
+| `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/` (reused while their options match), times `sqlca check` (release) on both in both modes and `sqlca fix --out` on both (into a temporary folder in `gen-out/`), and fails unless the findings equal the manifest and fix removes exactly the rows the manifest implies, keeping every other row byte for byte and every other finding; prints wall time, MB/s, peak RSS (Linux only) and fix's time against the check's |
 
 Run `make lint` and `make test` before calling a change done.
 
