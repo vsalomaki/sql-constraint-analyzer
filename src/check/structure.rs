@@ -10,7 +10,7 @@ use crate::statement::{InsertRow, Value};
 pub struct Row<'a> {
     pub table: TableId,
     /// By column position; `None` where the row leaves the column out, so its default applies.
-    pub values: Vec<Option<&'a Value>>,
+    pub values: Vec<Option<&'a Value<'a>>>,
 }
 
 /// Why a row can't be matched to its table.
@@ -29,7 +29,10 @@ pub enum StructureError {
 
 /// Matches `row` to its table and columns. Without a column list the values follow the table's column order, without
 /// invisible columns, as Oracle and the SQL standard fill them.
-pub fn resolve_row<'a>(catalog: &Catalog, row: &'a InsertRow) -> Result<Row<'a>, StructureError> {
+pub fn resolve_row<'a>(
+    catalog: &Catalog,
+    row: &'a InsertRow<'a>,
+) -> Result<Row<'a>, StructureError> {
     let id = match catalog.resolve(&row.table) {
         Lookup::Found(id) => id,
         Lookup::Missing => return Err(StructureError::UnknownTable),
@@ -45,7 +48,7 @@ pub fn resolve_row<'a>(catalog: &Catalog, row: &'a InsertRow) -> Result<Row<'a>,
             .iter()
             .zip(&found)
             .filter(|(_, position)| position.is_none())
-            .map(|(n, _)| n.value.clone())
+            .map(|(n, _)| n.value.to_string())
             .collect();
         if !unknown.is_empty() {
             return Err(StructureError::UnknownColumns(unknown));

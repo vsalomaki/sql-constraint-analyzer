@@ -24,7 +24,7 @@ pub fn parse(
     piece: &Piece,
     encoding: Encoding,
     pass: Pass,
-) -> Result<Option<Statement>, ParseError> {
+) -> Result<Option<Statement<'_>>, ParseError> {
     match pass {
         Pass::Schema => ddl::parse_ddl(piece, encoding),
         Pass::Rows if piece.kind == PieceKind::Sql && ddl::is_table_ddl(&piece.text) => Ok(None),
@@ -32,7 +32,7 @@ pub fn parse(
     }
 }
 
-fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
+fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> {
     if piece.kind == PieceKind::Unterminated {
         return Err(ParseError {
             offset: piece.span.start,
@@ -93,16 +93,16 @@ mod tests {
     }
 
     /// What the schema pass makes of a piece, or else the rows pass; exactly one of them takes it.
-    fn read(piece: &Piece) -> Result<Statement, ParseError> {
+    fn read(piece: &Piece) -> Result<Statement<'static>, ParseError> {
         let schema = parse(piece, Encoding::Utf8, Pass::Schema)?;
         let rows = parse(piece, Encoding::Utf8, Pass::Rows)?;
         match (schema, rows) {
-            (Some(s), None) | (None, Some(s)) => Ok(s),
+            (Some(s), None) | (None, Some(s)) => Ok(s.into_owned()),
             other => panic!("{other:?}"),
         }
     }
 
-    fn sql(text: &str) -> Statement {
+    fn sql(text: &str) -> Statement<'static> {
         read(&piece(PieceKind::Sql, text)).unwrap()
     }
 
@@ -196,7 +196,7 @@ mod tests {
     /// error at its line.
     #[test]
     fn run_again_and_a_cut_off_statement_are_not_silent() {
-        let read = |text: &str| -> Vec<Result<Statement, ParseError>> {
+        let read = |text: &str| -> Vec<Result<Statement<'static>, ParseError>> {
             crate::dialect::oracle::split::Splitter::new(
                 text.as_bytes(),
                 crate::dialect::Runner::SqlPlus,

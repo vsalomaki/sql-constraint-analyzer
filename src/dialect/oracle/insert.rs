@@ -2,6 +2,9 @@
 //! or several (`INSERT ALL INTO … VALUES (…) … SELECT … FROM DUAL`). An insert whose rows come from a query is
 //! skipped as not followed. Values are kept as written; [`super::eval`] says what they mean.
 
+use std::borrow::Cow;
+
+use super::RULES;
 use super::cursor::{Cursor, first_word_is};
 use super::lex::{Token, TokenKind};
 use crate::source::{Encoding, Piece};
@@ -14,7 +17,10 @@ const MAX_DEPTH: usize = 64;
 const STOP_WORDS: [&str; 4] = ["INSERT", "INTO", "VALUES", "SELECT"];
 
 /// The insert `piece` holds, or `None` when it isn't an `INSERT`.
-pub fn parse_insert(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>, ParseError> {
+pub fn parse_insert(
+    piece: &Piece,
+    encoding: Encoding,
+) -> Result<Option<Statement<'_>>, ParseError> {
     if !first_word_is(&piece.text, "INSERT") {
         return Ok(None);
     }
@@ -25,7 +31,7 @@ pub fn parse_insert(piece: &Piece, encoding: Encoding) -> Result<Option<Statemen
     parser.insert().map(Some)
 }
 
-fn not_followed(what: &str) -> Statement {
+fn not_followed(what: &str) -> Statement<'static> {
     Statement::Skipped(Skip::NotFollowed(what.to_owned()))
 }
 
@@ -34,8 +40,8 @@ struct Parser<'a> {
     c: Cursor<'a>,
 }
 
-impl Parser<'_> {
-    fn insert(&mut self) -> Result<Statement, ParseError> {
+impl<'a> Parser<'a> {
+    fn insert(&mut self) -> Result<Statement<'a>, ParseError> {
         self.c.expect_word("INSERT")?;
         if self.c.eat_word("INTO") {
             self.single()
@@ -48,7 +54,7 @@ impl Parser<'_> {
         }
     }
 
-    fn single(&mut self) -> Result<Statement, ParseError> {
+    fn single(&mut self) -> Result<Statement<'a>, ParseError> {
         if self.c.at_punct(b'(') {
             return Ok(not_followed("INSERT INTO a subquery"));
         }
@@ -75,7 +81,7 @@ impl Parser<'_> {
         }]))
     }
 
-    fn multi(&mut self) -> Result<Statement, ParseError> {
+    fn multi(&mut self) -> Result<Statement<'a>, ParseError> {
         let mut rows = Vec::new();
         while let Some(into) = self.c.peek().filter(|&t| self.c.is_word(t, "INTO")) {
             self.c.bump();
@@ -124,7 +130,7 @@ impl Parser<'_> {
     }
 
     /// `name [alias] [(columns)]`.
-    fn target(&mut self) -> Result<(Name, Option<Vec<Ident>>), ParseError> {
+    fn target(&mut self) -> Result<(Name<'a>, Option<Vec<Ident<'a>>>), ParseError> {
         let table = self.c.name("a table name")?;
         // DBMS_METADATA aliases its target: `INTO "APP"."EMPLOYEES" KUT$ (…)`.
         if let Some(token) = self.c.peek() {
@@ -147,7 +153,7 @@ impl Parser<'_> {
         Ok((table, columns))
     }
 
-    fn columns(&mut self) -> Result<Vec<Ident>, ParseError> {
+    fn columns(&mut self) -> Result<Vec<Ident<'a>>, ParseError> {
         self.c.bump();
         let mut columns = Vec::new();
         loop {
@@ -169,7 +175,7 @@ impl Parser<'_> {
     }
 
     /// `(value, …)` of a row with `columns` listed, and the offset after its `)`.
-    fn values(&mut self, columns: usize) -> Result<(Vec<Value>, usize), ParseError> {
+    fn values(&mut self, columns: usize) -> Result<(Vec<Value<'a>>, usize), ParseError> {
         if !self.c.eat_punct(b'(') {
             return Err(self.c.expected("`(` after VALUES"));
         }
@@ -227,12 +233,12 @@ impl Parser<'_> {
     }
 
     /// A value by its shape; anything without one of the shapes below is kept as written.
-    fn expr(&self, tokens: &[Token], depth: usize) -> Expr {
+    fn expr(&self, tokens: &[Token], depth: usize) -> Expr<'a> {
         self.shaped(tokens, depth)
             .unwrap_or_else(|| Expr::Other(self.c.text_of(tokens)))
     }
 
-    fn shaped(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
+    fn shaped(&self, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
         if depth > MAX_DEPTH {
             return None;
         }
@@ -246,8 +252,8 @@ impl Parser<'_> {
                     && string.kind == (TokenKind::String { national: false }) =>
             {
                 Some(Expr::Typed {
-                    type_name: self.c.token_text(keyword).to_ascii_uppercase(),
-                    text: self.c.decode(&self.c.content(string)),
+                    type_name: RULES.folded(self.c.token_text(keyword)),
+                    text: self.c.decoded(self.c.content(string)),
                 })
             }
             [.., last] if self.c.is_punct(last, b')') => self.call(tokens, depth),
@@ -255,7 +261,7 @@ impl Parser<'_> {
         }
     }
 
-    fn literal(&self, token: Token) -> Option<Expr> {
+    fn literal(&self, token: Token) -> Option<Expr<'a>> {
         match token.kind {
             TokenKind::Number => Some(Expr::Number(self.c.token_text(token))),
             TokenKind::String { national } | TokenKind::AltString { national } => {
@@ -271,17 +277,18 @@ impl Parser<'_> {
     }
 
     /// `name(args)`, where the `(` after the name closes at the last token.
-    fn call(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
+    fn call(&self, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
         let open = tokens.iter().position(|&t| self.c.is_punct(t, b'('))?;
         let (head, rest) = tokens.split_at_checked(open)?;
         let function = match head {
             [name] => self.c.ident_of(*name)?.value,
-            _ => self
-                .dotted(head)?
-                .iter()
-                .map(|part| part.value.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
+            _ => Cow::Owned(
+                self.dotted(head)?
+                    .iter()
+                    .map(|part| &*part.value)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            ),
         };
         let inner = rest.get(1..rest.len().checked_sub(1)?)?;
         let mut args = Vec::new();
@@ -307,12 +314,12 @@ impl Parser<'_> {
     }
 
     /// One argument of a call; `None` when it is empty.
-    fn argument(&self, tokens: &[Token], depth: usize) -> Option<Expr> {
+    fn argument(&self, tokens: &[Token], depth: usize) -> Option<Expr<'a>> {
         (!tokens.is_empty()).then(|| self.expr(tokens, depth + 1))
     }
 
     /// `[schema.]sequence.NEXTVAL`.
-    fn next_value(&self, tokens: &[Token]) -> Option<Expr> {
+    fn next_value(&self, tokens: &[Token]) -> Option<Expr<'a>> {
         let mut parts = self.dotted(tokens)?;
         let last = parts.pop()?;
         if last.quoted || last.value != "NEXTVAL" {
@@ -326,7 +333,7 @@ impl Parser<'_> {
     }
 
     /// `a.b.c`: identifiers separated by dots.
-    fn dotted(&self, tokens: &[Token]) -> Option<Vec<Ident>> {
+    fn dotted(&self, tokens: &[Token]) -> Option<Vec<Ident<'a>>> {
         let mut parts = Vec::new();
         let mut iter = tokens.iter();
         loop {
@@ -362,28 +369,28 @@ mod tests {
         }
     }
 
-    fn parse(text: &str) -> Result<Option<Statement>, ParseError> {
-        parse_insert(&piece(text), Encoding::Utf8)
+    fn parse(text: &str) -> Result<Option<Statement<'static>>, ParseError> {
+        parse_insert(&piece(text), Encoding::Utf8).map(|s| s.map(Statement::into_owned))
     }
 
-    fn rows(text: &str) -> Vec<InsertRow> {
+    fn rows(text: &str) -> Vec<InsertRow<'static>> {
         match parse(text) {
             Ok(Some(Statement::Insert(rows))) => rows,
             other => panic!("{text}: {other:?}"),
         }
     }
 
-    fn row(text: &str) -> InsertRow {
+    fn row(text: &str) -> InsertRow<'static> {
         let mut rows = rows(text);
         assert_eq!(rows.len(), 1);
         rows.remove(0)
     }
 
-    fn exprs(text: &str) -> Vec<Expr> {
+    fn exprs(text: &str) -> Vec<Expr<'static>> {
         row(text).values.into_iter().map(|v| v.expr).collect()
     }
 
-    fn value_of(sql: &str) -> Expr {
+    fn value_of(sql: &str) -> Expr<'static> {
         let mut exprs = exprs(&format!("insert into t values ({sql})"));
         assert_eq!(exprs.len(), 1, "{sql}");
         exprs.remove(0)
@@ -400,26 +407,26 @@ mod tests {
         parse(text).unwrap_err()
     }
 
-    fn ident(value: &str, quoted: bool) -> Ident {
+    fn ident(value: &str, quoted: bool) -> Ident<'static> {
         Ident {
-            value: value.into(),
+            value: value.to_owned().into(),
             quoted,
         }
     }
 
-    fn string(s: &str) -> Expr {
+    fn string(s: &str) -> Expr<'static> {
         Expr::String {
-            bytes: s.as_bytes().to_vec(),
+            bytes: s.as_bytes().to_vec().into(),
             national: false,
         }
     }
 
-    fn number(s: &str) -> Expr {
-        Expr::Number(s.into())
+    fn number(s: &str) -> Expr<'static> {
+        Expr::Number(s.to_owned().into())
     }
 
-    fn other(s: &str) -> Expr {
-        Expr::Other(s.into())
+    fn other(s: &str) -> Expr<'static> {
+        Expr::Other(s.to_owned().into())
     }
 
     #[test]
@@ -505,7 +512,7 @@ mod tests {
         assert_eq!(
             value_of("N'x'"),
             Expr::String {
-                bytes: b"x".to_vec(),
+                bytes: b"x".to_vec().into(),
                 national: true
             }
         );
@@ -846,7 +853,7 @@ mod tests {
         assert_eq!(
             rows[0].values[0].expr,
             Expr::String {
-                bytes: b"\xe4".to_vec(),
+                bytes: b"\xe4".to_vec().into(),
                 national: false
             }
         );

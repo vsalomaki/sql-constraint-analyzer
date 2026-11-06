@@ -2,6 +2,8 @@
 //! contents stay as stored until something decodes them. Comments, including `/*+ hints */`, are skipped. Words keep
 //! their case; folding them is the parser's job, by the dialect's rules.
 
+use std::borrow::Cow;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     /// A keyword or unquoted identifier.
@@ -37,8 +39,9 @@ impl Token {
         source.get(self.start..self.end).unwrap_or_default()
     }
 
-    /// A string's or quoted identifier's content without its quotes, with doubled quotes undone.
-    pub fn content(&self, source: &[u8]) -> Vec<u8> {
+    /// A string's or quoted identifier's content without its quotes, with doubled quotes undone: borrowed from
+    /// `source` unless there were any.
+    pub fn content<'a>(&self, source: &'a [u8]) -> Cow<'a, [u8]> {
         let text = self.text(source);
         match self.kind {
             TokenKind::String { national } => {
@@ -56,17 +59,21 @@ impl Token {
             TokenKind::AltString { national } => {
                 let quote = usize::from(national) + 1;
                 let Some((delimiter, open_len)) = alternative_delimiter(text, quote) else {
-                    return Vec::new();
+                    return Cow::Borrowed(&[]);
                 };
                 let end = text.len().saturating_sub(delimiter.close().len() + 1);
-                text.get(quote + open_len..end).unwrap_or_default().to_vec()
+                Cow::Borrowed(text.get(quote + open_len..end).unwrap_or_default())
             }
-            _ => text.to_vec(),
+            _ => Cow::Borrowed(text),
         }
     }
 }
 
-fn undouble(inner: &[u8], quote: u8) -> Vec<u8> {
+/// `inner` with each doubled `quote` made single. Inside a lexed literal every quote is doubled.
+fn undouble(inner: &[u8], quote: u8) -> Cow<'_, [u8]> {
+    if !inner.contains(&quote) {
+        return Cow::Borrowed(inner);
+    }
     let mut out = Vec::with_capacity(inner.len());
     let mut bytes = inner.iter().copied().peekable();
     while let Some(b) = bytes.next() {
@@ -75,7 +82,7 @@ fn undouble(inner: &[u8], quote: u8) -> Vec<u8> {
             bytes.next();
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,7 +381,10 @@ mod tests {
     fn strings_unquote_to_their_content() {
         let source = b"'it''s' N'\xc3\xa4' q'[a ' b]' nQ'!x!' \"A\"\"B\"";
         let tokens = lex(source).unwrap();
-        let contents: Vec<Vec<u8>> = tokens.iter().map(|t| t.content(source)).collect();
+        let contents: Vec<Vec<u8>> = tokens
+            .iter()
+            .map(|t| t.content(source).into_owned())
+            .collect();
         assert_eq!(
             contents,
             [
@@ -394,10 +404,10 @@ mod tests {
         let source = "q'§a'b§' x".as_bytes();
         let tokens = lex(source).unwrap();
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].content(source), b"a'b");
+        assert_eq!(&*tokens[0].content(source), b"a'b");
         // In a single-byte encoding a byte above 0x7F is one character on its own.
         let latin1 = b"q'\xa7x\xa7'";
-        assert_eq!(lex(latin1).unwrap()[0].content(latin1), b"x");
+        assert_eq!(&*lex(latin1).unwrap()[0].content(latin1), b"x");
     }
 
     #[test]

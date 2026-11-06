@@ -172,11 +172,11 @@ impl<'a> Checker<'a> {
     /// key maps, so other rows can find their parents.
     pub(super) fn statement(
         &mut self,
-        rows: &[(Row, &InsertRow, At)],
+        rows: &[(Row<'_>, &InsertRow<'_>, At)],
         encoding: Encoding,
         reference: bool,
     ) {
-        let literals: Vec<Vec<Literal>> = rows
+        let literals: Vec<Vec<Literal<'_>>> = rows
             .iter()
             .map(|(matched, row, at)| self.own_checks(matched, row, *at, encoding, reference))
             .collect();
@@ -192,20 +192,20 @@ impl<'a> Checker<'a> {
     }
 
     /// A row's NOT NULL and key checks; returns its columns' values for the foreign key checks.
-    fn own_checks(
+    fn own_checks<'v>(
         &mut self,
-        matched: &Row,
-        row: &InsertRow,
+        matched: &Row<'v>,
+        row: &InsertRow<'_>,
         at: At,
         encoding: Encoding,
         reference: bool,
-    ) -> Vec<Literal> {
+    ) -> Vec<Literal<'v>> {
         let catalog = self.catalog;
         let Some(table) = catalog.table(matched.table) else {
             return Vec::new();
         };
         *self.rows.entry(matched.table).or_default() += 1;
-        let literals: Vec<Literal> = table
+        let literals: Vec<Literal<'v>> = table
             .columns
             .iter()
             .zip(&matched.values)
@@ -225,7 +225,12 @@ impl<'a> Checker<'a> {
 
     /// The value a column gets: the row's, or the column's default where the row leaves it out, writes `DEFAULT`, or
     /// writes NULL into a `DEFAULT ON NULL` column.
-    fn literal(&self, column: &Column, expr: Option<&Expr>, encoding: Encoding) -> Literal {
+    fn literal<'v>(
+        &self,
+        column: &Column,
+        expr: Option<&Expr<'v>>,
+        encoding: Encoding,
+    ) -> Literal<'v> {
         let default = || match &column.default {
             Some(ColumnDefault::Value(expr)) => self.dialect.evaluate(expr, encoding),
             Some(ColumnDefault::Opaque(text)) => Literal::Unknown(format!("the default {text}")),
@@ -308,7 +313,7 @@ impl<'a> Checker<'a> {
                     Some((literals.get(c)?, table.columns.get(c)?.data_type.family))
                 })
             };
-            let parts: Vec<Canonical> = columns
+            let parts: Vec<Canonical<'_>> = columns
                 .iter()
                 .filter_map(|&c| {
                     let column = table.columns.get(c)?;
@@ -422,7 +427,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             // A child value is stored as its own column stores numbers, then compared as the parent's type compares.
-            let parts: Vec<(Canonical, bool)> = columns
+            let parts: Vec<(Canonical<'_>, bool)> = columns
                 .iter()
                 .zip(
                     parent_columns
@@ -601,15 +606,15 @@ impl<'a> Checker<'a> {
 }
 
 /// A key's canonical values as a finding shows them; `None` is NULL.
-fn shown(part: &Canonical) -> Option<String> {
+fn shown(part: &Canonical<'_>) -> Option<String> {
     match part {
-        Canonical::Value(text) => Some(text.clone()),
+        Canonical::Value(text) => Some(text.to_string()),
         Canonical::Null | Canonical::Unknown => None,
     }
 }
 
 /// The 128-bit hash of a key's canonical values, each one tagged and length-prefixed so no two keys run together.
-fn hash<'p>(parts: impl IntoIterator<Item = &'p Canonical>) -> u128 {
+fn hash<'p>(parts: impl IntoIterator<Item = &'p Canonical<'p>>) -> u128 {
     let mut hasher = Xxh3::new();
     for part in parts {
         match part {

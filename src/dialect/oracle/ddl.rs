@@ -6,12 +6,15 @@ use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
     AlterAction, ColumnDef, ColumnDefault, ConstraintDef, ConstraintKind, ConstraintState,
-    DataType, Decimal, Expr, Ident, IndexColumn, ParseError, Skip, StateChange, Statement,
+    DataType, Decimal, Expr, Ident, IndexColumn, Name, ParseError, Skip, StateChange, Statement,
     TypeFamily,
 };
 
 /// The statement a table or index DDL piece makes, or `None` when the piece is something else.
-pub fn parse_ddl(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>, ParseError> {
+pub fn parse_ddl(
+    piece: &Piece,
+    encoding: Encoding,
+) -> Result<Option<Statement<'static>>, ParseError> {
     if piece.kind != PieceKind::Sql || !is_table_ddl(&piece.text) {
         return Ok(None);
     }
@@ -66,9 +69,9 @@ const TABLE_MODIFIERS: &[&str] = &[
     "BLOCKCHAIN",
 ];
 
-fn create_table(c: &mut Cursor) -> Result<Statement, ParseError> {
+fn create_table(c: &mut Cursor) -> Result<Statement<'static>, ParseError> {
     c.eat_words(&["IF", "NOT", "EXISTS"]);
-    let name = c.name("a table name")?;
+    let name = c.name("a table name").map(Name::into_owned)?;
     if c.at_word("OF") {
         return Err(
             c.error("object tables (`CREATE TABLE … OF type`) are not supported".to_owned())
@@ -136,7 +139,7 @@ const COLUMN_CLAUSES: &[&str] = &[
 
 /// A column definition; the type may be missing (`CREATE TABLE … (a, b) AS SELECT`).
 fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
-    let name = c.ident("a column name")?;
+    let name = c.ident("a column name").map(Ident::into_owned)?;
     let data_type = if c.at_item_end() || c.at_any_word(COLUMN_CLAUSES) {
         DataType::of(TypeFamily::Other)
     } else {
@@ -156,7 +159,7 @@ fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
         } else if c.eat_word("INVISIBLE") {
             column.invisible = true;
         } else if c.eat_word("COLLATE") {
-            c.ident("a collation")?;
+            c.ident("a collation").map(Ident::into_owned)?;
         } else if c.eat_word("DEFAULT") {
             column.default_on_null = c.eat_words(&["ON", "NULL"]);
             if column.default_on_null {
@@ -209,7 +212,7 @@ fn data_type(c: &mut Cursor) -> Result<DataType, ParseError> {
         Some("RAW") => TypeFamily::Binary,
         _ => TypeFamily::Other,
     };
-    c.name("a column type")?;
+    c.name("a column type").map(Name::into_owned)?;
     let mut family = family;
     // Oracle gives these scale 0 and no precision of their own unless given them.
     let mut decimal = matches!(
@@ -337,7 +340,7 @@ fn default_value(c: &mut Cursor) -> Result<ColumnDefault, ParseError> {
 }
 
 /// The tokens from `start` to `end` as a literal, when they are one.
-fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr> {
+fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr<'static>> {
     let tokens: Vec<_> = (start..end).filter_map(|i| c.token(i)).collect();
     let source = c.source();
     let is_word = |t: &super::lex::Token, w: &str| {
@@ -345,11 +348,11 @@ fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr> {
     };
     match tokens.as_slice() {
         [t] if is_word(t, "NULL") => Some(Expr::Null),
-        [t] if t.kind == TokenKind::Number => Some(Expr::Number(c.decode(t.text(source)))),
+        [t] if t.kind == TokenKind::Number => Some(Expr::Number(c.decode(t.text(source)).into())),
         [t] => match t.kind {
             TokenKind::String { national } | TokenKind::AltString { national } => {
                 Some(Expr::String {
-                    bytes: t.content(source),
+                    bytes: t.content(source).into_owned().into(),
                     national,
                 })
             }
@@ -361,7 +364,7 @@ fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr> {
                 && t.kind == TokenKind::Number =>
         {
             Some(Expr::Negate(Box::new(Expr::Number(
-                c.decode(t.text(source)),
+                c.decode(t.text(source)).into(),
             ))))
         }
         [ty, t]
@@ -369,8 +372,8 @@ fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr> {
                 && matches!(t.kind, TokenKind::String { .. }) =>
         {
             Some(Expr::Typed {
-                type_name: c.decode(ty.text(source)).to_ascii_uppercase(),
-                text: c.decode(&t.content(source)),
+                type_name: c.decode(ty.text(source)).to_ascii_uppercase().into(),
+                text: c.decode(&t.content(source)).into(),
             })
         }
         _ => None,
@@ -378,7 +381,10 @@ fn literal(c: &Cursor, start: usize, end: usize) -> Option<Expr> {
 }
 
 /// A constraint on a column; `None` for a bare `NULL`, which only says the column is nullable.
-fn inline_constraint(c: &mut Cursor, column: &Ident) -> Result<Option<ConstraintDef>, ParseError> {
+fn inline_constraint(
+    c: &mut Cursor,
+    column: &Ident<'static>,
+) -> Result<Option<ConstraintDef>, ParseError> {
     let name = constraint_name(c)?;
     let columns = vec![column.clone()];
     let kind = if c.eat_words(&["NOT", "NULL"]) {
@@ -405,9 +411,11 @@ fn inline_constraint(c: &mut Cursor, column: &Ident) -> Result<Option<Constraint
     Ok(Some(ConstraintDef { name, kind, state }))
 }
 
-fn constraint_name(c: &mut Cursor) -> Result<Option<Ident>, ParseError> {
+fn constraint_name(c: &mut Cursor) -> Result<Option<Ident<'static>>, ParseError> {
     if c.eat_word("CONSTRAINT") {
-        c.ident("a constraint name").map(Some)
+        c.ident("a constraint name")
+            .map(Ident::into_owned)
+            .map(Some)
     } else {
         Ok(None)
     }
@@ -437,20 +445,20 @@ fn out_of_line_constraint(c: &mut Cursor) -> Result<ConstraintDef, ParseError> {
     Ok(ConstraintDef { name, kind, state })
 }
 
-fn column_list(c: &mut Cursor) -> Result<Vec<Ident>, ParseError> {
+fn column_list(c: &mut Cursor) -> Result<Vec<Ident<'static>>, ParseError> {
     c.expect_punct(b'(')?;
-    let mut columns = vec![c.ident("a column name")?];
+    let mut columns = vec![c.ident("a column name").map(Ident::into_owned)?];
     while c.eat_punct(b',') {
-        columns.push(c.ident("a column name")?);
+        columns.push(c.ident("a column name").map(Ident::into_owned)?);
     }
     c.expect_punct(b')')?;
     Ok(columns)
 }
 
 /// `REFERENCES parent [(columns)] [ON DELETE …]`.
-fn references(c: &mut Cursor, columns: Vec<Ident>) -> Result<ConstraintKind, ParseError> {
+fn references(c: &mut Cursor, columns: Vec<Ident<'static>>) -> Result<ConstraintKind, ParseError> {
     c.expect_word("REFERENCES")?;
-    let parent = c.name("the parent table")?;
+    let parent = c.name("the parent table").map(Name::into_owned)?;
     let parent_columns = if c.at_punct(b'(') {
         Some(column_list(c)?)
     } else {
@@ -525,7 +533,7 @@ fn constraint_state(c: &mut Cursor) -> Result<WrittenState, ParseError> {
         } else if c.eat_words(&["USING", "INDEX"]) {
             skip_index_clause(c)?;
         } else if c.eat_words(&["EXCEPTIONS", "INTO"]) {
-            c.name("an exceptions table")?;
+            c.name("an exceptions table").map(Name::into_owned)?;
         } else {
             return Ok(state);
         }
@@ -561,8 +569,8 @@ fn skip_index_clause(c: &mut Cursor) -> Result<(), ParseError> {
     Ok(())
 }
 
-fn alter_table(c: &mut Cursor) -> Result<Statement, ParseError> {
-    let table = c.name("a table name")?;
+fn alter_table(c: &mut Cursor) -> Result<Statement<'static>, ParseError> {
+    let table = c.name("a table name").map(Name::into_owned)?;
     let mut actions = Vec::new();
     while !c.at_end() {
         let start = c.pos();
@@ -570,7 +578,7 @@ fn alter_table(c: &mut Cursor) -> Result<Statement, ParseError> {
             c.bump();
             add(c, &mut actions)?;
         } else if c.eat_words(&["MODIFY", "CONSTRAINT"]) {
-            let name = c.ident("a constraint name")?;
+            let name = c.ident("a constraint name").map(Ident::into_owned)?;
             let change = constraint_state(c)?.into_change();
             actions.push(AlterAction::ChangeConstraint { name, change });
         } else if c.at_word("MODIFY")
@@ -636,7 +644,7 @@ fn modify(c: &mut Cursor, start: usize) -> Result<AlterAction, ParseError> {
     let mut items = Vec::new();
     let mut followed = true;
     loop {
-        let column = c.ident("a column name")?;
+        let column = c.ident("a column name").map(Ident::into_owned)?;
         let mut constraints = Vec::new();
         while !c.at_item_end() {
             let at_constraint = c.at_any_word(&[
@@ -695,12 +703,12 @@ fn enable_constraint(c: &mut Cursor) -> Result<Option<AlterAction>, ParseError> 
         c.restore(start);
         return Ok(None);
     }
-    let name = c.ident("a constraint name")?;
+    let name = c.ident("a constraint name").map(Ident::into_owned)?;
     loop {
         if c.eat_words(&["USING", "INDEX"]) {
             skip_index_clause(c)?;
         } else if c.eat_words(&["EXCEPTIONS", "INTO"]) {
-            c.name("an exceptions table")?;
+            c.name("an exceptions table").map(Name::into_owned)?;
         } else if c.at_word("CASCADE") {
             // `CASCADE` also disables the foreign keys that depend on this key.
             while c.bump().is_some() {}
@@ -719,19 +727,19 @@ fn enable_constraint(c: &mut Cursor) -> Result<Option<AlterAction>, ParseError> 
     }))
 }
 
-fn create_index(c: &mut Cursor, unique: bool) -> Result<Statement, ParseError> {
+fn create_index(c: &mut Cursor, unique: bool) -> Result<Statement<'static>, ParseError> {
     c.expect_word("INDEX")?;
     c.eat_words(&["IF", "NOT", "EXISTS"]);
-    let name = c.name("an index name")?;
+    let name = c.name("an index name").map(Name::into_owned)?;
     c.expect_word("ON")?;
     if c.at_word("CLUSTER") {
         return Ok(Statement::Skipped(Skip::Unused(
             "CREATE INDEX … ON CLUSTER".to_owned(),
         )));
     }
-    let table = c.name("a table name")?;
+    let table = c.name("a table name").map(Name::into_owned)?;
     if !c.at_punct(b'(') {
-        c.ident("a table alias")?;
+        c.ident("a table alias").map(Ident::into_owned)?;
     }
     c.expect_punct(b'(')?;
     let mut columns = Vec::new();
@@ -758,7 +766,7 @@ fn index_column(c: &mut Cursor) -> Result<IndexColumn, ParseError> {
         Some(TokenKind::Word | TokenKind::QuotedIdent)
     );
     if plain {
-        let column = c.ident("a column")?;
+        let column = c.ident("a column").map(Ident::into_owned)?;
         // A descending part is an expression to Oracle (`SYS_OP_DESCEND`), so its NULLs conflict.
         c.eat_word("ASC");
         if c.at_item_end() {
@@ -790,7 +798,7 @@ mod tests {
         }
     }
 
-    fn parse(text: &str) -> Statement {
+    fn parse(text: &str) -> Statement<'static> {
         parse_ddl(&piece(text), Encoding::Utf8).unwrap().unwrap()
     }
 
@@ -798,18 +806,18 @@ mod tests {
         parse_ddl(&piece(text), Encoding::Utf8).unwrap_err()
     }
 
-    fn id(value: &str, quoted: bool) -> Ident {
+    fn id(value: &str, quoted: bool) -> Ident<'static> {
         Ident {
-            value: value.into(),
+            value: value.to_owned().into(),
             quoted,
         }
     }
 
-    fn q(value: &str) -> Ident {
+    fn q(value: &str) -> Ident<'static> {
         id(value, true)
     }
 
-    fn name(schema: &str, table: &str) -> Name {
+    fn name(schema: &str, table: &str) -> Name<'static> {
         Name {
             schema: Some(q(schema)),
             name: q(table),
@@ -840,7 +848,7 @@ mod tests {
             .iter()
             .map(|c| {
                 (
-                    c.name.value.as_str(),
+                    &*c.name.value,
                     c.data_type.family,
                     c.data_type.written.as_str(),
                 )
@@ -877,7 +885,7 @@ mod tests {
         assert_eq!(
             columns[3].default,
             Some(ColumnDefault::Value(Expr::String {
-                bytes: b"ACTIVE".to_vec(),
+                bytes: b"ACTIVE".to_vec().into(),
                 national: false
             }))
         );
@@ -1063,7 +1071,7 @@ mod tests {
             .iter()
             .map(|c| {
                 (
-                    c.name.value.as_str(),
+                    &*c.name.value,
                     c.identity,
                     c.default_on_null,
                     c.invisible,
@@ -1188,10 +1196,7 @@ mod tests {
             panic!("no columns added");
         };
         assert_eq!(
-            added
-                .iter()
-                .map(|c| c.name.value.as_str())
-                .collect::<Vec<_>>(),
+            added.iter().map(|c| &*c.name.value).collect::<Vec<_>>(),
             ["PHONE", "FAX"]
         );
         assert!(
@@ -1470,9 +1475,9 @@ mod catalog {
         )
     }
 
-    fn name(text: &str) -> Name {
+    fn name(text: &str) -> Name<'static> {
         let ident = |v: &str| Ident {
-            value: v.to_owned(),
+            value: v.to_owned().into(),
             quoted: false,
         };
         match text.split_once('.') {
@@ -1744,7 +1749,7 @@ mod fixtures {
     }
 
     /// The export's DDL statements with their origins, in `order.txt` order.
-    fn ddl(dir: &Path, encoding: Encoding) -> Vec<(Statement, Origin)> {
+    fn ddl(dir: &Path, encoding: Encoding) -> Vec<(Statement<'static>, Origin)> {
         let order = std::fs::read_to_string(dir.join("order.txt")).unwrap();
         let mut statements = Vec::new();
         for (file, path) in order.lines().enumerate() {
@@ -1794,7 +1799,7 @@ mod fixtures {
             .any(|w| text.split_whitespace().nth(1) == Some(w))
     }
 
-    fn catalog(statements: Vec<(Statement, Origin)>) -> Catalog {
+    fn catalog(statements: Vec<(Statement<'static>, Origin)>) -> Catalog {
         let mut builder = CatalogBuilder::new(&RULES, None);
         for (statement, origin) in statements {
             builder.add(statement, origin);
@@ -1806,7 +1811,7 @@ mod fixtures {
 
     fn table(catalog: &Catalog, id: TableId) -> &Table {
         let ident = |v: &str| Ident {
-            value: v.to_owned(),
+            value: v.to_owned().into(),
             quoted: true,
         };
         let name = Name {
@@ -1859,7 +1864,7 @@ mod fixtures {
             for (column, generated) in t.columns.iter().zip(id.columns()) {
                 let default = generated.default.map(|d| match d {
                     DefaultValue::Text(text) => ColumnDefault::Value(Expr::String {
-                        bytes: text.as_bytes().to_vec(),
+                        bytes: text.as_bytes().to_vec().into(),
                         national: false,
                     }),
                     DefaultValue::CurrentTimestamp => {

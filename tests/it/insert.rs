@@ -55,7 +55,7 @@ fn expected(root: &Path) -> Expected {
     clippy::panic,
     reason = "a statement that doesn't parse fails the test that read it"
 )]
-fn inserts(path: &Path, encoding: Encoding) -> Vec<Statement> {
+fn inserts(path: &Path, encoding: Encoding) -> Vec<Statement<'static>> {
     let mut statements = Vec::new();
     for piece in crate::split::pieces(path) {
         let starts_insert = piece
@@ -63,7 +63,7 @@ fn inserts(path: &Path, encoding: Encoding) -> Vec<Statement> {
             .get(..6)
             .is_some_and(|head| head.eq_ignore_ascii_case(b"INSERT"));
         match insert::parse_insert(&piece, encoding) {
-            Ok(Some(statement)) => statements.push(statement),
+            Ok(Some(statement)) => statements.push(statement.into_owned()),
             Ok(None) => assert!(
                 !starts_insert,
                 "{}:{} not read as an INSERT",
@@ -76,7 +76,7 @@ fn inserts(path: &Path, encoding: Encoding) -> Vec<Statement> {
     statements
 }
 
-fn rows(statements: &[Statement]) -> Vec<&InsertRow> {
+fn rows<'a>(statements: &'a [Statement<'static>]) -> Vec<&'a InsertRow<'static>> {
     statements
         .iter()
         .flat_map(|s| match s {
@@ -155,7 +155,7 @@ fn columns(table: &str) -> Option<&'static [(&'static str, TypeFamily)]> {
 }
 
 fn qualified(row: &InsertRow) -> String {
-    let schema = row.table.schema.as_ref().map_or("", |s| s.value.as_str());
+    let schema = row.table.schema.as_ref().map_or("", |s| &*s.value);
     RULES.qualified(schema, &row.table.name.value)
 }
 
@@ -173,7 +173,7 @@ fn key(row: &InsertRow, names: &[String], encoding: Encoding) -> Option<Vec<Opti
             let literal = eval::evaluate(&row.values.get(index)?.expr, encoding);
             match value::canonical(&literal, &DataType::of(*family), &RULES) {
                 Canonical::Null => Some(None),
-                Canonical::Value(v) => Some(Some(v)),
+                Canonical::Value(v) => Some(Some(v.into_owned())),
                 Canonical::Unknown => None,
             }
         })

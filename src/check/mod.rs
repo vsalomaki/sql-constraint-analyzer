@@ -178,7 +178,7 @@ fn run_inner(
             &mut report,
             observer,
             |statement, origin| {
-                builder.add(statement, origin);
+                builder.add(statement.into_owned(), origin);
             },
         )?;
     }
