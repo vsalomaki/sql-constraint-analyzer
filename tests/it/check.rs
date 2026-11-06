@@ -128,12 +128,130 @@ fn committed_exports_give_exactly_the_planted_findings_in_both_modes() {
     }
 }
 
+/// The findings of `sql` as one data file, as `check_sql` would give them, but without its COMMIT at the end.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a script that can't be written or read fails the test"
+)]
+fn uncommitted(sql: &str, role: Role) -> Vec<Finding> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.sql");
+    fs::write(&path, sql).unwrap();
+    let files = [InputFile {
+        path,
+        role,
+        bytes: 0,
+        order: OrderSource::Given,
+    }];
+    let report = check::run(&files, &Options::default()).unwrap();
+    report
+        .findings
+        .into_iter()
+        .filter(|f| f.kind == FindingKind::Uncommitted)
+        .collect()
+}
+
 #[test]
-fn the_sqlcl_export_has_no_findings() {
+fn rows_with_no_commit_after_them_are_one_finding_at_the_first() {
+    let table = "CREATE TABLE T (ID NUMBER);\n";
+    let found = uncommitted(
+        &format!(
+            "{table}INSERT INTO T VALUES (1);\nCOMMIT;\nINSERT INTO T VALUES (2);\n\
+             INSERT ALL INTO T VALUES (3) INTO T VALUES (4) SELECT 1 FROM DUAL;\n"
+        ),
+        Role::Data,
+    );
+    let [finding] = found.as_slice() else {
+        panic!("{found:#?}");
+    };
+    assert_eq!((finding.line, finding.count), (Some(4), Some(3)));
+    assert_eq!(finding.table, "T");
+    let text = sqlca::report::describe(finding);
+    assert!(
+        text.ends_with(
+            "t.sql:4: 3 rows with no COMMIT after them, from this row of T to the end of the file"
+        ),
+        "{text}"
+    );
+    let committed = [
+        "INSERT INTO T VALUES (1);\ncommit work;\n",
+        "INSERT INTO T VALUES (1);\nALTER TABLE T ADD PRIMARY KEY (ID);\n",
+        "INSERT INTO T VALUES (1);\nGRANT SELECT ON T TO U;\n",
+        "",
+    ];
+    for sql in committed {
+        assert!(
+            uncommitted(&format!("{table}{sql}"), Role::Data).is_empty(),
+            "{sql}"
+        );
+    }
+    let open = [
+        "INSERT INTO T VALUES (1);\nALTER SESSION SET NLS_DATE_FORMAT = 'YYYY';\n",
+        "INSERT INTO T VALUES (1);\nROLLBACK;\n",
+    ];
+    for sql in open {
+        assert_eq!(
+            uncommitted(&format!("{table}{sql}"), Role::Data).len(),
+            1,
+            "{sql}"
+        );
+    }
+    let rows = format!("{table}INSERT INTO T VALUES (1);\n");
+    assert!(
+        uncommitted(&rows, Role::Reference).is_empty(),
+        "a reference file needs none"
+    );
+    let off = Options {
+        commit_check: false,
+        ..Options::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.sql");
+    fs::write(&path, &rows).unwrap();
+    let files = [InputFile {
+        path,
+        role: Role::Data,
+        bytes: 0,
+        order: OrderSource::Given,
+    }];
+    assert!(check::run(&files, &off).unwrap().findings.is_empty());
+}
+
+/// A deferred foreign key doesn't excuse its table's rows: they need a commit after them like any others.
+#[test]
+fn rows_of_a_table_with_a_deferred_foreign_key_need_a_commit_too() {
+    let sql = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+               CREATE TABLE C (ID NUMBER, P_ID NUMBER CONSTRAINT C_P REFERENCES P DEFERRABLE INITIALLY DEFERRED);\n\
+               INSERT INTO C VALUES (1, 1);\n";
+    assert_eq!(uncommitted(sql, Role::Data).len(), 1);
+}
+
+/// SQLcl writes no COMMIT into its data files, so each has one finding for its rows; nothing else is wrong. Reference
+/// files need no commit.
+#[test]
+fn the_sqlcl_export_misses_only_a_commit_in_each_data_file() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sqlcl");
     let (report, found) = check(&root, Encoding::Utf8, true);
     assert_clean(&report, "sqlcl");
-    assert!(found.is_empty(), "{found:#?}");
+    assert!(
+        found.iter().all(|f| f.kind == FindingKind::Uncommitted),
+        "{found:#?}"
+    );
+    let with_rows: BTreeSet<String> = inputs(&root)
+        .iter()
+        .filter(|f| f.role == Role::Data)
+        .filter(|f| fs::read_to_string(&f.path).unwrap().contains("Insert into"))
+        .map(|f| {
+            f.path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    let files: Vec<String> = found.iter().filter_map(|f| f.file.clone()).collect();
+    assert_eq!(files.len(), with_rows.len(), "one finding per file");
+    assert_eq!(files.into_iter().collect::<BTreeSet<_>>(), with_rows);
     assert_eq!(report.not_followed.len(), 8);
 }
 
@@ -208,6 +326,37 @@ mod generated {
         });
     }
 
+    /// Without a table's COMMIT, its rows are a finding unless something after them in the same file commits: the
+    /// next table's COMMIT, or DDL added after the data.
+    #[test]
+    fn rows_without_a_commit_after_them_in_every_layout() {
+        let mut planted = 0;
+        for layout in [Layout::Single, Layout::Separate, Layout::Type] {
+            for constraints in [Placement::BeforeData, Placement::AfterData] {
+                for table in ["APP.TIMESHEETS", "APP.AuditLog", "REF.COUNTRIES"] {
+                    let options = synth::Options {
+                        layout,
+                        constraints,
+                        omit_commit: vec![table.to_owned()],
+                        ..base(6)
+                    };
+                    assert_manifest(&options);
+                    let dir = tempfile::tempdir().unwrap();
+                    let manifest = synth::generate(&options, &dir.path().join("export")).unwrap();
+                    planted += manifest
+                        .findings
+                        .iter()
+                        .filter(|f| f.kind == sqlca::finding::FindingKind::Uncommitted)
+                        .count();
+                }
+            }
+        }
+        assert!(
+            planted >= 3,
+            "some layouts leave rows uncommitted: {planted}"
+        );
+    }
+
     #[test]
     fn without_deferred_violations() {
         assert_manifest(&synth::Options {
@@ -226,7 +375,8 @@ mod generated {
 fn check_sql(sql: &str, load_order: bool) -> (Report, Vec<(FindingKind, u64, bool)>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.sql");
-    fs::write(&path, sql).unwrap();
+    // A COMMIT at the end, as an export has; it moves no line.
+    fs::write(&path, format!("{sql}\nCOMMIT;\n")).unwrap();
     let files = [InputFile {
         path,
         role: Role::Data,

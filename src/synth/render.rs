@@ -71,6 +71,8 @@ pub(crate) trait Render {
     fn data_section(&self, table: TableId, edge: Edge, eol: &str) -> Sql;
     fn insert(&self, insert: &Insert<'_>) -> String;
     fn batch(&self, part: Batch<'_>, eol: &str) -> String;
+    /// What ends a table's rows: a commit.
+    fn commit(&self, eol: &str) -> Sql;
     /// A script that runs the files in order, with paths relative to it.
     fn load_script(&self, paths: &[&str], eol: &str) -> String;
 }

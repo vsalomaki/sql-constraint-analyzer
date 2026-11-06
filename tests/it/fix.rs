@@ -65,22 +65,25 @@ fn assert_restores(files: &[InputFile], report: &FixReport) {
         let original = fs::read(&file.path).unwrap();
         let output = fs::read(written).unwrap();
         let name = check::display(&file.path);
-        let mut removed: Vec<_> = report.removed.iter().filter(|r| r.file == name).collect();
-        removed.sort_by_key(|r| r.span.start);
+        // Each change as (span, what the output has, what the input had); an added commit replaces nothing.
+        let removals = report.removed.iter().filter(|r| r.file == name);
+        let commits = report.committed.iter().filter(|c| c.file == name);
+        let mut changes: Vec<(u64, u64, &[u8], &[u8])> = removals
+            .map(|r| (r.span.start, r.span.end, &r.replacement[..], &r.text[..]))
+            .chain(commits.map(|c| (c.at, c.at, &c.text[..], &b""[..])))
+            .collect();
+        changes.sort_by_key(|c| c.0);
         let (mut rebuilt, mut at_original, mut at_output) = (Vec::new(), 0_usize, 0_usize);
-        for removal in removed {
-            let start = usize::try_from(removal.span.start).unwrap();
+        for (start, end, replacement, text) in changes {
+            let start = usize::try_from(start).unwrap();
             let kept = start - at_original;
             rebuilt.extend_from_slice(&output[at_output..at_output + kept]);
             at_output += kept;
-            let replaced = &output[at_output..at_output + removal.replacement.len()];
-            assert!(
-                replaced == removal.replacement,
-                "{name}: no replacement at {start}"
-            );
-            rebuilt.extend_from_slice(&removal.text);
-            at_output += removal.replacement.len();
-            at_original = usize::try_from(removal.span.end).unwrap();
+            let replaced = &output[at_output..at_output + replacement.len()];
+            assert!(replaced == replacement, "{name}: no replacement at {start}");
+            rebuilt.extend_from_slice(text);
+            at_output += replacement.len();
+            at_original = usize::try_from(end).unwrap();
         }
         rebuilt.extend_from_slice(&output[at_output..]);
         assert!(rebuilt == original, "{name} isn't restored by its rejects");
@@ -207,6 +210,7 @@ fn fix_scripts(
     (dir, files, report)
 }
 
+/// Each script that ends its last line also ends with a COMMIT, as an export does; `outputs` leaves it out.
 #[expect(clippy::unwrap_used, reason = "a folder that fails fails the test")]
 fn write_scripts(scripts: &[(&str, &str)]) -> (tempfile::TempDir, Vec<InputFile>) {
     let dir = tempfile::tempdir().unwrap();
@@ -215,7 +219,12 @@ fn write_scripts(scripts: &[(&str, &str)]) -> (tempfile::TempDir, Vec<InputFile>
         .map(|(name, sql)| {
             let path = dir.path().join("in").join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, sql).unwrap();
+            let sql = if sql.ends_with('\n') {
+                format!("{sql}{COMMIT}")
+            } else {
+                (*sql).to_owned()
+            };
+            fs::write(&path, &sql).unwrap();
             InputFile {
                 path,
                 role: if name.starts_with("ref/") {
@@ -231,13 +240,19 @@ fn write_scripts(scripts: &[(&str, &str)]) -> (tempfile::TempDir, Vec<InputFile>
     (dir, files)
 }
 
-/// The written outputs' text, by input position.
+/// What `write_scripts` ends each script with.
+const COMMIT: &str = "COMMIT;\n";
+
+/// The written outputs' text, by input position, without the COMMIT `write_scripts` ended each with.
 #[expect(clippy::unwrap_used, reason = "an output that fails fails the test")]
 fn outputs(report: &FixReport) -> Vec<String> {
     report
         .files
         .iter()
-        .map(|f| fs::read_to_string(&f.path).unwrap())
+        .map(|f| {
+            let text = fs::read_to_string(&f.path).unwrap();
+            text.strip_suffix(COMMIT).unwrap_or(&text).to_owned()
+        })
         .collect()
 }
 
@@ -812,8 +827,10 @@ fn annotations_mark_each_removal_and_parse_as_comments_under_both_runners() {
     ];
     for (runners, sql, expected) in cases {
         for runner in runners {
+            // Some cases end without a line end, so they have no COMMIT.
             let options = Options {
                 runner: *runner,
+                commit_check: false,
                 ..Options::default()
             };
             let input = format!("{ddl}{sql}");
@@ -863,12 +880,8 @@ fn an_annotation_holds_no_newline_substitution_or_early_comment_end() {
     assert_eq!(report.output.rows, 2);
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "a fixture or folder that fails fails the test"
-)]
 fn output(report: &FixReport) -> String {
-    fs::read_to_string(&report.files.first().unwrap().path).unwrap()
+    outputs(report).swap_remove(0)
 }
 
 const FAMILY: &str = "CREATE TABLE G (ID NUMBER PRIMARY KEY);\n\
@@ -999,7 +1012,10 @@ fn the_originals_are_never_changed_even_through_hard_links() {
     let sql = format!("{FAMILY}{CASCADE}");
     let (_dir, files, report) = fix_sql(&sql);
     assert!(report.rounds > 1);
-    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), sql);
+    assert_eq!(
+        fs::read_to_string(&files[0].path).unwrap(),
+        format!("{sql}{COMMIT}")
+    );
 }
 
 /// The scripts as data files in one folder, by name, fixed into `out` under the same temporary folder.
@@ -1056,8 +1072,11 @@ fn temporary_files_never_take_an_inputs_name() {
         .iter()
         .map(|f| fs::read_to_string(&f.path).unwrap())
         .collect();
-    assert_eq!(originals, [bad, other, also_bad.as_str()]);
-    assert_eq!(fs::read_to_string(&report.files[1].path).unwrap(), other);
+    assert_eq!(
+        originals,
+        [bad, other, also_bad.as_str()].map(|s| format!("{s}{COMMIT}"))
+    );
+    assert_eq!(outputs(&report)[1], other);
 }
 
 #[test]
@@ -1074,7 +1093,7 @@ fn an_input_where_the_report_goes_is_refused() {
     assert!(
         files
             .iter()
-            .all(|f| fs::read_to_string(&f.path).unwrap() == "COMMIT;\n")
+            .all(|f| fs::read_to_string(&f.path).unwrap() == format!("COMMIT;\n{COMMIT}"))
     );
 }
 
@@ -1198,8 +1217,9 @@ fn outputs_keep_the_inputs_relative_paths() {
 
 const ORPHAN: &str = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
                       CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
-                      INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2, 9);\n";
-const CLEAN: &str = "INSERT INTO P VALUES (2);\n";
+                      INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2, 9);\n\
+                      COMMIT;\n";
+const CLEAN: &str = "INSERT INTO P VALUES (2);\nCOMMIT;\n";
 
 /// `t.sql` with an orphan and `u.sql` with nothing to fix, in a new folder.
 #[expect(clippy::unwrap_used, reason = "a folder that fails fails the test")]
@@ -1527,7 +1547,21 @@ mod generated {
                 surviving,
                 "{at}"
             );
-            assert!(report.left.is_empty(), "{at}: {:?}", report.left);
+            // The generated schema has a deferred foreign key, so an added COMMIT could roll the load back.
+            assert!(
+                report
+                    .left
+                    .iter()
+                    .all(|l| l.finding.kind == FindingKind::Uncommitted),
+                "{at}: {:?}",
+                report.left
+            );
+            assert_eq!(
+                report.left.len(),
+                count(&report.input, FindingKind::Uncommitted),
+                "{at}"
+            );
+            assert!(report.committed.is_empty(), "{at}");
             assert_restores(&files, &report);
         }
     }
@@ -1587,4 +1621,167 @@ mod generated {
             ..synth::Options::default()
         });
     }
+}
+
+/// The first output as written, its COMMIT included.
+#[expect(clippy::unwrap_used, reason = "an output that fails fails the test")]
+fn written(report: &FixReport) -> String {
+    fs::read_to_string(&report.files.first().unwrap().path).unwrap()
+}
+
+/// `sql` written as it is, with no COMMIT added, as one data file fixed into a fresh folder and restored by the
+/// report.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a fixture or folder that fails fails the test"
+)]
+fn fix_uncommitted(
+    sql: &str,
+    target: impl Fn(&Path) -> fix::Target,
+) -> (tempfile::TempDir, FixReport) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.sql");
+    fs::write(&path, sql).unwrap();
+    let files = [InputFile {
+        path,
+        role: Role::Data,
+        bytes: u64::try_from(sql.len()).unwrap(),
+        order: OrderSource::Given,
+    }];
+    let report = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &target(&dir.path().join("out")),
+    )
+    .unwrap();
+    if !report.target.dry_run {
+        assert_restores(&files, &report);
+    }
+    (dir, report)
+}
+
+#[test]
+fn a_commit_goes_at_the_end_of_a_file_whose_last_rows_have_none() {
+    let note = "-- sqlca fix added this COMMIT: no COMMIT followed the rows before it";
+    let cases = [
+        (
+            "INSERT INTO T VALUES (1);\n",
+            false,
+            "INSERT INTO T VALUES (1);\nCOMMIT;\n".to_owned(),
+        ),
+        (
+            "INSERT INTO T VALUES (1);",
+            false,
+            "INSERT INTO T VALUES (1);\nCOMMIT;\n".to_owned(),
+        ),
+        (
+            "INSERT INTO T VALUES (1);\r\n",
+            false,
+            "INSERT INTO T VALUES (1);\r\nCOMMIT;\r\n".to_owned(),
+        ),
+        (
+            "INSERT INTO T VALUES (1);\r\nINSERT INTO T VALUES (2);",
+            false,
+            "INSERT INTO T VALUES (1);\r\nINSERT INTO T VALUES (2);\r\nCOMMIT;\r\n".to_owned(),
+        ),
+        (
+            "INSERT INTO T VALUES (1);\n",
+            true,
+            format!("INSERT INTO T VALUES (1);\n{note}\nCOMMIT;\n"),
+        ),
+    ];
+    for (rows, annotate, fixed) in cases {
+        let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY);\n";
+        let (_dir, report) = fix_uncommitted(&format!("{ddl}{rows}"), |out| fix::Target {
+            annotate,
+            ..fix::Target::out(out)
+        });
+        assert_eq!(written(&report), format!("{ddl}{fixed}"), "{rows:?}");
+        assert!(report.removed.is_empty(), "{rows:?}");
+        assert_eq!(report.committed.len(), 1, "{rows:?}");
+        assert!(
+            report.output.findings.is_empty(),
+            "{rows:?}: {:?}",
+            report.output.findings
+        );
+        assert_eq!(fix::summary(&report), "Fixed      COMMIT added to 1 file");
+    }
+}
+
+/// A deferred foreign key is checked at commit, and a transaction can run across files: a COMMIT added after the
+/// child, or after unrelated rows before its parent comes, would roll the load back. So none is added.
+#[test]
+fn no_commit_is_added_where_a_constraint_is_checked_at_commit() {
+    let (_dir, files) = write_scripts(&[
+        (
+            "a.sql",
+            "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+             CREATE TABLE C (ID NUMBER, P_ID NUMBER REFERENCES P DEFERRABLE INITIALLY DEFERRED);\n\
+             CREATE TABLE A (ID NUMBER);\n\
+             INSERT INTO C VALUES (1, 2);",
+        ),
+        ("b.sql", "INSERT INTO A VALUES (1);"),
+        ("c.sql", "INSERT INTO P VALUES (2);\n"),
+    ]);
+    let (_out, report) = run(&files, &Options::default());
+    assert!(report.committed.is_empty(), "{:?}", report.committed);
+    let left: Vec<(FindingKind, Option<&str>)> = report
+        .left
+        .iter()
+        .map(|l| (l.finding.kind, l.finding.file.as_deref()))
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(
+        left.iter()
+            .all(|(kind, _)| *kind == FindingKind::Uncommitted)
+    );
+    assert!(report.files.iter().all(|f| !f.changed));
+    assert_eq!(
+        fix::summary(&report),
+        "Fixed      0 rows in 0 rounds; 2 left for review"
+    );
+}
+
+#[test]
+fn a_commit_is_added_beside_the_rows_a_fix_removes_and_kept_out_of_the_rejects() {
+    let sql = "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nINSERT INTO T VALUES (1);\n";
+    let (dir, report) = fix_uncommitted(sql, |out| fix::Target::out(out));
+    assert_eq!(
+        written(&report),
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nCOMMIT;\n"
+    );
+    assert_eq!(report.removed.len(), 1);
+    assert!(
+        fix::summary(&report)
+            .starts_with("Fixed      1 rows in 1 round (duplicate key 1); COMMIT added to 1 file")
+    );
+    let rejects = fs::read_to_string(dir.path().join("out/sqlca-report/rejects.sql")).unwrap();
+    assert!(!rejects.contains("COMMIT"), "{rejects}");
+    let json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.path().join("out/sqlca-report/fix-report.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json["removed"].as_array().unwrap().len(), 1);
+    assert_eq!(json["committed"][0]["finding"]["kind"], "uncommitted");
+    let text = fs::read_to_string(dir.path().join("out/sqlca-report/fix-report.txt")).unwrap();
+    assert!(text.contains("Committed:\n  "), "{text}");
+}
+
+#[test]
+fn a_dry_run_tells_the_commit_it_would_add_as_settled() {
+    let sql = "CREATE TABLE T (ID NUMBER);\nINSERT INTO T VALUES (1);\n";
+    let (dir, report) = fix_uncommitted(sql, |out| fix::Target {
+        dry_run: true,
+        ..fix::Target::out(out)
+    });
+    assert_eq!(report.committed.len(), 1);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+    assert!(fix::summary(&report).starts_with("Would fix "));
+    assert_eq!(fs::read_to_string(dir.path().join("t.sql")).unwrap(), sql);
+    assert!(!dir.path().join("out").exists());
 }

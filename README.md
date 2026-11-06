@@ -14,8 +14,12 @@ constraints, foreign keys above all, and writes fixed copies.
   `file:line`, by the database's own rules: which values count as NULL, how identifiers fold, how partly NULL keys
   compare, and constraint states such as disabled or deferred.
 - Optionally checks the load order too: a child row inserted before its parent.
+- Reports rows at the end of a data file with no COMMIT after them (or a statement that commits, such as DDL in
+  Oracle). `--no-commit-check` turns this off.
 - Fixes: writes corrected files to another folder or in place, with every removed or changed row kept in a rejects
-  file and a report of each change.
+  file and a report of each change, and adds a COMMIT where a data file's last rows have none. Where a constraint
+  is checked only at commit (a deferred one), it adds none, since an early COMMIT can roll the load back, and leaves
+  those findings for review.
 
 Oracle is the supported dialect today. Others are meant to plug in the same way.
 
@@ -23,6 +27,7 @@ Oracle is the supported dialect today. Others are meant to plug in the same way.
 sqlca check 'export/*.sql'                       # report violations
 sqlca check 'app/**/*.sql' --reference 'ref/**/*.sql'  # parents from another schema, not checked
 sqlca check --load-order --files-from order.txt  # also check the load order given
+sqlca check 'export/*.sql' --no-commit-check     # don't require a COMMIT after each data file's rows
 sqlca check 'export/*.sql' --format json > findings.jsonl  # JSON Lines; progress stays on stderr
 sqlca fix 'export/*.sql' --out fixed/            # write fixed copies; removed rows in fixed/sqlca-report/rejects.sql
 sqlca fix 'export/*.sql' --in-place --dry-run    # print what an in-place fix would change; write nothing

@@ -174,6 +174,9 @@ pub struct Options {
     pub encoding: Encoding,
     /// Tables (`APP.PROJECTS`) whose data isn't written.
     pub omit_data: Vec<String>,
+    /// Tables whose rows get no commit after them.
+    #[serde(default)]
+    pub omit_commit: Vec<String>,
 }
 
 impl Default for Options {
@@ -191,6 +194,7 @@ impl Default for Options {
             line_ending: LineEnding::default(),
             encoding: Encoding::default(),
             omit_data: Vec::new(),
+            omit_commit: Vec::new(),
         }
     }
 }
@@ -212,7 +216,7 @@ pub enum Error {
     OutputNotEmpty(PathBuf),
     #[error("--rows must be at least {MIN_ROWS}, got {0}")]
     TooFewRows(u64),
-    #[error("unknown table `{0}` in --omit-data")]
+    #[error("unknown table `{0}`; give one such as APP.PROJECTS")]
     UnknownTable(String),
     #[error("{dialect:?} has no syntax for the noise switches {switches:?}")]
     UnsupportedNoise {
@@ -242,19 +246,23 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
             switches,
         });
     }
-    let omitted = options
-        .omit_data
-        .iter()
-        .map(|name| {
-            schema::TableId::from_qualified(name).ok_or_else(|| Error::UnknownTable(name.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let tables = |names: &[String]| {
+        names
+            .iter()
+            .map(|name| {
+                schema::TableId::from_qualified(name)
+                    .ok_or_else(|| Error::UnknownTable(name.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let omitted = tables(&options.omit_data)?;
+    let uncommitted = tables(&options.omit_commit)?;
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         return Err(Error::OutputNotEmpty(root.to_owned()));
     }
     fs::create_dir_all(root)?;
 
-    let (files, findings) = data::write_export(options, root, &omitted)?;
+    let (files, findings) = data::write_export(options, root, &omitted, &uncommitted)?;
 
     let eol = options.line_ending.as_str();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();

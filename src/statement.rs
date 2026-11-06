@@ -322,6 +322,8 @@ pub enum Statement<'a> {
         columns: Vec<IndexColumn>,
     },
     Insert(Vec<InsertRow<'a>>),
+    /// The end of a transaction: a commit, or a statement the dialect commits before and after, such as DDL.
+    Commit,
     Skipped(Skip),
 }
 
@@ -353,6 +355,7 @@ impl Statement<'_> {
             Self::Insert(rows) => {
                 Statement::Insert(rows.into_iter().map(InsertRow::into_owned).collect())
             }
+            Self::Commit => Statement::Commit,
             Self::Skipped(skip) => Statement::Skipped(skip),
         }
     }

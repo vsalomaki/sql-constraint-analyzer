@@ -43,10 +43,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   (`pieces`, `parse`, `evaluate`, `script_includes`, `rules`), each a `match` on the dialect.
 - `src/dialect/<name>/` holds the syntax. For Oracle: `split.rs` (script into pieces, on bytes, by SQL\*Plus or
   SQLcl rules: `Runner`, default SQL\*Plus), `lex.rs` (one statement into tokens), and `synth.rs` (the
-  generator's DDL, literals, `INSERT` shapes, SQL\*Plus headers, `load.sql`, and how many statements each wrote)
-  behind the `synth::Render` trait. `parse.rs` sends each piece to `insert.rs` (`INSERT` rows) or `ddl.rs`
-  (`CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`), both over the token cursor in `cursor.rs`, or names it as
-  skipped; `eval.rs` says what a value expression means. `src/source.rs` holds the neutral `Piece` and `Span` the
+  generator's DDL, literals, `INSERT` shapes, SQL\*Plus headers, the `COMMIT` after each table's rows, `load.sql`,
+  and how many statements each wrote) behind the `synth::Render` trait. `parse.rs` sends each piece to `insert.rs` (`INSERT` rows) or `ddl.rs`
+  (`CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`), both over the token cursor in `cursor.rs`, names it a commit
+  (`COMMIT`, and DDL, which Oracle commits around), or names it as skipped; `eval.rs` says what a value expression means. `src/source.rs` holds the neutral `Piece` and `Span` the
   splitter produces, `src/statement.rs` the statements, and `src/value.rs` canonical values.
 - `src/catalog.rs` (neutral) builds tables, ordered columns and resolved constraints from the DDL statements. It
   applies every `CREATE TABLE` before the rest, since a version-sorted glob reads `ref_constraints/` before
@@ -70,8 +70,11 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - **Exit codes:** `0` clean, `1` violations found, `2` usage, I/O or fatal errors. clap's usage errors are already 2.
 - **Byte offsets are `u64`.** Inputs run to several GB; a single file can pass 4 GiB.
 - **Memory grows with key count, not input size.** Stream statements; never read a whole data file into memory.
-- **Oracle semantics** (case folding, `''` is NULL, NULL-satisfied FKs, constraint states) are decided rules with
-  tests. A change to one changes test expectations on purpose, never as a side effect.
+- **Oracle semantics** (case folding, `''` is NULL, NULL-satisfied FKs, constraint states, a transaction ending at
+  `COMMIT` or DDL but not at `ALTER SESSION`; `fix` adding no `COMMIT` where a constraint is deferred) are decided
+  rules with tests. `DROP` and `TRUNCATE` stay statements the check doesn't follow and end no transaction for it;
+  `ROLLBACK`, `EXIT` and `QUIT` are others it doesn't follow. A change to one changes test expectations on purpose,
+  never as a side effect.
 - **Dependencies:** add with `cargo add`; pin features (`default-features = false` when the defaults pull in more
   than needed). A dependency that brings a new licence adds it to `deny.toml`'s allowlist, permissive licences only.
   The generator's dependencies are `optional = true` and enabled by the `gen` feature.
@@ -129,7 +132,8 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - Large generated exports (GB scale) go to `gen-out/`, which is git-ignored.
 - `tests/fixtures/sqlcl/` (`make sqlcl-fixtures`, needs Docker) is a generated export loaded into Oracle Free and
   exported again by SQLcl through `DBMS_METADATA`, in SQL Developer's separate-files layout with `order.txt` and
-  `counts.csv`. It has no violations. Its `DBMS_METADATA` DDL ends each table with an `INSERT … SELECT … FROM …@ KU$`
+  `counts.csv`. It has no violations, but SQLcl writes no `COMMIT` into its data files, so each has the finding
+  for rows with none after them. Its `DBMS_METADATA` DDL ends each table with an `INSERT … SELECT … FROM …@ KU$`
   statement, as this Oracle version writes it; the analyzer skips it as an `INSERT … SELECT`. Rows that got
   `SYSTIMESTAMP` change on every regeneration, so review the diff.
 - Prove a fix by reverting it and watching a test fail.
@@ -139,9 +143,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 `make oracle-check` (`scripts/oracle/check.sh`, about a minute) runs the ignored test
 `oracle_agrees_with_the_manifest_and_the_fix` against Oracle Free in Docker: image pinned by digest, no published
 port, a throwaway password. It loads generated exports and requires Oracle's rejections to match the manifest, by
-file and line where SQL\*Plus allows. Then it fixes the same exports (default policy, with `--annotate`, and
+file and line where SQL\*Plus allows; a missing `COMMIT` (one export plants it with `omit_commit`) is no rejection,
+since the load commits at its end. Then it fixes the same exports (default policy, with `--annotate`, and
 `--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires each output
-with its removed rows put back to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
+with its removed rows put back and any `COMMIT` it added taken out to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
 rejects no duplicate, NULL or missing-parent row other than a child the fix leaves before its parent, that its
 rejections match the fix's check of its output, and that it holds the output's rows less those it rejected. Run it
 after any change to the generator's schema, plants or Oracle syntax, or to what `fix` writes. A failure is a

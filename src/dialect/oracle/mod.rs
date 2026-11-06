@@ -16,6 +16,9 @@ pub(crate) mod synth;
 
 use super::{Fold, Rules, UniqueNulls};
 
+/// The statement that commits, as a script line without its line ending.
+pub const COMMIT: &str = "COMMIT;";
+
 pub const RULES: Rules = Rules {
     fold: Fold::Upper,
     ident_quote: '"',

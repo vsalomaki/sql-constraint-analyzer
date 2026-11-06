@@ -94,6 +94,13 @@ impl DialectId {
         }
     }
 
+    /// The statement that commits, as a script line without its line ending.
+    pub fn commit_statement(self) -> &'static str {
+        match self {
+            Self::Oracle => oracle::COMMIT,
+        }
+    }
+
     pub fn rules(self) -> &'static Rules {
         match self {
             Self::Oracle => &oracle::RULES,

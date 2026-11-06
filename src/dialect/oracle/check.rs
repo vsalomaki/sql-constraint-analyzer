@@ -260,10 +260,11 @@ fn row_signature(error: &Error) -> Option<(&'static str, String)> {
     })
 }
 
-fn expected_row(finding: &Finding) -> (&'static str, String) {
+/// What Oracle reports for a finding's row; nothing for a missing commit, since the load commits at its end.
+fn expected_row(finding: &Finding) -> Option<(&'static str, String)> {
     let constraint = || finding.constraint.clone().unwrap_or_default();
     let column = || finding.columns.first().cloned().unwrap_or_default();
-    match finding.kind {
+    Some(match finding.kind {
         FindingKind::FkMissingParent | FindingKind::FkLoadOrder => ("fk", constraint()),
         FindingKind::DuplicateKey => ("duplicate", constraint()),
         FindingKind::NotNull => (
@@ -276,7 +277,8 @@ fn expected_row(finding: &Finding) -> (&'static str, String) {
         }
         FindingKind::ValueCountMismatch => ("value count", String::new()),
         FindingKind::ParentTableEmpty => ("parent table empty", constraint()),
-    }
+        FindingKind::Uncommitted => return None,
+    })
 }
 
 fn counts(signatures: impl IntoIterator<Item = Signature>) -> BTreeMap<Signature, usize> {
@@ -338,19 +340,19 @@ fn observed_load_order(
 }
 
 fn expected_load_order(findings: &[Finding], exact: bool) -> BTreeMap<Signature, usize> {
-    counts(findings.iter().map(|f| {
-        let (what, detail) = expected_row(f);
+    counts(findings.iter().filter_map(|f| {
+        let (what, detail) = expected_row(f)?;
         let location = exact.then(|| {
             (
                 f.file.clone().unwrap_or_default(),
                 f.line.unwrap_or_default(),
             )
         });
-        Signature {
+        Some(Signature {
             location,
             what,
             detail,
-        }
+        })
     }))
 }
 
@@ -434,7 +436,9 @@ fn expected_after_data(findings: &[Finding]) -> AfterData {
             }
             (FindingKind::FkMissingParent, Some(c)) => want.fks.push(c.clone()),
             _ => {
-                let (what, detail) = expected_row(finding);
+                let Some((what, detail)) = expected_row(finding) else {
+                    continue;
+                };
                 let location = Some((
                     finding.file.clone().unwrap_or_default(),
                     finding.line.unwrap_or_default(),
@@ -581,35 +585,38 @@ fn assert_restores(
     for (output, (path, input)) in report.files.iter().zip(inputs) {
         let written = fs::read(fixed.join(path))
             .unwrap_or_else(|e| panic!("{run}: {path} has no output: {e}"));
-        let mut removed: Vec<&Removal> = report
-            .removed
-            .iter()
-            .filter(|r| r.file == output.input)
+        let removals = report.removed.iter().filter(|r| r.file == output.input);
+        for removal in removals.clone().filter(|r| !r.nulled.is_empty()) {
+            assert!(
+                removal.replacement == nulled_row(removal, annotate),
+                "{run}: {path} has the row at {} other than with NULL in {:?}",
+                removal.span.start,
+                removal.nulled
+            );
+        }
+        // Each change as (span, what the output has, what the input had); an added commit replaces nothing.
+        let commits = report.committed.iter().filter(|c| c.file == output.input);
+        let mut changes: Vec<(u64, u64, &[u8], &[u8])> = removals
+            .map(|r| (r.span.start, r.span.end, &r.replacement[..], &r.text[..]))
+            .chain(commits.map(|c| (c.at, c.at, &c.text[..], &b""[..])))
             .collect();
-        removed.sort_by_key(|r| r.span.start);
+        changes.sort_by_key(|c| c.0);
         let (mut rebuilt, mut at_input, mut at_output) = (Vec::new(), 0_usize, 0_usize);
         // `get`, not indexing: an output cut short fails the comparison below, not a slice.
-        for removal in removed {
-            let start = usize::try_from(removal.span.start).unwrap();
+        for (start, end, replacement, text) in changes {
+            let start = usize::try_from(start).unwrap();
             let kept = start - at_input;
             rebuilt.extend_from_slice(written.get(at_output..at_output + kept).unwrap_or_default());
             at_output += kept;
-            let replaced = written.get(at_output..at_output + removal.replacement.len());
+            let replaced = written.get(at_output..at_output + replacement.len());
             assert_eq!(
                 replaced,
-                Some(removal.replacement.as_slice()),
+                Some(replacement),
                 "{run}: {path} has no replacement at {start}"
             );
-            if !removal.nulled.is_empty() {
-                assert!(
-                    removal.replacement == nulled_row(removal, annotate),
-                    "{run}: {path} has the row at {start} other than with NULL in {:?}",
-                    removal.nulled
-                );
-            }
-            rebuilt.extend_from_slice(&removal.text);
-            at_output += removal.replacement.len();
-            at_input = usize::try_from(removal.span.end).unwrap();
+            rebuilt.extend_from_slice(text);
+            at_output += replacement.len();
+            at_input = usize::try_from(end).unwrap();
         }
         rebuilt.extend_from_slice(written.get(at_output..).unwrap_or_default());
         assert!(
@@ -811,11 +818,13 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         deferred_violations: false,
         ..Options::default()
     };
+    // Oracle doesn't see a missing commit, since the load commits at its end; the fix adds one, which it loads.
     let quirks = Options {
         seed: 2,
         noise: every_quirk_but_wrapping(),
         line_ending: LineEnding::Crlf,
         encoding: Encoding::Windows1252,
+        omit_commit: vec!["APP.TIMESHEETS".to_owned()],
         ..base.clone()
     };
     let wrapped = Options {

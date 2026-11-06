@@ -20,6 +20,8 @@ pub enum FindingKind {
     ValueCountMismatch,
     /// The foreign key's parent table is defined but has no rows; one finding per foreign key, with a row count.
     ParentTableEmpty,
+    /// Rows at the end of a data file with no commit after them; at the first such row, with their count.
+    Uncommitted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

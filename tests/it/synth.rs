@@ -259,6 +259,56 @@ fn omitted_data_becomes_one_summary_finding_per_foreign_key() {
         || f.kind == FindingKind::ParentTableEmpty));
 }
 
+/// The table an `INSERT INTO` line names, unquoted and upper-cased.
+fn inserted_table(line: &str) -> Option<String> {
+    let upper = line.to_uppercase();
+    let (_, rest) = upper.split_once("INSERT INTO ")?;
+    let name = rest.split([' ', '(']).next()?;
+    Some(name.replace('"', ""))
+}
+
+/// A commit checks a deferred foreign key, so none may come between a department and the employees its manager key
+/// points at, whatever tables the shuffled order puts between them.
+#[test]
+fn no_commit_comes_between_a_deferred_child_and_its_parent() {
+    let mut between = 0;
+    for seed in 1..=12 {
+        let (dir, _) = generate(&Options {
+            seed,
+            layout: Layout::Single,
+            constraints: Placement::BeforeData,
+            shuffle_order: true,
+            deferred_violations: false,
+            ..small()
+        });
+        let sql = fs::read_to_string(root(&dir).join("app/export.sql")).unwrap();
+        let lines: Vec<&str> = sql.lines().collect();
+        let first = |table: &str| {
+            lines
+                .iter()
+                .position(|l| inserted_table(l).as_deref() == Some(table))
+        };
+        let (Some(department), Some(employee)) = (first("APP.DEPARTMENTS"), first("APP.EMPLOYEES"))
+        else {
+            panic!("seed {seed}: no rows");
+        };
+        if department < employee {
+            between += 1;
+            let last_employee = lines
+                .iter()
+                .rposition(|l| inserted_table(l).as_deref() == Some("APP.EMPLOYEES"))
+                .unwrap();
+            assert!(
+                !lines[department..last_employee]
+                    .iter()
+                    .any(|l| l.trim().eq_ignore_ascii_case("COMMIT;")),
+                "seed {seed}: a COMMIT before the parents of the departments"
+            );
+        }
+    }
+    assert!(between > 0, "some seed loads the departments first");
+}
+
 #[test]
 fn the_deferred_foreign_key_can_be_left_without_violations() {
     let (_dir, manifest) = generate(&Options {

@@ -2,6 +2,7 @@
 source: tests/it/check_cli.rs
 expression: stdout
 ---
+app/data/DEPARTMENTS.sql:3: 10 rows with no COMMIT after them, from this row of APP.DEPARTMENTS to the end of the file
 app/data/DEPARTMENTS.sql:4: missing parent for APP.DEPARTMENTS_COUNTRY_FK: COUNTRY_CODE='XX'
 app/data/DEPARTMENTS.sql:6: duplicate key APP.DEPARTMENTS_NAME_UK: NAME='Myynti & markkinointi 1', first at app/data/DEPARTMENTS.sql:5
 app/data/DEPARTMENTS.sql:8: duplicate key APP.DEPARTMENTS_PK: DEPT_ID='30', first at app/data/DEPARTMENTS.sql:7

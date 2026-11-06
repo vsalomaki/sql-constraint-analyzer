@@ -1,5 +1,6 @@
 //! The rows of each table, the planted findings, and the order everything is written in.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -47,8 +48,9 @@ pub(crate) fn write_export(
     options: &Options,
     root: &Path,
     omitted: &[TableId],
+    uncommitted: &[TableId],
 ) -> io::Result<(Vec<OutputFile>, Vec<Finding>)> {
-    let mut w = Writer::new(options, root, omitted);
+    let mut w = Writer::new(options, root, omitted, uncommitted);
     let sizes = Sizes::from_rows(options.rows);
     let mut order_rng = Rng::new(options.seed, 0);
     for (schema, tables) in [(REF_SCHEMA, &REF_TABLES[..]), (APP_SCHEMA, &APP_TABLES[..])] {
@@ -218,9 +220,20 @@ impl Plant {
     }
 }
 
+/// The rows a file has had since its last commit: the first one's place and table, and how many.
+struct OpenRows {
+    at: Location,
+    table: String,
+    rows: u64,
+}
+
 struct Writer<'o> {
     options: &'o Options,
     omitted: &'o [TableId],
+    /// Tables whose rows get no commit after them.
+    uncommitted: &'o [TableId],
+    /// By file path.
+    open: BTreeMap<String, OpenRows>,
     render: Box<dyn Render>,
     rules: &'static Rules,
     out: Out,
@@ -239,12 +252,19 @@ struct Writer<'o> {
 }
 
 impl<'o> Writer<'o> {
-    fn new(options: &'o Options, root: &Path, omitted: &'o [TableId]) -> Self {
+    fn new(
+        options: &'o Options,
+        root: &Path,
+        omitted: &'o [TableId],
+        uncommitted: &'o [TableId],
+    ) -> Self {
         let render = options.dialect.render(options.noise);
         let rules = render.rules();
         Self {
             options,
             omitted,
+            uncommitted,
+            open: BTreeMap::new(),
             render,
             rules,
             out: Out::new(root, options.encoding),
@@ -286,6 +306,8 @@ impl<'o> Writer<'o> {
         let text = format!("{}{}", sql.text, self.eol);
         self.out
             .write(&path, schema, Role::Ddl, &text, sql.statements)?;
+        // DDL commits the rows before it.
+        self.open.remove(&path);
         Ok(())
     }
 
@@ -349,6 +371,11 @@ impl<'o> Writer<'o> {
     fn end_table(&mut self) -> io::Result<()> {
         if !self.omitted.contains(&self.table) {
             self.close_group()?;
+            if !self.uncommitted.contains(&self.table) && !self.commit_rolls_back() {
+                let commit = self.render.commit(self.eol);
+                self.write_data(&commit.text, commit.statements)?;
+                self.open.remove(&self.data_path);
+            }
             let footer = self.render.data_section(self.table, Edge::End, self.eol);
             if !footer.text.is_empty() {
                 self.write_data(&footer.text, footer.statements)?;
@@ -356,6 +383,19 @@ impl<'o> Writer<'o> {
         }
         self.loaded.push(self.table);
         Ok(())
+    }
+
+    /// Whether a commit after the current table's rows would roll back: a deferred foreign key, in place before the
+    /// data and checked at commit, of this table or one written before it, whose parent's rows aren't written yet.
+    fn commit_rolls_back(&self) -> bool {
+        self.rules.deferrable_foreign_keys
+            && !self.after_data()
+            && self.loaded.iter().chain([&self.table]).any(|&table| {
+                schema::constraints_of(table).any(|c| {
+                    matches!(c.kind, Kind::Foreign { deferred: true, parent, .. }
+                        if parent != self.table && !self.loaded.contains(&parent))
+                })
+            })
     }
 
     fn write_data(&mut self, text: &str, statements: u64) -> io::Result<Location> {
@@ -538,11 +578,11 @@ impl<'o> Writer<'o> {
         } else {
             0
         };
-        let table = match row.table_name {
+        let named = match row.table_name {
             Some(name) => rules.qualified(self.table.schema(), name),
             None => self.table.qualified(rules),
         };
-        let table = cased(rules, &table, case);
+        let table = cased(rules, &named, case);
         let wrap = self.options.noise.wrapped_statements && self.style_rng.below(2) == 0;
         let columns: Option<Vec<String>> = row.column_list.then(|| {
             row.cells
@@ -566,7 +606,7 @@ impl<'o> Writer<'o> {
             wrap,
             eol,
         };
-        if groupable {
+        let at = if groupable {
             if self.group_left == 0 {
                 self.group_left = 2 + self.style_rng.below(3);
                 self.write_data(&self.render.batch(Batch::Start, eol), 0)?;
@@ -576,14 +616,40 @@ impl<'o> Writer<'o> {
             if self.group_left == 0 {
                 self.write_data(&self.render.batch(Batch::End, eol), 1)?;
             }
-            Ok(at)
+            at
         } else {
             self.close_group()?;
-            self.write_data(&self.render.insert(&insert), 1)
+            self.write_data(&self.render.insert(&insert), 1)?
+        };
+        // The reference schema's files are checked as reference files, which need no commit.
+        if self.table.schema() != REF_SCHEMA {
+            self.open
+                .entry(self.data_path.clone())
+                .or_insert_with(|| OpenRows {
+                    at: at.clone(),
+                    table: named,
+                    rows: 0,
+                })
+                .rows += 1;
         }
+        Ok(at)
     }
 
     fn finish(mut self) -> io::Result<(Vec<OutputFile>, Vec<Finding>)> {
+        for (_, open) in std::mem::take(&mut self.open) {
+            self.findings.push(Finding {
+                kind: FindingKind::Uncommitted,
+                constraint: None,
+                table: open.table,
+                columns: Vec::new(),
+                file: Some(open.at.file),
+                line: Some(open.at.line),
+                key: Vec::new(),
+                first: None,
+                count: Some(open.rows),
+                assumed: false,
+            });
+        }
         for (fk, count) in std::mem::take(&mut self.empty_parents) {
             self.findings.push(Finding {
                 kind: FindingKind::ParentTableEmpty,

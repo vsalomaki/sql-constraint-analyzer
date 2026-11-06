@@ -25,7 +25,8 @@ trap 'rm -rf "$TMP" "$OUT"' EXIT
 export_for() {
     local dir=$1 rows=$2 layout=$3
     if [[ -f $dir/expected.json ]] && jq -e --argjson rows "$rows" --arg layout "$layout" \
-        '.options.rows == $rows and .options.layout == $layout' "$dir/expected.json" > /dev/null; then
+        '.options.rows == $rows and .options.layout == $layout and .options["omit-commit"] == []' \
+        "$dir/expected.json" > /dev/null; then
         return
     fi
     rm -rf "$dir"
@@ -145,14 +146,17 @@ measure_fix() {
     # The output's findings name the files fix wrote; `files` pairs each with its input.
     jq -cS '(.files | map({(.output): .input}) | add) as $input | .output.findings[] | .file = $input[.file]' \
         "$report" | sort > "$TMP/found"
-    # Each row in these exports is one line, so each removal moves the lines below it in its file up by one.
+    # Each row in these exports is one line, so each removal moves the lines below it in its file up by one, and
+    # takes one from the uncommitted rows it is among.
     jq -cS "$FIXED"'
         ([.findings[] | select(fixed)] | group_by(.file) | map({key: .[0].file, value: [.[].line] | unique})
             | from_entries) as $removed
         | .findings[]
         | select((fixed or .kind == "fk_load_order") | not)
         | .line as $line
-        | .line -= ([$removed[.file][]? | select(. < $line)] | length)' "$dir/expected.json" | sort > "$TMP/wanted"
+        | .line -= ([$removed[.file][]? | select(. < $line)] | length)
+        | if .kind == "uncommitted" then .count -= ([$removed[.file][]? | select(. >= $line)] | length) else . end
+        ' "$dir/expected.json" | sort > "$TMP/wanted"
     same "$TMP/wanted" "$TMP/found" "$run fix remaining findings"
 
     local rows_out

@@ -28,7 +28,8 @@
     },
     "line-ending": "lf",
     "encoding": "utf-8",
-    "omit-data": []
+    "omit-data": [],
+    "omit-commit": []
   },
   "files": [
     {
@@ -43,7 +44,7 @@
       "schema": "REF",
       "ddl": false,
       "data": true,
-      "statements": 6
+      "statements": 7
     },
     {
       "path": "ref/constraints.sql",
@@ -78,7 +79,7 @@
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 114
+      "statements": 121
     },
     {
       "path": "app/constraints.sql",
@@ -169,7 +170,7 @@
         "PROJECT_CODE"
       ],
       "file": "app/data.sql",
-      "line": 430,
+      "line": 432,
       "key": [
         "1005",
         "P00003"
@@ -182,7 +183,7 @@
         "HOURS"
       ],
       "file": "app/data.sql",
-      "line": 598
+      "line": 600
     },
     {
       "kind": "duplicate_key",
@@ -192,13 +193,13 @@
         "TS_ID"
       ],
       "file": "app/data.sql",
-      "line": 761,
+      "line": 763,
       "key": [
         "80"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 750
+        "line": 752
       }
     },
     {
@@ -209,7 +210,7 @@
         "DEPT_ID"
       ],
       "file": "app/data.sql",
-      "line": 886,
+      "line": 889,
       "key": [
         "-1"
       ]
@@ -222,7 +223,7 @@
         "MANAGER_ID"
       ],
       "file": "app/data.sql",
-      "line": 891,
+      "line": 894,
       "key": [
         "-2"
       ]
@@ -235,13 +236,13 @@
         "EMP_ID"
       ],
       "file": "app/data.sql",
-      "line": 932,
+      "line": 935,
       "key": [
         "1005"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 913
+        "line": 916
       }
     },
     {
@@ -252,13 +253,13 @@
         "EMAIL"
       ],
       "file": "app/data.sql",
-      "line": 952,
+      "line": 955,
       "key": [
         "user7@example.com"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 950
+        "line": 953
       }
     },
     {
@@ -268,7 +269,7 @@
         "EMAIL"
       ],
       "file": "app/data.sql",
-      "line": 972
+      "line": 975
     },
     {
       "kind": "not_null",
@@ -277,7 +278,7 @@
         "EMAIL"
       ],
       "file": "app/data.sql",
-      "line": 999
+      "line": 1002
     },
     {
       "kind": "unknown_column",
@@ -286,21 +287,21 @@
         "EMAIL_ADDR"
       ],
       "file": "app/data.sql",
-      "line": 1052
+      "line": 1055
     },
     {
       "kind": "value_count_mismatch",
       "table": "APP.EMPLOYEES",
       "columns": [],
       "file": "app/data.sql",
-      "line": 1093
+      "line": 1096
     },
     {
       "kind": "unknown_table",
       "table": "APP.EMPLOYEES_ARCHIVE",
       "columns": [],
       "file": "app/data.sql",
-      "line": 1112
+      "line": 1115
     },
     {
       "kind": "duplicate_key",
@@ -310,13 +311,13 @@
         "PROJECT_CODE"
       ],
       "file": "app/data.sql",
-      "line": 1178,
+      "line": 1182,
       "key": [
         "P00002"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 1176
+        "line": 1180
       }
     },
     {
@@ -327,13 +328,13 @@
         "EXTERNAL_REF"
       ],
       "file": "app/data.sql",
-      "line": 1198,
+      "line": 1202,
       "key": [
         "EXT-3"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 1187
+        "line": 1191
       }
     },
     {
@@ -344,7 +345,7 @@
         "EMP_ID"
       ],
       "file": "app/data.sql",
-      "line": 1238,
+      "line": 1243,
       "key": [
         "-1"
       ]
@@ -357,7 +358,7 @@
         "COUNTRY_CODE"
       ],
       "file": "app/data.sql",
-      "line": 1254,
+      "line": 1260,
       "key": [
         "XX"
       ]
@@ -370,13 +371,13 @@
         "NAME"
       ],
       "file": "app/data.sql",
-      "line": 1265,
+      "line": 1271,
       "key": [
         "Myynti & markkinointi 1"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 1256
+        "line": 1262
       }
     },
     {
@@ -387,13 +388,13 @@
         "DEPT_ID"
       ],
       "file": "app/data.sql",
-      "line": 1269,
+      "line": 1275,
       "key": [
         "30"
       ],
       "first": {
         "file": "app/data.sql",
-        "line": 1267
+        "line": 1273
       }
     },
     {
@@ -404,7 +405,7 @@
         "DEPT_ID"
       ],
       "file": "app/data.sql",
-      "line": 1280
+      "line": 1286
     },
     {
       "kind": "fk_missing_parent",
@@ -414,7 +415,7 @@
         "MANAGER_ID"
       ],
       "file": "app/data.sql",
-      "line": 1291,
+      "line": 1297,
       "key": [
         "-5"
       ]

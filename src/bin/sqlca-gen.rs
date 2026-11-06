@@ -46,6 +46,11 @@ struct Cli {
     /// Leave out a table's data, e.g. `APP.PROJECTS`; repeatable.
     #[arg(long)]
     omit_data: Vec<String>,
+
+    /// Leave out the COMMIT after a table's rows, e.g. `APP.PROJECTS`; repeatable. Rows of the main schema that
+    /// nothing commits after are a finding; the reference schema's files are reference files, which need none.
+    #[arg(long)]
+    omit_commit: Vec<String>,
 }
 
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -91,6 +96,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         line_ending: cli.line_endings,
         encoding: cli.encoding,
         omit_data: cli.omit_data,
+        omit_commit: cli.omit_commit,
     };
     let manifest = synth::generate(&options, &cli.out)
         .with_context(|| format!("writing {}", cli.out.display()))?;

@@ -106,6 +106,7 @@ impl InputArgs {
 }
 
 #[derive(Debug, Args)]
+#[expect(clippy::struct_excessive_bools, reason = "each is a command-line flag")]
 struct CheckArgs {
     #[command(flatten)]
     input: InputArgs,
@@ -122,6 +123,14 @@ struct CheckArgs {
     /// Without it, the check is of the end state: a parent anywhere in the input satisfies its children.
     #[arg(long)]
     load_order: bool,
+
+    /// Don't report rows at the end of a data file that no commit follows.
+    ///
+    /// By default, every data file's rows must be followed by a COMMIT, or by a statement that commits, such as
+    /// DDL in Oracle. `fix` adds a COMMIT at the end of a file that lacks one, unless a constraint is checked only at
+    /// commit (deferred): then an early COMMIT could roll the load back, so it leaves the finding for review.
+    #[arg(long)]
+    no_commit_check: bool,
 
     /// text (default), or JSON Lines: one finding per line, then a summary line.
     #[arg(long, value_enum, default_value_t)]
@@ -340,6 +349,7 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
         encoding: spec.encoding,
         default_schema: args.default_schema(spec.dialect),
         load_order: args.load_order,
+        commit_check: !args.no_commit_check,
     };
     let mut progress = progress::Progress::new(
         display(args.progress, verbosity),
@@ -407,6 +417,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         encoding: spec.encoding,
         default_schema: check.default_schema(spec.dialect),
         load_order: check.load_order,
+        commit_check: !check.no_commit_check,
     };
     let policy = fix::Policy {
         on_fk: args.on_fk,

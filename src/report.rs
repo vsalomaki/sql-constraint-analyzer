@@ -151,6 +151,7 @@ pub fn kind_name(kind: FindingKind) -> &'static str {
         FindingKind::UnknownColumn => "unknown column",
         FindingKind::ValueCountMismatch => "value count",
         FindingKind::ParentTableEmpty => "parent table empty",
+        FindingKind::Uncommitted => "no COMMIT",
     }
 }
 
@@ -222,6 +223,12 @@ pub fn describe(finding: &Finding) -> String {
             named("a foreign key of"),
             finding.count.unwrap_or(0)
         ),
+        FindingKind::Uncommitted => match finding.count.unwrap_or(0) {
+            1 => format!("1 row with no COMMIT after it, this row of {table}"),
+            n => format!(
+                "{n} rows with no COMMIT after them, from this row of {table} to the end of the file"
+            ),
+        },
     };
     let assumed = if finding.assumed {
         " (assumes dates written as text are YYYY-MM-DD)"

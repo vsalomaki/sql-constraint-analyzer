@@ -153,6 +153,14 @@ impl Catalog {
         &self.tables
     }
 
+    /// Whether an enabled constraint is checked only at commit, so a commit before the rows it needs rolls back.
+    pub fn defers_checks(&self) -> bool {
+        self.tables
+            .iter()
+            .flat_map(|t| &t.constraints)
+            .any(|c| c.state.enabled && c.state.initially_deferred)
+    }
+
     pub fn table(&self, id: TableId) -> Option<&Table> {
         self.tables.get(id.0)
     }
