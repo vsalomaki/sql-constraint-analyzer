@@ -141,7 +141,15 @@ fn json_lines_equal_the_manifest_in_both_modes() {
 
 #[test]
 fn a_clean_export_exits_0_and_minus_q_shows_only_the_result() {
-    let (code, stdout, stderr) = check_export(&fixture("sqlcl"), "utf-8", &["-q"]);
+    // SQLcl writes no COMMIT into its data files.
+    let (code, _, stderr) = check_export(&fixture("sqlcl"), "utf-8", &["-q"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(
+        stderr,
+        "Result     7 findings (no COMMIT 7) · 1 warnings · 0 errors → exit 1\n"
+    );
+    let (code, stdout, stderr) =
+        check_export(&fixture("sqlcl"), "utf-8", &["-q", "--no-commit-check"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stdout, "");
     assert_eq!(
@@ -177,7 +185,7 @@ fn the_cap_hides_findings_but_not_their_count() {
         stderr.contains("note: 2 more findings not shown, past the cap in 2 constraints"),
         "{stderr}"
     );
-    assert!(stderr.contains("Result     25 findings"), "{stderr}");
+    assert!(stderr.contains("Result     26 findings"), "{stderr}");
     let (_, _, stderr) = check_export(&root, "utf-8", &["--max-per-constraint", "1", "-v"]);
     assert!(
         stderr.contains("\n  1 of NULL in NOT NULL in APP.EMPLOYEES (EMAIL)\n"),
@@ -344,7 +352,9 @@ fn fix_writes_fixed_copies_and_a_report_folder() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("Result     3 findings (unknown table 1, unknown column 1, value count 1)"),
+        stderr.contains(
+            "Result     4 findings (unknown table 1, unknown column 1, value count 1, no COMMIT 1)"
+        ),
         "{stderr}"
     );
     let rejects = fs::read_to_string(fixed.join("sqlca-report/rejects.sql")).unwrap();
@@ -384,7 +394,7 @@ fn fix_writes_fixed_copies_and_a_report_folder() {
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.starts_with("Result     12 findings (missing parent 9,"),
+        stderr.starts_with("Result     13 findings (missing parent 9,"),
         "{stderr}"
     );
 }
@@ -395,11 +405,11 @@ fn a_report_folder_that_already_exists_in_the_output_stops_the_run() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in");
     fs::create_dir_all(input.join("SQLCA-REPORT")).unwrap();
-    let kept = "CREATE TABLE U (ID NUMBER);\nINSERT INTO U VALUES (1);\n";
+    let kept = "CREATE TABLE U (ID NUMBER);\nINSERT INTO U VALUES (1);\nCOMMIT;\n";
     fs::write(input.join("SQLCA-REPORT/rejects.sql"), kept).unwrap();
     fs::write(
         input.join("t.sql"),
-        "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nINSERT INTO T VALUES (1);\n",
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nINSERT INTO T VALUES (1);\nCOMMIT;\n",
     )
     .unwrap();
     let output = Command::cargo_bin("sqlca")
@@ -427,7 +437,7 @@ fn a_report_folder_that_already_exists_in_the_output_stops_the_run() {
 
 const ORPHAN: &str = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
                       CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
-                      INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (2, 9);\n";
+                      INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (2, 9);\nCOMMIT;\n";
 
 /// `sqlca fix t.sql ARGS` in a new folder holding `t.sql` with an orphan.
 #[expect(
@@ -547,7 +557,7 @@ fn fix_takes_the_policy_and_annotation_options() {
     let fixed = fs::read_to_string(dir.path().join("o/t.sql")).unwrap();
     assert!(
         fixed.ends_with(
-            "INSERT INTO P VALUES (1);\n-- sqlca fix removed an INSERT here (missing parent for a foreign key of C); see rejects.sql\n"
+            "INSERT INTO P VALUES (1);\n-- sqlca fix removed an INSERT here (missing parent for a foreign key of C); see rejects.sql\nCOMMIT;\n"
         ),
         "{fixed}"
     );

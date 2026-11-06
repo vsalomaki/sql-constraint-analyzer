@@ -10,3 +10,4 @@ Insert into REF.COUNTRIES (COUNTRY_CODE,NAME) values ('FR','France');
 Insert into REF.COUNTRIES (COUNTRY_CODE,NAME) values ('ES','Spain');
 Insert into REF.COUNTRIES (COUNTRY_CODE,NAME) values ('GB','United Kingdom');
 Insert into REF.COUNTRIES (COUNTRY_CODE,NAME) values ('US','United States');
+COMMIT;

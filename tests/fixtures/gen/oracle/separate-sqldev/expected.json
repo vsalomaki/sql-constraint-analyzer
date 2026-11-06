@@ -28,7 +28,8 @@
     },
     "line-ending": "lf",
     "encoding": "utf-8",
-    "omit-data": []
+    "omit-data": [],
+    "omit-commit": []
   },
   "files": [
     {
@@ -43,7 +44,7 @@
       "schema": "REF",
       "ddl": false,
       "data": true,
-      "statements": 12
+      "statements": 13
     },
     {
       "path": "app/tables/DEPARTMENTS.sql",
@@ -155,42 +156,42 @@
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 33
+      "statements": 34
     },
     {
       "path": "app/data/PROJECTS.sql",
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 10
+      "statements": 11
     },
     {
       "path": "app/data/ASSIGNMENTS.sql",
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 46
+      "statements": 47
     },
     {
       "path": "app/data/TIMESHEETS.sql",
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 107
+      "statements": 108
     },
     {
       "path": "app/data/LEGACY_NOTES.sql",
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 5
+      "statements": 6
     },
     {
       "path": "app/data/AuditLog.sql",
       "schema": "APP",
       "ddl": false,
       "data": true,
-      "statements": 6
+      "statements": 7
     }
   ],
   "findings": [
@@ -555,6 +556,14 @@
       "key": [
         "-1"
       ]
+    },
+    {
+      "kind": "uncommitted",
+      "table": "APP.DEPARTMENTS",
+      "columns": [],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 3,
+      "count": 10
     }
   ]
 }

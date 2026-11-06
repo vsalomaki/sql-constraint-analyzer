@@ -40,4 +40,5 @@ INSERT ALL
 VALUES ('US',
     'United States')
 SELECT 1 FROM DUAL;
+COMMIT;
 -- end of REF.COUNTRIES

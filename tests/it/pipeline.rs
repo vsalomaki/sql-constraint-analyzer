@@ -23,13 +23,16 @@ struct Options {
     encoding: Encoding,
 }
 
-/// What the schema pass makes of a piece, or else the rows pass: each piece belongs to exactly one.
+/// What the schema pass makes of a piece, or else the rows pass: each piece belongs to exactly one. The rows pass
+/// sees the schema pass's DDL only as a commit.
 #[expect(clippy::panic, reason = "a piece both passes take fails the test")]
 fn both_passes(piece: &Piece, encoding: Encoding) -> Result<Statement<'static>, ParseError> {
     let schema = DialectId::Oracle.parse(piece, encoding, Pass::Schema)?;
     let rows = DialectId::Oracle.parse(piece, encoding, Pass::Rows)?;
     match (schema, rows) {
-        (Some(statement), None) | (None, Some(statement)) => Ok(statement.into_owned()),
+        (Some(statement), None | Some(Statement::Commit)) | (None, Some(statement)) => {
+            Ok(statement.into_owned())
+        }
         other => panic!("{}: {other:?}", piece.line),
     }
 }

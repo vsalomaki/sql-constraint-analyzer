@@ -143,6 +143,13 @@ impl synth::Render for Render {
         }
     }
 
+    fn commit(&self, eol: &str) -> Sql {
+        Sql {
+            text: format!("{}{eol}", super::COMMIT),
+            statements: 1,
+        }
+    }
+
     fn load_script(&self, paths: &[&str], eol: &str) -> String {
         paths
             .iter()

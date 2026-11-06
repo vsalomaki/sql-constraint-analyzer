@@ -4,7 +4,7 @@ expression: stderr
 ---
 sqlca VERSION · check · end-state mode
 Inputs     23 files, 40.9 kB: 0 schema, 21 data, 2 reference
-[2/3] ref/data/COUNTRIES.sql  767 B  T
+[2/3] ref/data/COUNTRIES.sql  775 B  T
 [2/3] ref/tables/COUNTRIES.sql  511 B  T
 [2/3] app/tables/DEPARTMENTS.sql  871 B  T
 [2/3] app/tables/EMPLOYEES.sql  1.2 kB  T
@@ -25,9 +25,9 @@ Inputs     23 files, 40.9 kB: 0 schema, 21 data, 2 reference
 [2/3] app/data/PROJECTS.sql  1.3 kB  T
 [2/3] app/data/ASSIGNMENTS.sql  5.7 kB  T
 [2/3] app/data/TIMESHEETS.sql  14.8 kB  T
-[2/3] app/data/LEGACY_NOTES.sql  332 B  T
-[2/3] app/data/AuditLog.sql  714 B  T
+[2/3] app/data/LEGACY_NOTES.sql  340 B  T
+[2/3] app/data/AuditLog.sql  722 B  T
 [1/3] Schema    23 files, 40.9 kB · 8 tables · 23 keys (1 disabled, 1 deferred) · T
 [2/3] Rows      23 files, 40.9 kB · 215 rows · T · T
 [3/3] Resolve   T
-Result     25 findings (missing parent 9, duplicate key 9, NULL in NOT NULL 4, unknown table 1, unknown column 1, value count 1) · 0 warnings · 0 errors → exit 1
+Result     26 findings (missing parent 9, duplicate key 9, NULL in NOT NULL 4, unknown table 1, unknown column 1, value count 1, no COMMIT 1) · 0 warnings · 0 errors → exit 1

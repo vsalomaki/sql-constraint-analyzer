@@ -7,8 +7,17 @@ use crate::dialect::Pass;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{ParseError, Skip, Statement};
 
-/// Statements that change rows or tables in ways the checker doesn't replay; `CALL` runs a procedure that may.
-const NOT_FOLLOWED: [&str; 6] = ["UPDATE", "DELETE", "MERGE", "TRUNCATE", "DROP", "CALL"];
+/// Statements that change rows or tables in ways the checker doesn't replay; `CALL` runs a procedure that may, and
+/// `ROLLBACK` discards rows since the last commit.
+const NOT_FOLLOWED: [&str; 7] = [
+    "UPDATE", "DELETE", "MERGE", "TRUNCATE", "DROP", "CALL", "ROLLBACK",
+];
+
+/// DDL, which Oracle commits before and after, so it ends the transaction as `COMMIT` does. `ALTER SESSION` and
+/// `ALTER SYSTEM` aren't DDL.
+const COMMITTING: [&str; 7] = [
+    "CREATE", "ALTER", "GRANT", "REVOKE", "COMMENT", "RENAME", "AUDIT",
+];
 
 /// Words between `CREATE` and the kind of object, left out of a skip's name.
 const MODIFIERS: [&str; 6] = [
@@ -27,9 +36,17 @@ pub fn parse(
 ) -> Result<Option<Statement<'_>>, ParseError> {
     match pass {
         Pass::Schema => ddl::parse_ddl(piece, encoding),
-        Pass::Rows if piece.kind == PieceKind::Sql && ddl::is_table_ddl(&piece.text) => Ok(None),
+        // The schema pass reads table DDL; for the rows pass it only ends the transaction.
+        Pass::Rows if piece.kind == PieceKind::Sql && ddl::is_table_ddl(&piece.text) => {
+            Ok(Some(Statement::Commit))
+        }
         Pass::Rows => rows(piece, encoding).map(Some),
     }
+}
+
+/// `EXIT` or `QUIT`: SQL*Plus stops there, so nothing after it runs, and it may roll back.
+fn is_exit(word: &str) -> bool {
+    word == "EXIT" || word == "QUIT"
 }
 
 fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> {
@@ -55,6 +72,21 @@ fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> 
         .take(2)
         .collect();
     let head = words.join(" ");
+    let first = words.first().map_or("", String::as_str);
+    let second = words.get(1).map_or("", String::as_str);
+    let commits = match piece.kind {
+        PieceKind::Sql => {
+            first == "COMMIT"
+                || (COMMITTING.contains(&first)
+                    && !(first == "ALTER" && ["SESSION", "SYSTEM"].contains(&second)))
+        }
+        // A stored unit (`CREATE TRIGGER …`) is DDL too.
+        PieceKind::Block => first == "CREATE",
+        PieceKind::Command | PieceKind::RunAgain | PieceKind::Unterminated => false,
+    };
+    if commits {
+        return Ok(Statement::Commit);
+    }
     let changes_data = match piece.kind {
         PieceKind::Sql => words
             .first()
@@ -63,10 +95,10 @@ fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> 
         PieceKind::Block => words
             .first()
             .is_some_and(|w| w == "BEGIN" || w == "DECLARE"),
-        // `EXEC[UTE]` runs a procedure, which may change rows.
+        // `EXEC[UTE]` runs a procedure, which may change rows; nothing after `EXIT` runs.
         PieceKind::Command => words
             .first()
-            .is_some_and(|w| w.len() >= 4 && "EXECUTE".starts_with(w.as_str())),
+            .is_some_and(|w| (w.len() >= 4 && "EXECUTE".starts_with(w.as_str())) || is_exit(w)),
         // `/` runs the previous statement a second time.
         PieceKind::RunAgain => true,
         PieceKind::Unterminated => false,
@@ -97,7 +129,7 @@ mod tests {
         let schema = parse(piece, Encoding::Utf8, Pass::Schema)?;
         let rows = parse(piece, Encoding::Utf8, Pass::Rows)?;
         match (schema, rows) {
-            (Some(s), None) | (None, Some(s)) => Ok(s.into_owned()),
+            (Some(s), None | Some(Statement::Commit)) | (None, Some(s)) => Ok(s.into_owned()),
             other => panic!("{other:?}"),
         }
     }
@@ -134,15 +166,16 @@ mod tests {
         };
         let unused = |s: &str| Skip::Unused(s.to_owned());
         let not_followed = |s: &str| Skip::NotFollowed(s.to_owned());
-        assert_eq!(skip(PieceKind::Sql, "commit"), unused("COMMIT"));
         assert_eq!(
-            skip(PieceKind::Sql, "CREATE SEQUENCE \"APP\".\"S\""),
-            unused("CREATE SEQUENCE")
+            skip(PieceKind::Sql, "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY'"),
+            unused("ALTER SESSION")
         );
+        assert_eq!(skip(PieceKind::Sql, "rollback"), not_followed("ROLLBACK"));
         assert_eq!(
-            skip(PieceKind::Sql, "ALTER TRIGGER X ENABLE"),
-            unused("ALTER TRIGGER")
+            skip(PieceKind::Command, "EXIT ROLLBACK"),
+            not_followed("EXIT ROLLBACK")
         );
+        assert_eq!(skip(PieceKind::Command, "quit"), not_followed("QUIT"));
         assert_eq!(
             skip(PieceKind::Sql, "-- why\nupdate t set a = 1"),
             not_followed("UPDATE T")
@@ -160,13 +193,6 @@ mod tests {
             not_followed("BEGIN INSERT")
         );
         assert_eq!(
-            skip(
-                PieceKind::Block,
-                "CREATE OR REPLACE EDITIONABLE TRIGGER X BEFORE INSERT ON T"
-            ),
-            unused("CREATE TRIGGER")
-        );
-        assert_eq!(
             skip(PieceKind::Command, "SET DEFINE OFF"),
             unused("SET DEFINE")
         );
@@ -181,6 +207,37 @@ mod tests {
         assert_eq!(
             skip(PieceKind::Sql, "CALL app.load_rows()"),
             not_followed("CALL APP")
+        );
+    }
+
+    #[test]
+    fn a_commit_and_ddl_end_the_transaction() {
+        let rows = |kind, text| {
+            parse(&piece(kind, text), Encoding::Utf8, Pass::Rows)
+                .unwrap()
+                .map(Statement::into_owned)
+        };
+        for text in [
+            "commit",
+            "COMMIT WORK",
+            "CREATE SEQUENCE \"APP\".\"S\"",
+            "ALTER TRIGGER X ENABLE",
+            "CREATE TABLE T (A NUMBER)",
+            "ALTER TABLE T ADD PRIMARY KEY (A)",
+            "GRANT SELECT ON T TO U",
+        ] {
+            assert_eq!(
+                rows(PieceKind::Sql, text),
+                Some(Statement::Commit),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            rows(
+                PieceKind::Block,
+                "CREATE OR REPLACE TRIGGER X BEFORE INSERT ON T"
+            ),
+            Some(Statement::Commit)
         );
     }
 

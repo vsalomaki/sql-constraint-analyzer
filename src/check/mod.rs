@@ -12,12 +12,12 @@ pub use structure::{Row, StructureError, resolve_row};
 
 use crate::catalog::{Catalog, CatalogBuilder, Issue, Kind, Origin, Parent};
 use crate::dialect::{DialectId, Pass, Runner};
-use crate::finding::Finding;
+use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role};
 use crate::source::{Encoding, Piece, Span};
 use crate::statement::{Expr, Skip, Statement};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub dialect: DialectId,
     pub runner: Runner,
@@ -26,6 +26,21 @@ pub struct Options {
     pub default_schema: Option<String>,
     /// Judge rows in the order the files run, reporting children inserted before their parents.
     pub load_order: bool,
+    /// Report the rows at the end of a data file that no commit follows.
+    pub commit_check: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            dialect: DialectId::default(),
+            runner: Runner::default(),
+            encoding: Encoding::default(),
+            default_schema: None,
+            load_order: false,
+            commit_check: true,
+        }
+    }
 }
 
 /// Something about the run that isn't a finding, with where it is when that is known.
@@ -75,7 +90,7 @@ pub struct Report {
     pub catalog: Vec<Problem>,
     /// Statements that change data in ways the checker doesn't follow.
     pub not_followed: Vec<Problem>,
-    /// Statements the checker has no use for (commits, grants, sequences, SQL*Plus commands).
+    /// Statements the checker has no use for (sequences, SQL*Plus commands).
     pub unused: u64,
     pub rows: u64,
     pub schema: SchemaCounts,
@@ -251,6 +266,7 @@ fn check_rows(
     let mut not_followed = Vec::new();
     let mut unused = 0;
     let mut count = 0;
+    let mut uncommitted = Vec::new();
     let (files_read, bytes) = total(files, in_rows_pass);
     observer.pass(Pass::Rows, files_read, bytes);
     for (index, file) in files.iter().enumerate() {
@@ -260,6 +276,7 @@ fn check_rows(
         let reference = file.role == Role::Reference;
         let cuts = removed.get(index).map_or(&[][..], Vec::as_slice);
         let nulls = nulled.get(index).map_or(&[][..], Vec::as_slice);
+        let mut open = Open::default();
         read(
             &reading,
             file,
@@ -285,8 +302,12 @@ fn check_rows(
                             line: row.line,
                         };
                         match resolve_row(catalog, row) {
-                            Ok(resolved) => matched.push((resolved, row, at)),
+                            Ok(resolved) => {
+                                open.add(catalog, row);
+                                matched.push((resolved, row, at));
+                            }
                             Err(error) => {
+                                open.add(catalog, row);
                                 checker.structure(error.finding(catalog, row, file), reference);
                             }
                         }
@@ -296,13 +317,18 @@ fn check_rows(
                 Statement::Skipped(Skip::NotFollowed(what)) => {
                     not_followed.push(problem(&names, origin.file, Some(origin.line), what));
                 }
+                Statement::Commit => open = Open::default(),
                 Statement::Skipped(Skip::Unused(_)) => unused += 1,
                 _ => {}
             },
         )?;
+        if options.commit_check && file.role == Role::Data {
+            uncommitted.extend(open.finding(names.get(index).map_or("", String::as_str)));
+        }
     }
     observer.resolve();
     let (mut findings, warnings) = checker.finish();
+    findings.extend(uncommitted);
     sort_by_place(&mut findings, &names);
     report.findings = findings;
     report.warnings = warnings;
@@ -310,6 +336,38 @@ fn check_rows(
     report.unused = unused;
     report.rows = count;
     Ok(report)
+}
+
+/// The rows of a file since its last commit: how many, and the first one's line and table.
+#[derive(Default)]
+struct Open {
+    rows: u64,
+    first: Option<(u64, String)>,
+}
+
+impl Open {
+    fn add(&mut self, catalog: &Catalog, row: &crate::statement::InsertRow) {
+        self.rows += 1;
+        if self.first.is_none() {
+            self.first = Some((row.line, structure::table_name(catalog, row)));
+        }
+    }
+
+    fn finding(self, file: &str) -> Option<Finding> {
+        let (line, table) = self.first?;
+        Some(Finding {
+            kind: FindingKind::Uncommitted,
+            constraint: None,
+            table,
+            columns: Vec::new(),
+            file: Some(file.to_owned()),
+            line: Some(line),
+            key: Vec::new(),
+            first: None,
+            count: Some(self.rows),
+            assumed: false,
+        })
+    }
 }
 
 /// By the file's position in the run, then line; findings without a place last.

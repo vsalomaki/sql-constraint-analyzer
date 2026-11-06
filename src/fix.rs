@@ -6,6 +6,7 @@
 //! the input with the removed rows skipped and the changed values read as NULL: a removed parent can orphan its
 //! children, which the next round removes.
 //! Once a round removes nothing, the output is written and checked again, and that check is the verified result.
+//! A data file whose last rows have no commit after them also gets one added at its end.
 //!
 //! Rows are found again by file and line: the fix re-reads each file it changes anyway, so findings carry no spans.
 
@@ -173,6 +174,8 @@ pub struct FixReport {
     pub output: Report,
     pub rounds: usize,
     pub removed: Vec<Removal>,
+    /// The commits added at the end of files.
+    pub committed: Vec<Commit>,
     /// Fixable findings the fix left in place: assumed values, and rows it couldn't tell apart.
     pub left: Vec<Left>,
     /// Where each input went, by input position.
@@ -188,12 +191,25 @@ pub struct Output {
     /// The input's name, as findings show it.
     pub input: String,
     pub path: PathBuf,
-    /// Whether the fix removed rows from it.
+    /// Whether the fix changed it.
     pub changed: bool,
     /// Where an in-place fix kept the original.
     pub backup: Option<PathBuf>,
     /// The SHA-256 of the file's bytes before and after, for a file the fix wrote.
     pub sha256: Option<Digests>,
+}
+
+/// A commit added at the end of a file whose last rows had none after them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    /// The file's name, as findings show it.
+    pub file: String,
+    /// The input's end, where the text goes.
+    pub at: u64,
+    /// A line end when the file has none at its end, the annotation with `annotate`, and the commit.
+    pub text: Vec<u8>,
+    /// The finding it settles.
+    pub finding: Finding,
 }
 
 /// Lowercase hex SHA-256 digests.
@@ -248,15 +264,30 @@ pub fn fix_with(
         last,
         rounds,
         mut removed,
-        left,
+        mut left,
+        defers_checks,
     } = run_rounds(files, options, policy, &names, target.dry_run, observer)?;
+    let committed = if defers_checks {
+        let uncommitted = input
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Uncommitted);
+        left.extend(uncommitted.map(|finding| Left {
+            finding: finding.clone(),
+            why: "a constraint is checked at COMMIT, so an added COMMIT could roll the load back",
+        }));
+        Vec::new()
+    } else {
+        commits(files, &names, &input.findings, options, target.annotate)?
+    };
 
     let outputs: Vec<Output> = names
         .into_iter()
         .zip(&paths)
         .zip(&originals)
         .map(|((input, path), original)| {
-            let changed = removed.iter().any(|r| r.file == input);
+            let changed = removed.iter().any(|r| r.file == input)
+                || committed.iter().any(|c| c.file == input);
             Output {
                 path: path.clone(),
                 changed,
@@ -276,12 +307,18 @@ pub fn fix_with(
         return Err(FixError::BackupExists(taken.clone()));
     }
     describe_removals(&mut removed, files, target.annotate)?;
+    // Without a last round, the verify supplies it; the last round reads the input without the commits added.
+    let mut output = last.unwrap_or_default();
+    output.findings.retain(|f| {
+        f.kind != FindingKind::Uncommitted
+            || !committed.iter().any(|c| f.file.as_ref() == Some(&c.file))
+    });
     let mut report = FixReport {
         input,
-        // Without a last round, the verify supplies it.
-        output: last.unwrap_or_default(),
+        output,
         rounds,
         removed,
+        committed,
         left,
         files: Vec::new(),
         report: folder,
@@ -317,12 +354,12 @@ fn write(
     match target.destination {
         // The copies first: on a file system that ignores case, a copied folder can take the report's name.
         Destination::Out(_) => {
-            write_outputs(files, originals, &report.removed, &mut outputs, observer)?;
+            write_outputs(files, originals, &report, &mut outputs, observer)?;
             rejects(&report)?;
         }
         Destination::InPlace { .. } => {
             rejects(&report)?;
-            write_outputs(files, originals, &report.removed, &mut outputs, observer)?;
+            write_outputs(files, originals, &report, &mut outputs, observer)?;
         }
     }
     let written: Vec<InputFile> = files
@@ -365,6 +402,8 @@ struct Plan {
     rounds: usize,
     removed: Vec<Removal>,
     left: Vec<Left>,
+    /// Whether an enabled constraint is checked only at commit.
+    defers_checks: bool,
 }
 
 /// Checks the input, removes what the findings call for, and checks again without it, until a round removes nothing.
@@ -473,6 +512,7 @@ fn run_rounds(
         rounds,
         removed,
         left,
+        defers_checks: schema.catalog().defers_checks(),
     })
 }
 
@@ -523,12 +563,74 @@ fn nulled_values(removed: &[Removal], names: &[String]) -> Vec<Vec<Span>> {
         .collect()
 }
 
+/// A commit at the end of each data file whose last rows the input check found with none after them.
+fn commits(
+    files: &[InputFile],
+    names: &[String],
+    findings: &[Finding],
+    options: &check::Options,
+    annotate: bool,
+) -> Result<Vec<Commit>, FixError> {
+    let mut commits = Vec::new();
+    for finding in findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::Uncommitted)
+    {
+        let Some(file) = names
+            .iter()
+            .position(|n| finding.file.as_ref() == Some(n))
+            .and_then(|i| files.get(i))
+        else {
+            continue;
+        };
+        let (at, text) = commit_text(&file.path, options.dialect.commit_statement(), annotate)
+            .map_err(|source| write_error(&file.path, source))?;
+        commits.push(Commit {
+            file: check::display(&file.path),
+            at,
+            text,
+            finding: finding.clone(),
+        });
+    }
+    Ok(commits)
+}
+
+/// The end of the file at `path`, and what goes there to commit its last rows, each line ended as the file's last
+/// line is.
+fn commit_text(path: &Path, commit: &str, annotate: bool) -> io::Result<(u64, Vec<u8>)> {
+    const TAIL: u64 = 4096;
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(TAIL)))?;
+    let mut tail = Vec::new();
+    file.take(TAIL).read_to_end(&mut tail)?;
+    let crlf = tail
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .and_then(|i| i.checked_sub(1))
+        .is_some_and(|i| tail.get(i) == Some(&b'\r'));
+    let eol: &[u8] = if crlf { b"\r\n" } else { b"\n" };
+    let mut text = Vec::new();
+    if !tail.is_empty() && !tail.ends_with(b"\n") {
+        text.extend_from_slice(eol);
+    }
+    if annotate {
+        text.extend_from_slice(
+            b"-- sqlca fix added this COMMIT: no COMMIT followed the rows before it",
+        );
+        text.extend_from_slice(eol);
+    }
+    text.extend_from_slice(commit.as_bytes());
+    text.extend_from_slice(eol);
+    Ok((size, text))
+}
+
 /// Writes each output that differs from its input. Every backup is made before any input is rewritten, so a backup
 /// that fails leaves all inputs as they were.
 fn write_outputs(
     files: &[InputFile],
     originals: &[PathBuf],
-    removed: &[Removal],
+    report: &FixReport,
     outputs: &mut [Output],
     observer: &mut dyn check::Observer,
 ) -> Result<(), FixError> {
@@ -544,13 +646,20 @@ fn write_outputs(
         }
         let bytes = files.get(index).map_or(0, |f| f.bytes);
         observer.file(index, &output.input, bytes);
-        let edits: Vec<Edit> = removed
-            .iter()
-            .filter(|r| r.file == output.input)
+        let removals = report.removed.iter().filter(|r| r.file == output.input);
+        let commits = report.committed.iter().filter(|c| c.file == output.input);
+        let edits: Vec<Edit> = removals
             .map(|r| Edit {
                 span: r.span,
                 with: &r.replacement,
             })
+            .chain(commits.map(|c| Edit {
+                span: Span {
+                    start: c.at,
+                    end: c.at,
+                },
+                with: &c.text,
+            }))
             .collect();
         output.sha256 = splice(original, &edits, &output.path)?;
     }
@@ -1534,6 +1643,11 @@ pub fn summary(report: &FixReport) -> String {
     } else {
         format!("; {changed} kept with a foreign key set to NULL")
     };
+    let committed = match report.committed.len() {
+        0 => String::new(),
+        1 => "; COMMIT added to 1 file".to_owned(),
+        n => format!("; COMMIT added to {n} files"),
+    };
     let left = if report.left.is_empty() {
         String::new()
     } else {
@@ -1549,8 +1663,12 @@ pub fn summary(report: &FixReport) -> String {
     } else {
         "Fixed     "
     };
+    if report.removed.is_empty() && !committed.is_empty() {
+        let committed = committed.trim_start_matches("; ");
+        return format!("{fixed} {committed}{left}");
+    }
     format!(
-        "{fixed} {} rows in {} {rounds}{kinds}{changed}{left}",
+        "{fixed} {} rows in {} {rounds}{kinds}{changed}{committed}{left}",
         report.removed.len(),
         report.rounds
     )
@@ -1594,6 +1712,14 @@ pub fn write_report(report: &FixReport, out: &mut dyn Write) -> io::Result<()> {
         )?;
         for reason in &removal.reasons {
             writeln!(out, "    {}", reason.text)?;
+        }
+    }
+    if !report.committed.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "Committed:")?;
+        for commit in &report.committed {
+            writeln!(out, "  {}: COMMIT added at the end", commit.file)?;
+            writeln!(out, "    {}", crate::report::describe(&commit.finding))?;
         }
     }
     let changed: Vec<&Output> = report.files.iter().filter(|f| f.changed).collect();
@@ -1649,8 +1775,14 @@ struct JsonReport<'a> {
     rounds: usize,
     files: Vec<JsonFile<'a>>,
     removed: Vec<JsonRemoval<'a>>,
+    committed: Vec<JsonCommit<'a>>,
     left: Vec<JsonLeft<'a>>,
     output: JsonOutput<'a>,
+}
+#[derive(serde::Serialize)]
+struct JsonCommit<'a> {
+    file: &'a str,
+    finding: &'a Finding,
 }
 #[derive(serde::Serialize)]
 struct JsonFile<'a> {
@@ -1734,6 +1866,14 @@ pub fn write_json_report(report: &FixReport, out: &mut dyn Write) -> io::Result<
                     })
                     .collect(),
                 nulled: r.nulled.iter().map(|(c, _)| c.as_str()).collect(),
+            })
+            .collect(),
+        committed: report
+            .committed
+            .iter()
+            .map(|c| JsonCommit {
+                file: &c.file,
+                finding: &c.finding,
             })
             .collect(),
         left: report

@@ -83,13 +83,18 @@ fn count_matches(columns: usize, row: &InsertRow) -> Result<(), StructureError> 
     }
 }
 
+/// A row's table as findings show it: the catalog's name for it, else the name as written.
+pub(super) fn table_name(catalog: &Catalog, row: &InsertRow) -> String {
+    let table = match catalog.resolve(&row.table) {
+        Lookup::Found(id) => catalog.table(id).map(|t| catalog.display(&t.name)),
+        _ => None,
+    };
+    table.unwrap_or_else(|| catalog.display_name(&row.table))
+}
+
 impl StructureError {
     /// The finding for `row` in `file`.
     pub fn finding(&self, catalog: &Catalog, row: &InsertRow, file: &str) -> Finding {
-        let table = match catalog.resolve(&row.table) {
-            Lookup::Found(id) => catalog.table(id).map(|t| catalog.display(&t.name)),
-            _ => None,
-        };
         let (kind, columns) = match self {
             Self::UnknownTable => (FindingKind::UnknownTable, Vec::new()),
             Self::AmbiguousTable => (FindingKind::AmbiguousTable, Vec::new()),
@@ -99,7 +104,7 @@ impl StructureError {
         Finding {
             kind,
             constraint: None,
-            table: table.unwrap_or_else(|| catalog.display_name(&row.table)),
+            table: table_name(catalog, row),
             columns,
             file: Some(file.to_owned()),
             line: Some(row.line),
