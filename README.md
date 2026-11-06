@@ -3,7 +3,8 @@
 `sqlca` checks Oracle SQL exports (table DDL, constraints and `INSERT` statements, as SQL Developer writes them) for
 rows that violate the declared constraints, foreign keys above all, and can write fixed copies.
 
-> **Status:** early development. `sqlca check` and `sqlca inputs` work; `sqlca fix` is not implemented yet.
+> **Status:** early development. `sqlca check` and `sqlca inputs` work; `sqlca fix --out DIR` works, in-place
+> fixing is next.
 
 ## What it will do
 
@@ -23,7 +24,7 @@ sqlca check 'export/*.sql'                       # report violations
 sqlca check 'app/**/*.sql' --reference 'ref/**/*.sql'  # parents from another schema, not checked
 sqlca check --load-order --files-from order.txt  # also check the load order given
 sqlca check 'export/*.sql' --format json > findings.jsonl  # JSON Lines; progress stays on stderr
-sqlca fix 'export/*.sql' --out fixed/            # write fixed copies
+sqlca fix 'export/*.sql' --out fixed/            # write fixed copies; removed rows in fixed/sqlca-report/rejects.sql
 sqlca inputs --script load.sql                   # show what would be read, and in what order
 ```
 

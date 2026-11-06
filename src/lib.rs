@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod check;
 pub mod dialect;
 pub mod finding;
+pub mod fix;
 pub mod input;
 pub mod progress;
 pub mod report;

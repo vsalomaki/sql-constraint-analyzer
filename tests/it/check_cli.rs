@@ -265,3 +265,117 @@ fn progress_lines_and_the_catalog_listing() {
         assert!(verbose.contains(line), "{line:?} in {verbose}");
     }
 }
+
+#[test]
+fn fix_writes_fixed_copies_and_a_report_folder() {
+    let root = fixture("gen/oracle/separate-sqldev");
+    let out = tempfile::tempdir().unwrap();
+    let order = fs::read_to_string(root.join("order.txt")).unwrap();
+    let app = order
+        .lines()
+        .filter(|l| !l.starts_with("ref/"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fixed = out.path().join("fixed");
+    let output = Command::cargo_bin("sqlca")
+        .unwrap()
+        .current_dir(&root)
+        .args([
+            "fix",
+            "--files-from",
+            "-",
+            "--reference",
+            "ref/**/*.sql",
+            "--out",
+        ])
+        .arg(&fixed)
+        .write_stdin(app)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    // Structure errors are never fixed, so findings remain.
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "Fixed      22 rows in 1 round (missing parent 9, duplicate key 9, NULL in NOT NULL 4)"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Result     3 findings (unknown table 1, unknown column 1, value count 1)"),
+        "{stderr}"
+    );
+    let rejects = fs::read_to_string(fixed.join("sqlca-report/rejects.sql")).unwrap();
+    assert_eq!(rejects.matches("\n-- app/data/").count(), 22, "{rejects}");
+    let report = fs::read_to_string(fixed.join("sqlca-report/fix-report.txt")).unwrap();
+    assert!(report.contains("Still in the output:"), "{report}");
+    assert!(fixed.join("ref/data/COUNTRIES.sql").exists());
+    assert_eq!(
+        fs::read(root.join("ref/data/COUNTRIES.sql")).unwrap(),
+        fs::read(fixed.join("ref/data/COUNTRIES.sql")).unwrap()
+    );
+
+    let kept = out.path().join("kept");
+    let output = Command::cargo_bin("sqlca")
+        .unwrap()
+        .current_dir(&root)
+        .args([
+            "fix",
+            "--files-from",
+            "-",
+            "--reference",
+            "ref/**/*.sql",
+            "--on-fk",
+            "keep",
+            "-q",
+            "--out",
+        ])
+        .arg(&kept)
+        .write_stdin(
+            order
+                .lines()
+                .filter(|l| !l.starts_with("ref/"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("Result     12 findings (missing parent 9,"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_report_folder_that_already_exists_in_the_output_stops_the_run() {
+    // On a case-insensitive file system (macOS by default) the copied SQLCA-REPORT is the report folder.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    fs::create_dir_all(input.join("SQLCA-REPORT")).unwrap();
+    let kept = "CREATE TABLE U (ID NUMBER);\nINSERT INTO U VALUES (1);\n";
+    fs::write(input.join("SQLCA-REPORT/rejects.sql"), kept).unwrap();
+    fs::write(
+        input.join("t.sql"),
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nINSERT INTO T VALUES (1);\n",
+    )
+    .unwrap();
+    let output = Command::cargo_bin("sqlca")
+        .unwrap()
+        .current_dir(&input)
+        .args(["fix", "t.sql", "SQLCA-REPORT/rejects.sql", "-q", "--out"])
+        .arg(dir.path().join("out"))
+        .output()
+        .unwrap();
+    let copied = fs::read_to_string(dir.path().join("out/SQLCA-REPORT/rejects.sql")).unwrap();
+    assert_eq!(copied, kept, "the copied input is never overwritten");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let case_insensitive = dir.path().join("out/sqlca-report").exists()
+        && !dir.path().join("out/sqlca-report/fix-report.txt").exists();
+    if case_insensitive {
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("cannot make the report folder"), "{stderr}");
+    } else {
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+    }
+}

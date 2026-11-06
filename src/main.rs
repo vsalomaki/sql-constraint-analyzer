@@ -2,12 +2,13 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use sqlca::check;
 use sqlca::dialect::{DialectId, Runner};
 use sqlca::input::{self, InputSpec, Resolved};
 use sqlca::source::Encoding;
-use sqlca::{progress, report};
+use sqlca::{fix, progress, report};
 
 /// Checks Oracle SQL exports for rows that violate the declared constraints.
 ///
@@ -25,19 +26,9 @@ enum Command {
     /// Report rows that violate constraints; never writes files.
     Check(CheckArgs),
     /// Write fixed files to a folder or in place, with a report of every change.
-    Fix(CheckArgs),
+    Fix(FixArgs),
     /// Show the files that would be read, their roles and their order, then exit.
     Inputs(InputsArgs),
-}
-
-impl Command {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Check(_) => "check",
-            Self::Fix(_) => "fix",
-            Self::Inputs(_) => "inputs",
-        }
-    }
 }
 
 /// Where the SQL comes from. The order of the inputs is the load order, so it is always explicit: give one of
@@ -180,6 +171,29 @@ impl CheckArgs {
 }
 
 #[derive(Debug, Args)]
+struct FixArgs {
+    #[command(flatten)]
+    check: CheckArgs,
+
+    /// Write fixed copies under DIR, a new or empty folder, keeping the inputs' paths relative to the folder they
+    /// share; the originals stay untouched. Unchanged files are hard links where the file system allows.
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+
+    /// A row whose parent key exists nowhere in the input: drop it, or keep it.
+    #[arg(long, value_enum, default_value_t)]
+    on_fk: fix::OnRow,
+
+    /// The later rows of a duplicate primary or unique key: drop them (keep-first), or keep them all.
+    #[arg(long, value_enum, default_value_t)]
+    on_duplicate: fix::OnDuplicate,
+
+    /// A row with NULL in a NOT NULL column: drop it, or keep it.
+    #[arg(long, value_enum, default_value_t)]
+    on_not_null: fix::OnRow,
+}
+
+#[derive(Debug, Args)]
 struct InputsArgs {
     #[command(flatten)]
     input: InputArgs,
@@ -224,11 +238,7 @@ fn run(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<Ex
             Ok(ExitCode::SUCCESS)
         }
         Command::Check(args) => check(args, out, err),
-        Command::Fix(args) => {
-            let resolved = input::resolve(&args.input.spec(), &mut io::stdin().lock())?;
-            resolved.require_data()?;
-            anyhow::bail!("`sqlca {}` is not implemented yet", cli.command.name())
-        }
+        Command::Fix(args) => fix(args, out, err),
     }
 }
 
@@ -269,7 +279,7 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
     if args.format == report::Format::Json {
         report::write_json_summary(&result, &omitted, out)?;
     }
-    report::write_run(&result, &phases, &omitted, verbosity, err)?;
+    report::write_run(&result, Some(&phases), &omitted, verbosity, err)?;
     Ok(ExitCode::from(report::exit_code(&result)))
 }
 
@@ -280,6 +290,80 @@ fn terminal_width() -> usize {
         .and_then(|c| c.parse().ok())
         .filter(|&w| w > 0)
         .unwrap_or(80)
+}
+
+fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Result<ExitCode> {
+    let check = &args.check;
+    let spec = check.input.spec();
+    let resolved = input::resolve(&spec, &mut io::stdin().lock())?;
+    resolved.require_data()?;
+    let verbosity = check.verbosity();
+    let quiet = verbosity == report::Verbosity::Quiet;
+    if !quiet {
+        let mode = if check.load_order {
+            "load-order mode"
+        } else {
+            "end-state mode"
+        };
+        writeln!(err, "sqlca {} · fix · {mode}", env!("CARGO_PKG_VERSION"))?;
+        write_header(&resolved, err)?;
+        writeln!(
+            err,
+            "Output     fixed copies under {}, originals untouched",
+            args.out.display()
+        )?;
+    }
+    let options = check::Options {
+        dialect: spec.dialect,
+        runner: spec.runner,
+        encoding: spec.encoding,
+        default_schema: check.default_schema(spec.dialect),
+        load_order: check.load_order,
+    };
+    let policy = fix::Policy {
+        on_fk: args.on_fk,
+        on_duplicate: args.on_duplicate,
+        on_not_null: args.on_not_null,
+    };
+    let result = fix::fix(&resolved.files, &options, policy, &args.out)?;
+    let folder = args.out.join(fix::REPORT_FOLDER);
+    // A new folder only: on a case-insensitive file system an input's copied folder can already have this name.
+    std::fs::create_dir(&folder).with_context(|| {
+        format!(
+            "cannot make the report folder {}: something in the output already has that name",
+            folder.display()
+        )
+    })?;
+    fix::write_file(&folder.join("rejects.sql"), |w| {
+        fix::write_rejects(&result.removed, w)
+    })?;
+    fix::write_file(&folder.join("fix-report.txt"), |w| {
+        fix::write_report(&result, &args.out, w)
+    })?;
+
+    let omitted = report::write_findings(
+        &result.output.findings,
+        check.format,
+        check.max_per_constraint,
+        out,
+    )?;
+    if check.format == report::Format::Json {
+        report::write_json_summary(&result.output, &omitted, out)?;
+    }
+    if !quiet {
+        writeln!(err, "{}", fix::summary(&result))?;
+        for left in &result.left {
+            writeln!(
+                err,
+                "warning: {}: left in place: {}",
+                report::describe(&left.finding),
+                left.why
+            )?;
+        }
+        writeln!(err, "Report     {}", folder.display())?;
+    }
+    report::write_run(&result.output, None, &omitted, verbosity, err)?;
+    Ok(ExitCode::from(report::exit_code(&result.output)))
 }
 
 fn write_header(resolved: &Resolved, err: &mut dyn Write) -> io::Result<()> {

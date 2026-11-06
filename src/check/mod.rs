@@ -61,7 +61,7 @@ pub enum Warning {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Report {
     /// By file, then line; summary findings last.
     pub findings: Vec<Finding>,
@@ -258,7 +258,7 @@ fn schema_counts(catalog: &Catalog) -> SchemaCounts {
 }
 
 /// A path as the user gave it, with `/` between its parts on Windows too, so findings read the same everywhere.
-fn display(path: &Path) -> String {
+pub fn display(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
         text.replace('\\', "/")
