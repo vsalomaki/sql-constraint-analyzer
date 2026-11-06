@@ -1,21 +1,41 @@
 //! The statements a dialect's parser produces, in neutral terms: what the catalog and the checker need, and where
 //! in the file each value sits, for the fix pass. A dialect parses its own syntax into these; nothing here names one.
 
+use std::borrow::Cow;
+
 use crate::source::Span;
 
 /// An identifier as the dialect resolves it: an unquoted one already folded by the dialect's rules, a quoted one as
 /// written (without its quotes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Ident {
-    pub value: String,
+pub struct Ident<'a> {
+    pub value: Cow<'a, str>,
     pub quoted: bool,
+}
+
+impl Ident<'_> {
+    pub fn into_owned(self) -> Ident<'static> {
+        Ident {
+            value: Cow::Owned(self.value.into_owned()),
+            quoted: self.quoted,
+        }
+    }
 }
 
 /// A possibly schema-qualified name, as written.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Name {
-    pub schema: Option<Ident>,
-    pub name: Ident,
+pub struct Name<'a> {
+    pub schema: Option<Ident<'a>>,
+    pub name: Ident<'a>,
+}
+
+impl Name<'_> {
+    pub fn into_owned(self) -> Name<'static> {
+        Name {
+            schema: self.schema.map(Ident::into_owned),
+            name: self.name.into_owned(),
+        }
+    }
 }
 
 /// The family a column's type belongs to: what decides how its values compare.
@@ -106,19 +126,19 @@ impl ConstraintState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstraintKind {
     PrimaryKey {
-        columns: Vec<Ident>,
+        columns: Vec<Ident<'static>>,
     },
     Unique {
-        columns: Vec<Ident>,
+        columns: Vec<Ident<'static>>,
     },
     ForeignKey {
-        columns: Vec<Ident>,
-        parent: Name,
+        columns: Vec<Ident<'static>>,
+        parent: Name<'static>,
         /// `None`: no column list, which means the parent's primary key.
-        parent_columns: Option<Vec<Ident>>,
+        parent_columns: Option<Vec<Ident<'static>>>,
     },
     NotNull {
-        column: Ident,
+        column: Ident<'static>,
     },
     /// Kept as written; checking CHECK constraints is a later milestone.
     Check {
@@ -128,7 +148,7 @@ pub enum ConstraintKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintDef {
-    pub name: Option<Ident>,
+    pub name: Option<Ident<'static>>,
     pub kind: ConstraintKind,
     pub state: ConstraintState,
 }
@@ -136,14 +156,14 @@ pub struct ConstraintDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnDefault {
     /// An expression the checker can evaluate, such as a literal.
-    Value(Expr),
+    Value(Expr<'static>),
     /// One it can't, such as `SYSTIMESTAMP` or a sequence.
     Opaque(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDef {
-    pub name: Ident,
+    pub name: Ident<'static>,
     pub data_type: DataType,
     pub default: Option<ColumnDefault>,
     /// `DEFAULT ON NULL`: an explicit NULL takes the default.
@@ -160,10 +180,10 @@ pub enum AlterAction {
     AddConstraint(ConstraintDef),
     AddColumns(Vec<ColumnDef>),
     /// `MODIFY (col NOT NULL …)` and the like: the constraints the modified columns gain.
-    ModifyColumns(Vec<(Ident, Vec<ConstraintDef>)>),
+    ModifyColumns(Vec<(Ident<'static>, Vec<ConstraintDef>)>),
     /// `ENABLE` / `DISABLE` / `MODIFY CONSTRAINT name …`: what changes in a constraint's state.
     ChangeConstraint {
-        name: Ident,
+        name: Ident<'static>,
         change: StateChange,
     },
     /// Anything else, as written: storage, renames, drops.
@@ -172,58 +192,105 @@ pub enum AlterAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexColumn {
-    Column(Ident),
+    Column(Ident<'static>),
     /// A function-based index part, as written; a unique index with one is not checked.
     Expression(String),
 }
 
 /// A value expression in an `INSERT`, as written. Evaluating it is the dialect's job (`to_date` is Oracle's).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
+pub enum Expr<'a> {
     Null,
     /// A numeric literal as written: `100`, `1.0E2`, `.5`.
-    Number(String),
+    Number(Cow<'a, str>),
     /// A string literal's content, quotes removed and doubled quotes undone, as stored (not decoded).
     String {
-        bytes: Vec<u8>,
+        bytes: Cow<'a, [u8]>,
         national: bool,
     },
     /// `DATE '…'`, `TIMESTAMP '…'`.
     Typed {
-        type_name: String,
-        text: String,
+        type_name: Cow<'a, str>,
+        text: Cow<'a, str>,
     },
-    /// A function call such as `to_date('17-JUN-03','DD-MON-RR')`; the name upper-cased.
+    /// A function call such as `to_date('17-JUN-03','DD-MON-RR')`; the name as an identifier, so folded.
     Call {
-        function: String,
-        args: Vec<Expr>,
+        function: Cow<'a, str>,
+        args: Vec<Expr<'a>>,
     },
-    Negate(Box<Expr>),
+    Negate(Box<Expr<'a>>),
     /// `seq.NEXTVAL`.
-    NextValue(Name),
+    NextValue(Name<'a>),
     /// The `DEFAULT` keyword as a value.
     Default,
     /// Anything else, as written: the checker treats it as unknown.
-    Other(String),
+    Other(Cow<'a, str>),
+}
+
+impl Expr<'_> {
+    pub fn into_owned(self) -> Expr<'static> {
+        let owned = |text: Cow<'_, str>| Cow::Owned(text.into_owned());
+        match self {
+            Self::Null => Expr::Null,
+            Self::Number(text) => Expr::Number(owned(text)),
+            Self::String { bytes, national } => Expr::String {
+                bytes: Cow::Owned(bytes.into_owned()),
+                national,
+            },
+            Self::Typed { type_name, text } => Expr::Typed {
+                type_name: owned(type_name),
+                text: owned(text),
+            },
+            Self::Call { function, args } => Expr::Call {
+                function: owned(function),
+                args: args.into_iter().map(Expr::into_owned).collect(),
+            },
+            Self::Negate(inner) => Expr::Negate(Box::new(inner.into_owned())),
+            Self::NextValue(name) => Expr::NextValue(name.into_owned()),
+            Self::Default => Expr::Default,
+            Self::Other(text) => Expr::Other(owned(text)),
+        }
+    }
 }
 
 /// One value in a row, with where it sits in the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Value {
-    pub expr: Expr,
+pub struct Value<'a> {
+    pub expr: Expr<'a>,
     pub span: Span,
 }
 
 /// One row an `INSERT` adds. A multi-table insert (`INSERT ALL`) has one per `INTO` clause, each with its own table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InsertRow {
-    pub table: Name,
+pub struct InsertRow<'a> {
+    pub table: Name<'a>,
     /// `None`: no column list, so `values` follow the table's column order.
-    pub columns: Option<Vec<Ident>>,
-    pub values: Vec<Value>,
+    pub columns: Option<Vec<Ident<'a>>>,
+    pub values: Vec<Value<'a>>,
     /// The row's clause in the file (the whole statement, or one `INTO … VALUES (…)`), and the line it starts on.
     pub span: Span,
     pub line: u64,
+}
+
+impl InsertRow<'_> {
+    pub fn into_owned(self) -> InsertRow<'static> {
+        InsertRow {
+            table: self.table.into_owned(),
+            columns: self
+                .columns
+                .map(|columns| columns.into_iter().map(Ident::into_owned).collect()),
+            values: self
+                .values
+                .into_iter()
+                .map(|v| Value {
+                    expr: v.expr.into_owned(),
+                    span: v.span,
+                })
+                .collect(),
+            span: self.span,
+            line: self.line,
+        }
+    }
 }
 
 /// Why a statement was not parsed into something the checker uses.
@@ -237,24 +304,58 @@ pub enum Skip {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Statement {
+/// A statement; only an insert's rows borrow from the text they were read from.
+pub enum Statement<'a> {
     CreateTable {
-        name: Name,
+        name: Name<'static>,
         columns: Vec<ColumnDef>,
         constraints: Vec<ConstraintDef>,
     },
     AlterTable {
-        table: Name,
+        table: Name<'static>,
         actions: Vec<AlterAction>,
     },
     CreateIndex {
-        name: Name,
-        table: Name,
+        name: Name<'static>,
+        table: Name<'static>,
         unique: bool,
         columns: Vec<IndexColumn>,
     },
-    Insert(Vec<InsertRow>),
+    Insert(Vec<InsertRow<'a>>),
     Skipped(Skip),
+}
+
+impl Statement<'_> {
+    /// The statement with nothing borrowed, to keep.
+    pub fn into_owned(self) -> Statement<'static> {
+        match self {
+            Self::CreateTable {
+                name,
+                columns,
+                constraints,
+            } => Statement::CreateTable {
+                name,
+                columns,
+                constraints,
+            },
+            Self::AlterTable { table, actions } => Statement::AlterTable { table, actions },
+            Self::CreateIndex {
+                name,
+                table,
+                unique,
+                columns,
+            } => Statement::CreateIndex {
+                name,
+                table,
+                unique,
+                columns,
+            },
+            Self::Insert(rows) => {
+                Statement::Insert(rows.into_iter().map(InsertRow::into_owned).collect())
+            }
+            Self::Skipped(skip) => Statement::Skipped(skip),
+        }
+    }
 }
 
 /// A statement that could not be read, with where the reading stopped.

@@ -2,19 +2,24 @@
 //! with the date masks it uses. Anything that depends on the session (`SYSDATE`, NLS settings, a sequence) is
 //! unknown.
 
+use std::borrow::Cow;
+
 use super::RULES;
 use crate::source::Encoding;
 use crate::statement::Expr;
 use crate::value::{self, Literal};
 
-pub fn evaluate(expr: &Expr, encoding: Encoding) -> Literal {
+pub fn evaluate<'a>(expr: &Expr<'a>, encoding: Encoding) -> Literal<'a> {
     match expr {
         Expr::Null => Literal::Null,
         Expr::Number(text) if text.ends_with(['f', 'F', 'd', 'D']) => {
             Literal::Unknown(format!("the binary floating-point literal {text}"))
         }
         Expr::Number(text) => Literal::Number(text.clone()),
-        Expr::String { bytes, .. } => Literal::Text(encoding.decode(bytes).into_owned()),
+        Expr::String { bytes, .. } => Literal::Text(match bytes {
+            Cow::Borrowed(bytes) => encoding.decode(bytes),
+            Cow::Owned(bytes) => Cow::Owned(encoding.decode(bytes).into_owned()),
+        }),
         Expr::Typed { type_name, text } => typed(type_name, text),
         Expr::Call { function, args } => call(function, args, encoding),
         Expr::Negate(inner) => negate(evaluate(inner, encoding)),
@@ -24,7 +29,7 @@ pub fn evaluate(expr: &Expr, encoding: Encoding) -> Literal {
     }
 }
 
-fn typed(type_name: &str, text: &str) -> Literal {
+fn typed(type_name: &str, text: &str) -> Literal<'static> {
     match (type_name, value::parse_iso(text)) {
         ("DATE", Some(Literal::Date(days))) => Literal::Date(days),
         ("TIMESTAMP", Some(Literal::Date(days))) => Literal::Timestamp {
@@ -36,12 +41,18 @@ fn typed(type_name: &str, text: &str) -> Literal {
     }
 }
 
-fn negate(literal: Literal) -> Literal {
+fn negate(literal: Literal<'_>) -> Literal<'_> {
     match literal {
         Literal::Number(text) | Literal::Text(text) if !text.is_empty() => {
-            Literal::Number(match text.strip_prefix('-') {
-                Some(positive) => positive.to_owned(),
-                None => format!("-{}", text.strip_prefix('+').unwrap_or(&text)),
+            Literal::Number(match text {
+                Cow::Borrowed(text) => match text.strip_prefix('-') {
+                    Some(positive) => Cow::Borrowed(positive),
+                    None => Cow::Owned(format!("-{}", text.strip_prefix('+').unwrap_or(text))),
+                },
+                Cow::Owned(text) => Cow::Owned(match text.strip_prefix('-') {
+                    Some(positive) => positive.to_owned(),
+                    None => format!("-{}", text.strip_prefix('+').unwrap_or(&text)),
+                }),
             })
         }
         Literal::Null | Literal::Text(_) => Literal::Null,
@@ -50,7 +61,7 @@ fn negate(literal: Literal) -> Literal {
     }
 }
 
-fn call(function: &str, args: &[Expr], encoding: Encoding) -> Literal {
+fn call<'a>(function: &str, args: &[Expr<'a>], encoding: Encoding) -> Literal<'a> {
     match (function, args) {
         ("TO_DATE", [text, mask]) => convert(text, mask, Conversion::Date, encoding),
         ("TO_TIMESTAMP", [text, mask]) => convert(text, mask, Conversion::Timestamp, encoding),
@@ -64,7 +75,7 @@ fn call(function: &str, args: &[Expr], encoding: Encoding) -> Literal {
 }
 
 /// A function's argument; `''` passed to a function is NULL.
-fn argument(expr: &Expr, encoding: Encoding) -> Literal {
+fn argument<'a>(expr: &Expr<'a>, encoding: Encoding) -> Literal<'a> {
     match evaluate(expr, encoding) {
         Literal::Text(text) if text.is_empty() && RULES.empty_string_is_null => Literal::Null,
         literal => literal,
@@ -77,7 +88,12 @@ enum Conversion {
     Timestamp,
 }
 
-fn convert(text: &Expr, mask: &Expr, conversion: Conversion, encoding: Encoding) -> Literal {
+fn convert(
+    text: &Expr<'_>,
+    mask: &Expr<'_>,
+    conversion: Conversion,
+    encoding: Encoding,
+) -> Literal<'static> {
     match (argument(text, encoding), argument(mask, encoding)) {
         (Literal::Null, _) | (_, Literal::Null) => Literal::Null,
         (Literal::Text(text), Literal::Text(mask)) => {
@@ -242,7 +258,7 @@ struct Parts {
 }
 
 /// `text` read by `mask`, as Oracle's `TO_DATE` or `TO_TIMESTAMP` would; the error is the reason it's unknown.
-fn datetime(text: &str, mask: &str, conversion: Conversion) -> Result<Literal, String> {
+fn datetime(text: &str, mask: &str, conversion: Conversion) -> Result<Literal<'static>, String> {
     let mismatch = || format!("`{text}` read with the date mask `{mask}`");
     let mut parts = Parts::default();
     let mut rest = text.as_bytes();
@@ -336,37 +352,45 @@ mod tests {
     use super::*;
     use crate::statement::Name;
 
-    fn text(s: &str) -> Expr {
+    fn text(s: &str) -> Expr<'static> {
         Expr::String {
-            bytes: s.as_bytes().to_vec(),
+            bytes: s.as_bytes().to_vec().into(),
             national: false,
         }
     }
 
-    fn call(function: &str, args: Vec<Expr>) -> Expr {
+    fn call(function: &str, args: Vec<Expr<'static>>) -> Expr<'static> {
         Expr::Call {
-            function: function.into(),
+            function: function.to_owned().into(),
             args,
         }
     }
 
-    fn eval(expr: &Expr) -> Literal {
+    fn eval<'a>(expr: &Expr<'a>) -> Literal<'a> {
         evaluate(expr, Encoding::Utf8)
     }
 
-    fn to_date(t: &str, mask: &str) -> Literal {
+    fn to_date(t: &str, mask: &str) -> Literal<'static> {
         eval(&call("TO_DATE", vec![text(t), text(mask)]))
     }
 
-    fn to_timestamp(t: &str, mask: &str) -> Literal {
+    fn to_timestamp(t: &str, mask: &str) -> Literal<'static> {
         eval(&call("TO_TIMESTAMP", vec![text(t), text(mask)]))
     }
 
-    fn date(y: i64, m: u32, d: u32) -> Literal {
+    fn date(y: i64, m: u32, d: u32) -> Literal<'static> {
         Literal::Date(value::days_from_date(y, m, d).unwrap())
     }
 
-    fn at(y: i64, m: u32, d: u32, hour: i64, minute: i64, second: i64, nanos: u32) -> Literal {
+    fn at(
+        y: i64,
+        m: u32,
+        d: u32,
+        hour: i64,
+        minute: i64,
+        second: i64,
+        nanos: u32,
+    ) -> Literal<'static> {
         Literal::Timestamp {
             seconds: value::days_from_date(y, m, d).unwrap() * SECONDS_PER_DAY
                 + hour * 3600
@@ -387,10 +411,10 @@ mod tests {
             eval(&Expr::Number("1.0E2".into())),
             Literal::Number("1.0E2".into())
         );
-        assert_eq!(eval(&text("")), Literal::Text(String::new()));
+        assert_eq!(eval(&text("")), Literal::Text("".into()));
         assert!(is_unknown(&eval(&Expr::Number("3f".into()))));
         let latin1 = Expr::String {
-            bytes: b"M\xe4kinen".to_vec(),
+            bytes: b"M\xe4kinen".to_vec().into(),
             national: true,
         };
         assert_eq!(
@@ -401,7 +425,7 @@ mod tests {
 
     #[test]
     fn negation_flips_the_sign_of_numbers_and_numeric_text() {
-        let neg = |e: Expr| eval(&Expr::Negate(Box::new(e)));
+        let neg = |e: Expr<'static>| eval(&Expr::Negate(Box::new(e))).into_owned();
         assert_eq!(
             neg(Expr::Number("1E0".into())),
             Literal::Number("-1E0".into())
@@ -528,8 +552,8 @@ mod tests {
     fn date_and_timestamp_literals_are_iso() {
         let typed = |type_name: &str, t: &str| {
             eval(&Expr::Typed {
-                type_name: type_name.into(),
-                text: t.into(),
+                type_name: type_name.to_owned().into(),
+                text: t.to_owned().into(),
             })
         };
         assert_eq!(typed("DATE", "2003-06-17"), date(2003, 6, 17));

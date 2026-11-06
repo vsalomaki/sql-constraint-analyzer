@@ -25,11 +25,11 @@ struct Options {
 
 /// What the schema pass makes of a piece, or else the rows pass: each piece belongs to exactly one.
 #[expect(clippy::panic, reason = "a piece both passes take fails the test")]
-fn both_passes(piece: &Piece, encoding: Encoding) -> Result<Statement, ParseError> {
+fn both_passes(piece: &Piece, encoding: Encoding) -> Result<Statement<'static>, ParseError> {
     let schema = DialectId::Oracle.parse(piece, encoding, Pass::Schema)?;
     let rows = DialectId::Oracle.parse(piece, encoding, Pass::Rows)?;
     match (schema, rows) {
-        (Some(statement), None) | (None, Some(statement)) => Ok(statement),
+        (Some(statement), None) | (None, Some(statement)) => Ok(statement.into_owned()),
         other => panic!("{}: {other:?}", piece.line),
     }
 }
@@ -67,7 +67,7 @@ fn every_piece_of_every_export_belongs_to_exactly_one_pass() {
     }
 }
 
-fn catalog(statements: &[(String, Statement, Origin)]) -> Catalog {
+fn catalog(statements: &[(String, Statement<'static>, Origin)]) -> Catalog {
     let mut builder = CatalogBuilder::new(DialectId::Oracle.rules(), None);
     for (_, statement, origin) in statements {
         builder.add(statement.clone(), *origin);
@@ -82,7 +82,7 @@ fn catalog(statements: &[(String, Statement, Origin)]) -> Catalog {
     clippy::unwrap_used,
     reason = "test SQL that doesn't parse fails the test"
 )]
-fn parse(sql: &str) -> Vec<(String, Statement, Origin)> {
+fn parse(sql: &str) -> Vec<(String, Statement<'static>, Origin)> {
     DialectId::Oracle
         .pieces(sql.as_bytes(), Runner::SqlPlus, 0)
         .map(|piece| {
@@ -101,7 +101,7 @@ fn parse(sql: &str) -> Vec<(String, Statement, Origin)> {
         .collect()
 }
 
-fn rows(statements: &[(String, Statement, Origin)]) -> Vec<&InsertRow> {
+fn rows<'a>(statements: &'a [(String, Statement<'static>, Origin)]) -> Vec<&'a InsertRow<'static>> {
     statements
         .iter()
         .filter_map(|(_, s, _)| match s {
@@ -123,7 +123,7 @@ fn matched(sql: &str) -> Vec<Result<Vec<String>, StructureError>> {
                 r.values
                     .iter()
                     .map(|v| match v.map(|v| &v.expr) {
-                        Some(Expr::Number(n)) => n.clone(),
+                        Some(Expr::Number(n)) => n.to_string(),
                         Some(other) => format!("{other:?}"),
                         None => "-".to_owned(),
                     })

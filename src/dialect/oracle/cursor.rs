@@ -1,6 +1,7 @@
 //! A cursor over one piece's tokens, for the Oracle parsers: keyword tests, names folded by the dialect's rules, and
 //! errors placed by offset and line in the file.
 
+use std::borrow::Cow;
 use std::cell::Cell;
 
 use super::RULES;
@@ -244,31 +245,31 @@ impl<'a> Cursor<'a> {
     }
 
     /// A token's text as written, decoded.
-    pub(crate) fn token_text(&self, token: Token) -> String {
-        self.decode(token.text(&self.piece.text))
+    pub(crate) fn token_text(&self, token: Token) -> Cow<'a, str> {
+        self.encoding.decode(token.text(&self.piece.text))
     }
 
     /// A string's or quoted name's content, as stored.
-    pub(crate) fn content(&self, token: Token) -> Vec<u8> {
+    pub(crate) fn content(&self, token: Token) -> Cow<'a, [u8]> {
         token.content(&self.piece.text)
     }
 
     /// A token as an identifier: a word folded by the dialect's rules, or a quoted name as written.
-    pub(crate) fn ident_of(&self, token: Token) -> Option<Ident> {
+    pub(crate) fn ident_of(&self, token: Token) -> Option<Ident<'a>> {
         match token.kind {
             TokenKind::Word => Some(Ident {
-                value: RULES.fold(&self.encoding.decode(token.text(&self.piece.text))),
+                value: RULES.folded(self.token_text(token)),
                 quoted: false,
             }),
             TokenKind::QuotedIdent => Some(Ident {
-                value: self.decode(&self.content(token)),
+                value: self.decoded(self.content(token)),
                 quoted: true,
             }),
             _ => None,
         }
     }
 
-    pub(crate) fn ident(&mut self, what: &str) -> Result<Ident, ParseError> {
+    pub(crate) fn ident(&mut self, what: &str) -> Result<Ident<'a>, ParseError> {
         let ident = self.peek().and_then(|t| self.ident_of(t));
         let ident = ident.ok_or_else(|| self.expected(what))?;
         self.pos += 1;
@@ -276,7 +277,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// A name, schema-qualified or not.
-    pub(crate) fn name(&mut self, what: &str) -> Result<Name, ParseError> {
+    pub(crate) fn name(&mut self, what: &str) -> Result<Name<'a>, ParseError> {
         let first = self.ident(what)?;
         if self.eat_punct(b'.') {
             Ok(Name {
@@ -295,15 +296,15 @@ impl<'a> Cursor<'a> {
     pub(crate) fn text(&self, from: usize, to: usize) -> String {
         self.tokens
             .get(from..to)
-            .map_or_else(String::new, |tokens| self.text_of(tokens))
+            .map_or_else(String::new, |tokens| self.text_of(tokens).into_owned())
     }
 
     /// The text of `tokens` as written, from the first one's start to the last one's end.
-    pub(crate) fn text_of(&self, tokens: &[Token]) -> String {
+    pub(crate) fn text_of(&self, tokens: &[Token]) -> Cow<'a, str> {
         let (Some(first), Some(last)) = (tokens.first(), tokens.last()) else {
-            return String::new();
+            return Cow::Borrowed("");
         };
-        self.decode(
+        self.encoding.decode(
             self.piece
                 .text
                 .get(first.start..last.end)
@@ -317,6 +318,14 @@ impl<'a> Cursor<'a> {
 
     pub(crate) fn decode(&self, bytes: &[u8]) -> String {
         self.encoding.decode(bytes).into_owned()
+    }
+
+    /// Bytes of the piece as text, borrowed when they need no decoding.
+    pub(crate) fn decoded(&self, bytes: Cow<'a, [u8]>) -> Cow<'a, str> {
+        match bytes {
+            Cow::Borrowed(bytes) => self.encoding.decode(bytes),
+            Cow::Owned(bytes) => Cow::Owned(self.encoding.decode(&bytes).into_owned()),
+        }
     }
 
     /// Offsets in the piece's text as a span in the file.

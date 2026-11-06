@@ -3,14 +3,15 @@
 
 use crate::dialect::Rules;
 use crate::statement::{DataType, Decimal, TypeFamily};
+use std::borrow::Cow;
 
 /// A value after the dialect evaluated it. Text is decoded by then.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Literal {
+pub enum Literal<'a> {
     Null,
     /// A number as decimal text, not yet normalized: `100`, `-1.50`, `1.0E2`.
-    Number(String),
-    Text(String),
+    Number(Cow<'a, str>),
+    Text(Cow<'a, str>),
     /// Days since 1970-01-01.
     Date(i64),
     /// Seconds since 1970-01-01, and nanoseconds.
@@ -22,13 +23,36 @@ pub enum Literal {
     Unknown(String),
 }
 
+impl Literal<'_> {
+    pub fn into_owned(self) -> Literal<'static> {
+        match self {
+            Self::Null => Literal::Null,
+            Self::Number(text) => Literal::Number(Cow::Owned(text.into_owned())),
+            Self::Text(text) => Literal::Text(Cow::Owned(text.into_owned())),
+            Self::Date(days) => Literal::Date(days),
+            Self::Timestamp { seconds, nanos } => Literal::Timestamp { seconds, nanos },
+            Self::Unknown(reason) => Literal::Unknown(reason),
+        }
+    }
+}
+
 /// A value as keys compare it. Two values of a column are equal exactly when their canonical forms are.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Canonical {
+pub enum Canonical<'a> {
     Null,
-    Value(String),
+    Value(Cow<'a, str>),
     /// The value can't be known; a key containing one is unverifiable, never a violation.
     Unknown,
+}
+
+impl Canonical<'_> {
+    pub fn into_owned(self) -> Canonical<'static> {
+        match self {
+            Self::Null => Canonical::Null,
+            Self::Value(text) => Canonical::Value(Cow::Owned(text.into_owned())),
+            Self::Unknown => Canonical::Unknown,
+        }
+    }
 }
 
 /// `literal` as keys of a `family` column compare it, under the dialect's `rules`.
@@ -37,7 +61,7 @@ pub enum Canonical {
 /// fraction digits. A value the column couldn't hold, such as text that isn't a number in a number column, is
 /// unknown: the database would have refused the row, which is not a key question. Text in a date column is read as
 /// ISO, an assumption [`assumption`] reports.
-pub fn canonical(literal: &Literal, column: &DataType, rules: &Rules) -> Canonical {
+pub fn canonical<'a>(literal: &'a Literal<'_>, column: &DataType, rules: &Rules) -> Canonical<'a> {
     let value = match literal {
         Literal::Null => return Canonical::Null,
         Literal::Unknown(_) => return Canonical::Unknown,
@@ -48,14 +72,17 @@ pub fn canonical(literal: &Literal, column: &DataType, rules: &Rules) -> Canonic
             TypeFamily::Number => number_value(literal).and_then(|n| stored(n, column.decimal)),
             // Blank-padded comparison: `'FI'` and `'FI '` are equal, and `' '` is a value, not NULL.
             TypeFamily::FixedText if rules.char_ignores_trailing_spaces => {
-                text_value(literal).map(|mut text| {
-                    text.truncate(text.trim_end_matches(' ').len());
-                    text
+                text_value(literal).map(|text| match text {
+                    Cow::Borrowed(text) => Cow::Borrowed(text.trim_end_matches(' ')),
+                    Cow::Owned(mut text) => {
+                        text.truncate(text.trim_end_matches(' ').len());
+                        Cow::Owned(text)
+                    }
                 })
             }
             TypeFamily::Text | TypeFamily::FixedText => text_value(literal),
-            TypeFamily::Date => instant(literal, false),
-            TypeFamily::Timestamp => instant(literal, true),
+            TypeFamily::Date => instant(literal, false).map(Cow::Owned),
+            TypeFamily::Timestamp => instant(literal, true).map(Cow::Owned),
             TypeFamily::Binary | TypeFamily::Other => None,
         },
     };
@@ -84,7 +111,7 @@ pub fn assumption(literal: &Literal, family: TypeFamily) -> Option<Assumption> {
 
 /// A canonical number as a decimal column stores it: rounded half away from zero to its scale; `None` when it has
 /// more digits than the precision allows, which the database refuses.
-fn stored(number: String, decimal: Option<Decimal>) -> Option<String> {
+fn stored(number: Cow<'_, str>, decimal: Option<Decimal>) -> Option<Cow<'_, str>> {
     let Some(Decimal { precision, scale }) = decimal else {
         return Some(number);
     };
@@ -103,10 +130,10 @@ fn stored(number: String, decimal: Option<Decimal>) -> Option<String> {
 }
 
 /// A canonical number rounded half away from zero to `scale` digits after the point (before it when negative).
-fn round(number: String, scale: i16) -> Option<String> {
+fn round(number: Cow<'_, str>, scale: i16) -> Option<Cow<'_, str>> {
     let (negative, unsigned) = match number.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, number.as_str()),
+        None => (false, &*number),
     };
     let (int, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
     if usize::try_from(scale).is_ok_and(|scale| fraction.len() <= scale) {
@@ -120,7 +147,7 @@ fn round(number: String, scale: i16) -> Option<String> {
     let mut point = i64::try_from(int.len()).ok()?;
     let keep = point + i64::from(scale);
     let Ok(keep_digits) = usize::try_from(keep) else {
-        return Some("0".to_owned());
+        return Some(Cow::Borrowed("0"));
     };
     let up = digits.get(keep_digits).is_some_and(|&d| d >= 5);
     digits.truncate(keep_digits);
@@ -152,10 +179,10 @@ fn round(number: String, scale: i16) -> Option<String> {
         )
     };
     let sign = if negative { "-" } else { "" };
-    normalize_number(&format!("{sign}{whole}.{part}"))
+    normalize_number(&format!("{sign}{whole}.{part}")).map(|n| Cow::Owned(n.into_owned()))
 }
 
-fn number_value(literal: &Literal) -> Option<String> {
+fn number_value<'a>(literal: &'a Literal<'_>) -> Option<Cow<'a, str>> {
     match literal {
         Literal::Number(text) => normalize_number(text),
         // Implicit conversion allows blanks around the number.
@@ -164,15 +191,16 @@ fn number_value(literal: &Literal) -> Option<String> {
     }
 }
 
-fn text_value(literal: &Literal) -> Option<String> {
+fn text_value<'a>(literal: &'a Literal<'_>) -> Option<Cow<'a, str>> {
     match literal {
-        Literal::Text(text) => Some(text.clone()),
+        Literal::Text(text) => Some(Cow::Borrowed(text)),
         // A number converted to text has no zero before the point: `.5`, `-.5`.
         Literal::Number(text) => {
             let number = normalize_number(text)?;
             Some(match number.strip_prefix("0.") {
-                Some(fraction) => format!(".{fraction}"),
-                None => number.replacen("-0.", "-.", 1),
+                Some(fraction) => Cow::Owned(format!(".{fraction}")),
+                None if number.contains("-0.") => Cow::Owned(number.replacen("-0.", "-.", 1)),
+                None => number,
             })
         }
         _ => None,
@@ -181,13 +209,13 @@ fn text_value(literal: &Literal) -> Option<String> {
 
 /// Decimal text in canonical form: no exponent, no leading or trailing zeros, `0` for zero, `-` only on a negative
 /// number. `None` when it isn't a number, or is beyond the range of a 38-digit decimal type (1E-130 up to 1E126).
-fn normalize_number(text: &str) -> Option<String> {
+fn normalize_number(text: &str) -> Option<Cow<'_, str>> {
     // Most exported numbers are plain integers, already canonical.
     let plain = text.bytes().all(|b| b.is_ascii_digit())
         && (text == "0" || !text.starts_with('0'))
         && (1..=126).contains(&text.len());
     if plain {
-        return Some(text.to_owned());
+        return Some(Cow::Borrowed(text));
     }
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -205,7 +233,7 @@ fn normalize_number(text: &str) -> Option<String> {
     let leading = digits.bytes().take_while(|&b| b == b'0').count();
     let significant = digits.get(leading..)?.trim_end_matches('0');
     if significant.is_empty() {
-        return Some("0".to_owned());
+        return Some(Cow::Borrowed("0"));
     }
     // The value is 0.<significant> × 10^point.
     let point = i64::try_from(int.len())
@@ -225,7 +253,7 @@ fn normalize_number(text: &str) -> Option<String> {
         let (whole, part) = significant.split_at_checked(usize::try_from(point).ok()?)?;
         format!("{whole}.{part}")
     };
-    Some(if negative { format!("-{body}") } else { body })
+    Some(Cow::Owned(if negative { format!("-{body}") } else { body }))
 }
 
 fn parse_exponent(text: &str) -> Option<i64> {
@@ -264,7 +292,7 @@ fn instant(literal: &Literal, timestamp: bool) -> Option<String> {
 }
 
 /// `YYYY-MM-DD` as a date, or `YYYY-MM-DD HH:MM:SS[.f…]` (up to nine fraction digits) as a timestamp.
-pub fn parse_iso(text: &str) -> Option<Literal> {
+pub fn parse_iso(text: &str) -> Option<Literal<'static>> {
     let (date, time) = match text.split_once(' ') {
         Some((date, time)) => (date, Some(time)),
         None => (text, None),
@@ -364,8 +392,8 @@ mod tests {
         DialectId::Oracle.rules()
     }
 
-    fn value(text: &str) -> Canonical {
-        Canonical::Value(text.to_owned())
+    fn value(text: &str) -> Canonical<'static> {
+        Canonical::Value(Cow::Owned(text.to_owned()))
     }
 
     #[test]
@@ -448,7 +476,7 @@ mod tests {
     #[test]
     fn empty_text_is_null_where_the_rules_say_so() {
         let rules = oracle();
-        let empty = Literal::Text(String::new());
+        let empty = Literal::Text("".into());
         for family in [
             TypeFamily::Text,
             TypeFamily::FixedText,
@@ -515,6 +543,7 @@ mod tests {
                 &DataType::of(TypeFamily::Text),
                 rules,
             )
+            .into_owned()
         };
         assert_eq!(text("100"), value("100"));
         assert_eq!(text("1.0E2"), value("100"));
@@ -575,6 +604,7 @@ mod tests {
                 &DataType::of(TypeFamily::Date),
                 rules,
             )
+            .into_owned()
         };
         let timestamp = |t: &str| {
             canonical(
@@ -582,6 +612,7 @@ mod tests {
                 &DataType::of(TypeFamily::Timestamp),
                 rules,
             )
+            .into_owned()
         };
         assert_eq!(date("2024-02-29"), value("2024-02-29 00:00:00"));
         assert_eq!(date("2024-02-29 23:59:59"), value("2024-02-29 23:59:59"));
@@ -630,7 +661,7 @@ mod tests {
             None
         );
         assert_eq!(
-            assumption(&Literal::Text(String::new()), TypeFamily::Date),
+            assumption(&Literal::Text("".into()), TypeFamily::Date),
             None
         );
         let other = Literal::Text("31-JAN-24".into());
@@ -691,7 +722,7 @@ mod tests {
                 decimal: Some(Decimal { precision, scale }),
                 ..DataType::of(TypeFamily::Number)
             };
-            canonical(&Literal::Number(number.into()), &column, oracle())
+            canonical(&Literal::Number(number.into()), &column, oracle()).into_owned()
         };
         let cases: [(&str, u8, i16, Option<&str>); 16] = [
             ("1.1", 5, 0, Some("1")),
@@ -723,14 +754,15 @@ mod tests {
         assert_eq!(stored("1E38", Some(38), 0), Canonical::Unknown);
         assert_eq!(
             stored("1E38", None, 0),
-            Canonical::Value(format!("1{}", "0".repeat(38)))
+            Canonical::Value(format!("1{}", "0".repeat(38)).into())
         );
         assert_eq!(stored("1.5", None, 0), Canonical::Value("2".into()));
         let any = canonical(
             &Literal::Number("1.1".into()),
             &DataType::of(TypeFamily::Number),
             oracle(),
-        );
+        )
+        .into_owned();
         assert_eq!(
             any,
             Canonical::Value("1.1".into()),

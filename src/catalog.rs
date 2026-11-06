@@ -133,18 +133,18 @@ impl Catalog {
 
     /// A qualified name matches its schema only. An unqualified one matches the default schema when one is given,
     /// else a table of that name in any schema.
-    pub fn resolve(&self, name: &Name) -> Lookup {
+    pub fn resolve(&self, name: &Name<'_>) -> Lookup {
         let candidates = self
             .by_name
-            .get(&name.name.value)
+            .get(&*name.name.value)
             .map_or(&[][..], Vec::as_slice);
         let schema = name
             .schema
             .as_ref()
-            .map(|s| &s.value)
-            .or(self.default_schema.as_ref());
+            .map(|s| &*s.value)
+            .or(self.default_schema.as_deref());
         let mut found = candidates.iter().copied().filter(|&id| {
-            schema.is_none() || self.table(id).and_then(|t| t.name.schema.as_ref()) == schema
+            schema.is_none() || self.table(id).and_then(|t| t.name.schema.as_deref()) == schema
         });
         match (found.next(), found.next()) {
             (None, _) => Lookup::Missing,
@@ -161,16 +161,16 @@ impl Catalog {
     }
 
     /// A name from a statement as the dialect displays it, in the default schema when it has none.
-    pub fn display_name(&self, name: &Name) -> String {
+    pub fn display_name(&self, name: &Name<'_>) -> String {
         display(
             self.rules,
             &TableName {
                 schema: name
                     .schema
                     .as_ref()
-                    .map(|s| s.value.clone())
+                    .map(|s| s.value.to_string())
                     .or_else(|| self.default_schema.clone()),
-                name: name.name.value.clone(),
+                name: name.name.value.to_string(),
             },
         )
     }
@@ -190,7 +190,7 @@ impl Catalog {
 pub struct CatalogBuilder {
     rules: &'static Rules,
     default_schema: Option<String>,
-    statements: Vec<(Statement, Origin)>,
+    statements: Vec<(Statement<'static>, Origin)>,
 }
 
 impl CatalogBuilder {
@@ -204,7 +204,7 @@ impl CatalogBuilder {
     }
 
     /// Keeps a DDL statement; inserts and skipped statements aren't the catalog's.
-    pub fn add(&mut self, statement: Statement, origin: Origin) {
+    pub fn add(&mut self, statement: Statement<'static>, origin: Origin) {
         if matches!(
             statement,
             Statement::CreateTable { .. }
@@ -262,7 +262,7 @@ impl CatalogBuilder {
 #[derive(Default)]
 struct Draft {
     constraints: Vec<Written>,
-    indexes: Vec<(String, Vec<Ident>, Origin)>,
+    indexes: Vec<(String, Vec<Ident<'static>>, Origin)>,
 }
 
 /// A constraint as written, with where it was declared and where it last became enabled.
@@ -296,12 +296,12 @@ fn display(rules: &Rules, name: &TableName) -> String {
     }
 }
 
-fn display_name(rules: &Rules, name: &Name) -> String {
+fn display_name(rules: &Rules, name: &Name<'_>) -> String {
     display(
         rules,
         &TableName {
-            schema: name.schema.as_ref().map(|s| s.value.clone()),
-            name: name.name.value.clone(),
+            schema: name.schema.as_ref().map(|s| s.value.to_string()),
+            name: name.name.value.to_string(),
         },
     )
 }
@@ -361,7 +361,7 @@ fn add_columns(
                 .map(|c| Written::new(c, origin)),
         );
         table.columns.push(Column {
-            name: column.name.value,
+            name: column.name.value.into_owned(),
             data_type: column.data_type,
             default: column.default,
             default_on_null: column.default_on_null,
@@ -376,7 +376,7 @@ fn parent_key(
     rules: &Rules,
     id: TableId,
     parent: &Table,
-    names: Option<&[Ident]>,
+    names: Option<&[Ident<'_>]>,
     child: &[usize],
 ) -> Result<Kind, String> {
     let shown = display(rules, &parent.name);
@@ -450,7 +450,7 @@ impl Build {
 
     fn create(
         &mut self,
-        name: &Name,
+        name: &Name<'_>,
         columns: Vec<ColumnDef>,
         constraints: Vec<ConstraintDef>,
         origin: Origin,
@@ -460,9 +460,9 @@ impl Build {
             schema: name
                 .schema
                 .as_ref()
-                .map(|s| s.value.clone())
+                .map(|s| s.value.to_string())
                 .or_else(|| self.catalog.default_schema.clone()),
-            name: name.name.value.clone(),
+            name: name.name.value.to_string(),
         };
         if self.catalog.tables.iter().any(|t| t.name == table_name) {
             let shown = display(rules, &table_name);
@@ -495,7 +495,7 @@ impl Build {
     }
 
     /// The position of the table a statement changes, or an issue saying why there is none.
-    fn target(&mut self, name: &Name, origin: Origin, what: &str) -> Option<usize> {
+    fn target(&mut self, name: &Name<'_>, origin: Origin, what: &str) -> Option<usize> {
         let shown = display_name(self.catalog.rules, name);
         match self.catalog.resolve(name) {
             Lookup::Found(id) => return Some(id.0),
@@ -530,7 +530,7 @@ impl Build {
             .join(", ")
     }
 
-    fn alter(&mut self, name: &Name, actions: Vec<AlterAction>, origin: Origin) {
+    fn alter(&mut self, name: &Name<'_>, actions: Vec<AlterAction>, origin: Origin) {
         let Some(index) = self.target(name, origin, "ALTER TABLE") else {
             return;
         };
@@ -590,8 +590,8 @@ impl Build {
 
     fn unique_index(
         &mut self,
-        name: &Name,
-        table: &Name,
+        name: &Name<'_>,
+        table: &Name<'_>,
         columns: Vec<IndexColumn>,
         origin: Origin,
     ) {
@@ -615,7 +615,9 @@ impl Build {
             }
         }
         if let Some(draft) = self.drafts.get_mut(index) {
-            draft.indexes.push((name.name.value.clone(), plain, origin));
+            draft
+                .indexes
+                .push((name.name.value.to_string(), plain, origin));
         }
     }
 
@@ -701,7 +703,7 @@ impl Build {
             ConstraintKind::ForeignKey { .. } => return None,
         };
         Some(Constraint {
-            name: def.name.map(|n| n.value),
+            name: def.name.map(|n| n.value.into_owned()),
             kind,
             state: def.state,
             declared: origin,
@@ -712,7 +714,7 @@ impl Build {
     fn positions(
         &mut self,
         index: usize,
-        columns: &[Ident],
+        columns: &[Ident<'_>],
         origin: Origin,
         label: &str,
     ) -> Option<Vec<usize>> {
@@ -775,7 +777,7 @@ impl Build {
             }
         };
         Some(Constraint {
-            name: def.name.map(|n| n.value),
+            name: def.name.map(|n| n.value.into_owned()),
             kind,
             state: def.state,
             declared: origin,

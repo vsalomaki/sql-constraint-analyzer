@@ -81,14 +81,14 @@ impl DialectId {
         piece: &Piece,
         encoding: Encoding,
         pass: Pass,
-    ) -> Result<Option<Statement>, ParseError> {
+    ) -> Result<Option<Statement<'_>>, ParseError> {
         match self {
             Self::Oracle => oracle::parse::parse(piece, encoding, pass),
         }
     }
 
     /// The value an expression in an `INSERT` stands for.
-    pub fn evaluate(self, expr: &Expr, encoding: Encoding) -> Literal {
+    pub fn evaluate<'a>(self, expr: &Expr<'a>, encoding: Encoding) -> Literal<'a> {
         match self {
             Self::Oracle => oracle::eval::evaluate(expr, encoding),
         }
@@ -142,6 +142,19 @@ impl Rules {
         match self.fold {
             Fold::Upper => name.to_uppercase(),
             Fold::Lower => name.to_lowercase(),
+        }
+    }
+
+    /// `fold`, borrowing `name` when it is ASCII already in the folded case, as exports mostly write names.
+    pub fn folded<'a>(&self, name: Cow<'a, str>) -> Cow<'a, str> {
+        let other_case = |b: &u8| match self.fold {
+            Fold::Upper => b.is_ascii_lowercase(),
+            Fold::Lower => b.is_ascii_uppercase(),
+        };
+        if name.is_ascii() && !name.as_bytes().iter().any(other_case) {
+            name
+        } else {
+            Cow::Owned(self.fold(&name))
         }
     }
 
