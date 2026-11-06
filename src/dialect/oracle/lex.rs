@@ -92,12 +92,49 @@ pub struct LexError {
 }
 
 fn is_word_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_' || b >= 0x80
+    BYTE_CLASS
+        .get(usize::from(b))
+        .is_some_and(|&class| class & WORD_START != 0)
 }
 
 pub(crate) fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$' | b'#') || b >= 0x80
+    BYTE_CLASS
+        .get(usize::from(b))
+        .is_some_and(|&class| class & WORD != 0)
 }
+
+/// `word.eq_ignore_ascii_case(other)`, inlined: the parsers test a keyword at nearly every token.
+#[inline]
+pub(crate) fn same_ignoring_case(word: &[u8], other: &[u8]) -> bool {
+    word.len() == other.len()
+        && word
+            .iter()
+            .zip(other)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+const WORD_START: u8 = 1;
+const WORD: u8 = 2;
+
+/// By byte: whether it starts a word (a letter, `_`, any byte of a non-ASCII character) and whether it continues one
+/// (those, digits, `$`, `#`). A table, as every byte of every statement is tested.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing,
+    reason = "built at compile time over 0..256, which fits a byte and the table"
+)]
+const BYTE_CLASS: [u8; 256] = {
+    let mut class = [0; 256];
+    let mut b = 0;
+    while b < 256 {
+        let byte = b as u8;
+        let start = byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80;
+        let word = start || byte.is_ascii_digit() || byte == b'$' || byte == b'#';
+        class[b] = if start { WORD_START } else { 0 } | if word { WORD } else { 0 };
+        b += 1;
+    }
+    class
+};
 
 const OPERATORS: [&[u8]; 9] = [
     b"||", b":=", b"=>", b"<=", b">=", b"<>", b"!=", b"^=", b"**",
@@ -118,6 +155,11 @@ pub fn lex(source: &[u8]) -> Result<Vec<Token>, LexError> {
             _ if b.is_ascii_whitespace() => {
                 i += 1;
                 continue;
+            }
+            // The punctuation of every value list, before the tests no other byte takes.
+            (b',' | b'(' | b')', _) => {
+                i += 1;
+                TokenKind::Punct
             }
             (b'-', Some(b'-')) => {
                 i = source

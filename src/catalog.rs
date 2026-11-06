@@ -119,6 +119,26 @@ impl Table {
 
     /// The constraint that forbids NULL in the column at `position` for a row at `offset` in the file at `file` in
     /// the run: a NOT NULL, else a primary key, that judges the row.
+    /// Whether some constraint reads each column: a key's, a foreign key's or a NOT NULL's.
+    pub fn read_columns(&self) -> Vec<bool> {
+        let mut read = vec![false; self.columns.len()];
+        for constraint in &self.constraints {
+            let columns: &[usize] = match &constraint.kind {
+                Kind::PrimaryKey { columns }
+                | Kind::Unique { columns, .. }
+                | Kind::ForeignKey { columns, .. } => columns,
+                Kind::NotNull { column } => std::slice::from_ref(column),
+                Kind::Check { .. } => &[],
+            };
+            for &column in columns {
+                if let Some(slot) = read.get_mut(column) {
+                    *slot = true;
+                }
+            }
+        }
+        read
+    }
+
     pub fn forbids_null(&self, position: usize, file: usize, offset: u64) -> Option<&Constraint> {
         let judging = |c: &&Constraint| c.judges(file, offset);
         let not_null = self
@@ -164,6 +184,10 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn ids(&self) -> impl Iterator<Item = TableId> {
+        (0..self.tables.len()).map(TableId)
+    }
+
     pub fn tables(&self) -> &[Table] {
         &self.tables
     }
