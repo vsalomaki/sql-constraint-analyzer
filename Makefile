@@ -3,7 +3,7 @@
 GEN = cargo run -q -F gen --bin sqlca-gen -- --dialect oracle
 FIXTURES = tests/fixtures/gen/oracle
 
-## Loads generated exports into Oracle Free (Docker) and checks Oracle rejects what the manifests expect.
+## Loads generated exports and their sqlca fix output into Oracle Free (Docker) and checks what Oracle rejects.
 oracle-check:
 	scripts/oracle/check.sh
 
