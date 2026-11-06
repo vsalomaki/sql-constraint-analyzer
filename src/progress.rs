@@ -158,14 +158,23 @@ impl<'a> Progress<'a> {
             None if self.stage.is_some() => format!("{} {name}", self.step()),
             None => return,
         };
-        // One column short of the width, so the cursor never wraps to the next line.
-        let line: String = line.chars().take(width.saturating_sub(1)).collect();
+        let memory = memory_stats::memory_stats().map_or(String::new(), |memory| {
+            format!(" · mem {}", size(memory.physical_mem as u64))
+        });
+        // One column short of the width, so the cursor never wraps to the next line; the memory is cut last.
+        let room = width.saturating_sub(1);
+        let line: String = line
+            .chars()
+            .take(room.saturating_sub(memory.chars().count()))
+            .chain(memory.chars())
+            .take(room)
+            .collect();
         drop(write!(self.err, "\r\x1b[2K{line}"));
         drop(self.err.flush());
         self.drawn = Some(Instant::now());
     }
 
-    /// `[2/3] Rows    ███░░░░░░░  30%  a.sql · 40.0 MB/s · ETA 12 s`.
+    /// `[2/3] Rows    ███░░░░░░░  30%  a.sql · 40.0 MB/s · ETA 12 s`, before the memory in use.
     fn bar(&self, pass: Pass, started: Instant, name: &str) -> String {
         let label = match pass {
             Pass::Schema => "Schema",
@@ -467,7 +476,31 @@ mod tests {
             lines.first().unwrap().starts_with("[check 2] Rows    "),
             "{text:?}"
         );
-        assert_eq!(lines.last(), Some(&"[write] b.sql"), "{text:?}");
+        let last = lines.last().unwrap();
+        assert!(last.starts_with("[write] b.sql · mem "), "{text:?}");
+        assert!(
+            lines.iter().all(|l| l.contains(" · mem ")),
+            "the memory in use ends every line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_memory_stays_on_a_full_line() {
+        let mut out = Vec::new();
+        let mut progress = Progress::new(Display::Live { width: 80 }, false, &mut out);
+        progress.stage("check 2");
+        progress.pass(Pass::Rows, 1, 1000);
+        progress.file(0, "app/data/some_long_table_name.sql", 1000);
+        progress.finish();
+        let text = String::from_utf8(out).unwrap();
+        let line = text.split("\r\x1b[2K").find(|l| !l.is_empty()).unwrap();
+        assert!(line.chars().count() <= 79, "{line:?}");
+        let (_, memory) = line.rsplit_once(" · mem ").unwrap();
+        let (number, unit) = memory.split_once(' ').unwrap();
+        assert!(
+            number.parse::<f64>().is_ok() && ["B", "kB", "MB", "GB", "TB"].contains(&unit),
+            "the whole size shows: {line:?}"
+        );
     }
 
     #[test]
