@@ -10,7 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 use crate::check::{self, Report};
 use crate::dialect::Pass;
@@ -55,8 +58,14 @@ pub enum FixError {
     },
     #[error("the output folder {} isn't empty; give a new or empty folder", .0.display())]
     OutNotEmpty(PathBuf),
-    #[error("{} would be written where the report goes; give --out a folder of its own", .0.display())]
+    #[error("{} would be written where the report goes; give the report a folder of its own", .0.display())]
     ReportCollides(PathBuf),
+    #[error("the report folder {} isn't empty; give a new or empty folder", .0.display())]
+    ReportNotEmpty(PathBuf),
+    #[error("{} already exists; move it away or give --backup another suffix", .0.display())]
+    BackupExists(PathBuf),
+    #[error("an in-place fix with no backups and no report would keep the removed rows nowhere")]
+    NothingKept,
 }
 
 /// A removed row: where it was in the input, what it was, and why it went.
@@ -87,34 +96,236 @@ pub struct Left {
     pub why: &'static str,
 }
 
+/// Where the fixed files go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// Copies under a new or empty folder, at the inputs' paths relative to the folder they share.
+    Out(PathBuf),
+    /// The inputs themselves. With a `backup` suffix, each changed input is first kept beside itself as
+    /// `<file><suffix>`.
+    InPlace { backup: Option<String> },
+}
+
+/// Where `rejects.sql` and the fix reports go.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReportPlace {
+    /// `sqlca-report/` in the output folder; for an in-place fix, a new `sqlca-fix-<UTC time>/` in the working folder.
+    #[default]
+    Default,
+    /// A new or empty folder.
+    At(PathBuf),
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub destination: Destination,
+    pub report: ReportPlace,
+    /// Run the rounds and tell what would change, writing nothing.
+    pub dry_run: bool,
+}
+
+impl Target {
+    /// Fixed copies under `dir`, with the report in it.
+    pub fn out(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            destination: Destination::Out(dir.into()),
+            report: ReportPlace::Default,
+            dry_run: false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FixReport {
     /// The check of the first round: what the input had.
     pub input: Report,
-    /// The check of the last round: what the output still has.
+    /// The check of the written output: what it still has. For a dry run, the last round's, as it would be.
     pub output: Report,
     pub rounds: usize,
     pub removed: Vec<Removal>,
     /// Fixable findings the fix left in place: assumed values, and rows it couldn't tell apart.
     pub left: Vec<Left>,
     /// Where each input went, by input position.
-    pub written: Vec<PathBuf>,
+    pub files: Vec<Output>,
+    /// The report folder, unless there is none.
+    pub report: Option<PathBuf>,
+    pub target: Target,
 }
 
-/// Fixes `files` into `out`, keeping their paths relative to the folder they share.
+/// One input's output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Output {
+    /// The input's name, as findings show it.
+    pub input: String,
+    pub path: PathBuf,
+    /// Whether the fix removed rows from it.
+    pub changed: bool,
+    /// Where an in-place fix kept the original.
+    pub backup: Option<PathBuf>,
+    /// The SHA-256 of the file's bytes before and after, for a file the fix wrote.
+    pub sha256: Option<Digests>,
+}
+
+/// Lowercase hex SHA-256 digests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Digests {
+    pub before: String,
+    pub after: String,
+}
+
+/// Fixes `files` to `target`. Nothing is written before every round is done and every place to write is known to be
+/// free.
 pub fn fix(
     files: &[InputFile],
     options: &check::Options,
     policy: Policy,
-    out: &Path,
+    target: &Target,
 ) -> Result<FixReport, FixError> {
+    let backup = match &target.destination {
+        Destination::InPlace { backup: None } if target.report == ReportPlace::Off => {
+            return Err(FixError::NothingKept);
+        }
+        Destination::InPlace { backup } => backup.as_deref(),
+        Destination::Out(_) => None,
+    };
     let originals: Vec<PathBuf> = files
         .iter()
         .map(|f| fs::canonicalize(&f.path).map_err(|source| write_error(&f.path, source)))
         .collect::<Result<_, _>>()?;
-    let written = destinations(&originals, out)?;
+    let (paths, out) = match &target.destination {
+        Destination::Out(out) => {
+            let (paths, out) = destinations(&originals, out)?;
+            (paths, Some(out))
+        }
+        Destination::InPlace { .. } => (originals.clone(), None),
+    };
+    let folder = report_folder(target, out.as_deref(), &paths)?;
     let names: Vec<String> = files.iter().map(|f| check::display(&f.path)).collect();
 
+    let Plan {
+        input,
+        last,
+        rounds,
+        cuts,
+        mut removed,
+        left,
+    } = run_rounds(files, options, policy, &names)?;
+
+    let outputs: Vec<Output> = names
+        .into_iter()
+        .zip(&paths)
+        .zip(originals.iter().zip(&cuts))
+        .map(|((input, path), (original, file_cuts))| Output {
+            input,
+            path: path.clone(),
+            changed: !file_cuts.is_empty(),
+            backup: backup
+                .filter(|_| !file_cuts.is_empty())
+                .map(|suffix| beside(original, suffix)),
+            sha256: None,
+        })
+        .collect();
+    if let Some(taken) = outputs
+        .iter()
+        .filter_map(|o| o.backup.as_ref())
+        .find(|b| fs::symlink_metadata(b).is_ok())
+    {
+        return Err(FixError::BackupExists(taken.clone()));
+    }
+    describe_removals(&mut removed, files)?;
+    let mut report = FixReport {
+        input,
+        output: last,
+        rounds,
+        removed,
+        left,
+        files: Vec::new(),
+        report: folder,
+        target: target.clone(),
+    };
+    if target.dry_run {
+        report.files = outputs;
+        return Ok(report);
+    }
+    write(files, options, &originals, &cuts, outputs, report)
+}
+
+/// Writes the outputs and the report folder, and checks what was written. An in-place fix writes `rejects.sql` before
+/// it changes an input.
+fn write(
+    files: &[InputFile],
+    options: &check::Options,
+    originals: &[PathBuf],
+    cuts: &[Vec<Span>],
+    mut outputs: Vec<Output>,
+    mut report: FixReport,
+) -> Result<FixReport, FixError> {
+    let target = report.target.clone();
+    let rejects = |report: &FixReport| -> Result<(), FixError> {
+        let Some(folder) = &report.report else {
+            return Ok(());
+        };
+        new_folder(folder)?;
+        write_file(&folder.join("rejects.sql"), None, |w| {
+            write_rejects(&report.removed, w)
+        })
+    };
+    match target.destination {
+        // The copies first: on a file system that ignores case, a copied folder can take the report's name.
+        Destination::Out(_) => {
+            write_outputs(originals, cuts, &mut outputs)?;
+            rejects(&report)?;
+        }
+        Destination::InPlace { .. } => {
+            rejects(&report)?;
+            write_outputs(originals, cuts, &mut outputs)?;
+        }
+    }
+    let written: Vec<InputFile> = match target.destination {
+        Destination::Out(_) => files
+            .iter()
+            .zip(&outputs)
+            .map(|(f, o)| InputFile {
+                path: o.path.clone(),
+                ..f.clone()
+            })
+            .collect(),
+        Destination::InPlace { .. } => files.to_vec(),
+    };
+    report.output = check::run(&written, options)?;
+    report.files = outputs;
+    if let Some(folder) = &report.report {
+        write_file(&folder.join("fix-report.txt"), None, |w| {
+            write_report(&report, w)
+        })?;
+        write_file(&folder.join("fix-report.json"), None, |w| {
+            write_json_report(&report, w)
+        })?;
+    }
+    Ok(report)
+}
+
+/// What the rounds found and decided; nothing is written.
+struct Plan {
+    /// The first round's check.
+    input: Report,
+    /// The last round's check, of the input as the output will be.
+    last: Report,
+    rounds: usize,
+    /// By input position: the sorted, separate spans to remove.
+    cuts: Vec<Vec<Span>>,
+    removed: Vec<Removal>,
+    left: Vec<Left>,
+}
+
+/// Checks the input, removes what the findings call for, and checks again without it, until a round removes nothing.
+fn run_rounds(
+    files: &[InputFile],
+    options: &check::Options,
+    policy: Policy,
+    names: &[String],
+) -> Result<Plan, FixError> {
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
     let mut removed = Vec::new();
     let mut left = Vec::new();
@@ -122,7 +333,7 @@ pub fn fix(
     let mut rounds = 0;
     let last = loop {
         let report = check::run_without(files, options, &cuts)?;
-        let (targets, skipped) = targets(&report.findings, &names, policy);
+        let (targets, skipped) = targets(&report.findings, names, policy);
         if rounds == 0 {
             left.extend(skipped);
         }
@@ -175,28 +386,61 @@ pub fn fix(
         }
         rounds += 1;
     };
-
-    for ((original, path), file_cuts) in originals.iter().zip(&written).zip(&cuts) {
-        splice(original, file_cuts, path)?;
-    }
-    let outputs: Vec<InputFile> = files
-        .iter()
-        .zip(&written)
-        .map(|(f, path)| InputFile {
-            path: path.clone(),
-            ..f.clone()
-        })
-        .collect();
-    let output = check::run(&outputs, options)?;
-    describe_removals(&mut removed, files)?;
-    Ok(FixReport {
-        input: first_report.unwrap_or(last),
-        output,
+    Ok(Plan {
+        input: first_report.unwrap_or_else(|| last.clone()),
+        last,
         rounds,
+        cuts,
         removed,
         left,
-        written,
     })
+}
+
+/// Writes each output that differs from its input. Every backup is made before any input is rewritten, so a backup
+/// that fails leaves all inputs as they were.
+fn write_outputs(
+    originals: &[PathBuf],
+    cuts: &[Vec<Span>],
+    outputs: &mut [Output],
+) -> Result<(), FixError> {
+    for (original, output) in originals.iter().zip(outputs.iter()) {
+        if let Some(backup) = &output.backup {
+            keep_backup(original, backup)?;
+        }
+    }
+    for ((original, file_cuts), output) in originals.iter().zip(cuts).zip(outputs) {
+        if file_cuts.is_empty() && output.path == *original {
+            continue;
+        }
+        output.sha256 = splice(original, file_cuts, &output.path)?;
+    }
+    Ok(())
+}
+
+/// `path` with `suffix` added to its file name.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Keeps `original` as `backup`, a name nothing has: a hard link where the file system allows, else a copy.
+fn keep_backup(original: &Path, backup: &Path) -> Result<(), FixError> {
+    match fs::hard_link(original, backup) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(FixError::BackupExists(backup.to_owned()))
+        }
+        Err(_) => {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(backup)
+                .and_then(|_| fs::copy(original, backup))
+                .map_err(|source| write_error(backup, source))?;
+            Ok(())
+        }
+    }
 }
 
 fn write_error(path: &Path, source: io::Error) -> FixError {
@@ -209,15 +453,11 @@ fn write_error(path: &Path, source: io::Error) -> FixError {
 /// The folder in the output that holds `rejects.sql` and the fix reports.
 pub const REPORT_FOLDER: &str = "sqlca-report";
 
-/// Each input's path under `out`, relative to the folder all inputs share. `out` must be new or empty, so every
-/// folder in it is one the fix made: nothing in it can lead back to an input.
-fn destinations(originals: &[PathBuf], out: &Path) -> Result<Vec<PathBuf>, FixError> {
-    let populated = fs::read_dir(out).is_ok_and(|mut entries| entries.next().is_some());
-    if populated {
-        return Err(FixError::OutNotEmpty(out.to_owned()));
-    }
-    fs::create_dir_all(out).map_err(|source| write_error(out, source))?;
-    let out = fs::canonicalize(out).map_err(|source| write_error(out, source))?;
+/// Each input's path under `out`, relative to the folder all inputs share, and `out` as they are under. `out` must be
+/// new or empty, so every folder in it is one the fix made: nothing in it can lead back to an input.
+fn destinations(originals: &[PathBuf], out: &Path) -> Result<(Vec<PathBuf>, PathBuf), FixError> {
+    let out = resolved(out)?;
+    require_empty(&out, FixError::OutNotEmpty)?;
     let mut common = originals
         .first()
         .and_then(|p| p.parent())
@@ -228,15 +468,112 @@ fn destinations(originals: &[PathBuf], out: &Path) -> Result<Vec<PathBuf>, FixEr
             break;
         }
     }
-    let written: Vec<PathBuf> = originals
+    let paths = originals
         .iter()
         .map(|p| out.join(p.strip_prefix(&common).unwrap_or(p)))
         .collect();
-    let report = out.join(REPORT_FOLDER);
-    if let Some(clash) = written.iter().find(|p| p.starts_with(&report)) {
+    Ok((paths, out))
+}
+
+/// `path` absolute, with the links of the part that exists resolved and the rest applied to it, `..` included: a
+/// folder that doesn't exist yet is no link, so this is the path it will have once made.
+fn resolved(path: &Path) -> Result<PathBuf, FixError> {
+    let absolute = std::path::absolute(path).map_err(|source| write_error(path, source))?;
+    let mut missing = Vec::new();
+    let mut existing = absolute.as_path();
+    let mut found = loop {
+        if let Ok(found) = fs::canonicalize(existing) {
+            break found;
+        }
+        match (existing.components().next_back(), existing.parent()) {
+            (Some(last), Some(parent)) => {
+                missing.push(last);
+                existing = parent;
+            }
+            _ => return Ok(absolute),
+        }
+    };
+    for component in missing.into_iter().rev() {
+        match component {
+            Component::ParentDir => {
+                found.pop();
+            }
+            Component::Normal(name) => found.push(name),
+            _ => {}
+        }
+    }
+    Ok(found)
+}
+
+/// Refuses a folder that exists with something in it, or that can't be listed to tell.
+fn require_empty(folder: &Path, refusal: fn(PathBuf) -> FixError) -> Result<(), FixError> {
+    match fs::read_dir(folder) {
+        Ok(mut entries) => match entries.next() {
+            Some(_) => Err(refusal(folder.to_owned())),
+            None => Ok(()),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(write_error(folder, source)),
+    }
+}
+
+/// Makes the report folder, refusing it if something got there since the run began.
+fn new_folder(folder: &Path) -> Result<(), FixError> {
+    fs::create_dir_all(folder).map_err(|source| write_error(folder, source))?;
+    require_empty(folder, FixError::ReportNotEmpty)
+}
+
+/// Where the report goes, if anywhere: refused when it holds something, or when an output would be written into it.
+fn report_folder(
+    target: &Target,
+    out: Option<&Path>,
+    outputs: &[PathBuf],
+) -> Result<Option<PathBuf>, FixError> {
+    let folder = match (&target.report, out) {
+        (ReportPlace::Off, _) => return Ok(None),
+        (ReportPlace::At(folder), _) => resolved(folder)?,
+        (ReportPlace::Default, Some(out)) => out.join(REPORT_FOLDER),
+        (ReportPlace::Default, None) => resolved(Path::new(&format!(
+            "sqlca-fix-{}",
+            utc_stamp(SystemTime::now())
+        )))?,
+    };
+    require_empty(&folder, FixError::ReportNotEmpty)?;
+    if let Some(clash) = outputs.iter().find(|p| p.starts_with(&folder)) {
         return Err(FixError::ReportCollides(clash.clone()));
     }
-    Ok(written)
+    Ok(Some(folder))
+}
+
+/// `20261106T143005Z`: a time as a name that sorts.
+fn utc_stamp(at: SystemTime) -> String {
+    let seconds = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (year, month, day) = civil_date(seconds / 86_400);
+    let time = seconds % 86_400;
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_date(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    (era * 400 + year_of_era + u64::from(month <= 2), month, day)
 }
 
 /// The findings a round acts on, by file position and line, and the fixable ones it leaves for review.
@@ -442,45 +779,106 @@ fn extend_to_line_end(path: &Path, span: Span) -> Result<Span, FixError> {
     })
 }
 
-/// Writes `original` without the `cuts` to `to`. An unchanged file is a hard link where it can be; anything else goes
-/// through a new temporary file renamed into place, since `to` may be a hard link to the original.
-fn splice(original: &Path, cuts: &[Span], to: &Path) -> Result<(), FixError> {
+/// Writes `original` without the `cuts` to `to`, with the original's permissions, and gives both files' digests. An
+/// unchanged file is a hard link where it can be, and has no digests; anything else goes through a new temporary file
+/// renamed into place, since `to` may be a hard link to the original, or the original itself.
+fn splice(original: &Path, cuts: &[Span], to: &Path) -> Result<Option<Digests>, FixError> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|source| write_error(parent, source))?;
     }
     if cuts.is_empty() && fs::hard_link(original, to).is_ok() {
-        return Ok(());
+        return Ok(None);
     }
-    write_file(to, |writer| {
-        let mut reader = BufReader::with_capacity(1 << 16, File::open(original)?);
+    let permissions = fs::metadata(original)
+        .map_err(|source| write_error(original, source))?
+        .permissions();
+    let mut digests = None;
+    write_file(to, Some(permissions), |writer| {
+        let mut reader = Hashing::new(BufReader::with_capacity(1 << 16, File::open(original)?));
+        let mut writer = Hashing::new(writer);
         let mut at = 0;
         for cut in cuts {
-            io::copy(&mut (&mut reader).take(cut.start - at), writer)?;
+            io::copy(&mut (&mut reader).take(cut.start - at), &mut writer)?;
             io::copy(
                 &mut (&mut reader).take(cut.end - cut.start),
                 &mut io::sink(),
             )?;
             at = cut.end;
         }
-        io::copy(&mut reader, writer)?;
+        io::copy(&mut reader, &mut writer)?;
+        digests = Some(Digests {
+            before: reader.hex(),
+            after: writer.hex(),
+        });
         Ok(())
-    })
+    })?;
+    Ok(digests)
+}
+
+/// A reader or writer that hashes the bytes passing through it.
+struct Hashing<T> {
+    inner: T,
+    hasher: Sha256,
+}
+
+impl<T> Hashing<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn hex(&self) -> String {
+        self.hasher
+            .clone()
+            .finalize()
+            .iter()
+            .flat_map(|b| [b >> 4, b & 0xf])
+            .filter_map(|n| char::from_digit(u32::from(n), 16))
+            .collect()
+    }
+}
+
+impl<R: Read> Read for Hashing<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(buf.get(..n).unwrap_or_default());
+        Ok(n)
+    }
+}
+
+impl<W: Write> Write for Hashing<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(buf.get(..n).unwrap_or_default());
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Writes `path` through a new temporary file beside it, renamed over it once written: whatever `path` was (a hard
 /// link, a symbolic link) is replaced, never written through.
-pub fn write_file(
+fn write_file(
     path: &Path,
+    permissions: Option<fs::Permissions>,
     write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
 ) -> Result<(), FixError> {
     let (temporary, file) = temporary_beside(path).map_err(|source| write_error(path, source))?;
     let result = (|| -> io::Result<()> {
         let mut writer = BufWriter::with_capacity(1 << 16, file);
         write(&mut writer)?;
-        writer
+        let file = writer
             .into_inner()
-            .map_err(io::IntoInnerError::into_error)?
-            .sync_all()?;
+            .map_err(io::IntoInnerError::into_error)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        drop(file);
         fs::rename(&temporary, path)
     })();
     if result.is_err() {
@@ -603,22 +1001,39 @@ pub fn summary(report: &FixReport) -> String {
     } else {
         "rounds"
     };
+    let fixed = if report.target.dry_run {
+        "Would fix "
+    } else {
+        "Fixed     "
+    };
     format!(
-        "Fixed      {} rows in {} {rounds}{kinds}{left}",
+        "{fixed} {} rows in {} {rounds}{kinds}{left}",
         report.removed.len(),
         report.rounds
     )
 }
 
-/// `fix-report.txt`: what the fix did, for people: where it wrote, each removal with its reasons, what it left, and
-/// what the output still has.
-pub fn write_report(report: &FixReport, out_dir: &Path, out: &mut dyn Write) -> io::Result<()> {
+/// Where the fix writes, for the run's header and the reports.
+pub fn destination_text(target: &Target) -> String {
+    match &target.destination {
+        Destination::Out(dir) => {
+            format!("fixed copies under {}, originals untouched", dir.display())
+        }
+        Destination::InPlace {
+            backup: Some(suffix),
+        } => format!("the inputs, in place; each changed one kept first as <file>{suffix}"),
+        Destination::InPlace { backup: None } => "the inputs, in place, without backups".to_owned(),
+    }
+}
+
+/// `fix-report.txt`: what the fix did, for people: where it wrote, each removal with its reasons, the files it
+/// changed, what it left, and what the output still has.
+pub fn write_report(report: &FixReport, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "sqlca {} fix", env!("CARGO_PKG_VERSION"))?;
-    writeln!(
-        out,
-        "Output: fixed copies under {}, originals untouched",
-        out_dir.display()
-    )?;
+    writeln!(out, "Output: {}", destination_text(&report.target))?;
+    if report.target.dry_run {
+        writeln!(out, "Dry run: nothing was written")?;
+    }
     writeln!(out, "{}", summary(report))?;
     writeln!(out)?;
     writeln!(out, "Removed:")?;
@@ -635,6 +1050,25 @@ pub fn write_report(report: &FixReport, out_dir: &Path, out: &mut dyn Write) -> 
         )?;
         for reason in &removal.reasons {
             writeln!(out, "    {}", reason.text)?;
+        }
+    }
+    let changed: Vec<&Output> = report.files.iter().filter(|f| f.changed).collect();
+    if !changed.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "Changed:")?;
+        for file in changed {
+            let shown = match report.target.destination {
+                Destination::Out(_) => check::display(&file.path),
+                Destination::InPlace { .. } => file.input.clone(),
+            };
+            match file.backup.as_deref().and_then(Path::file_name) {
+                Some(backup) => writeln!(
+                    out,
+                    "  {shown}, original kept beside it as {}",
+                    backup.to_string_lossy()
+                )?,
+                None => writeln!(out, "  {shown}")?,
+            }
         }
     }
     if !report.left.is_empty() {
@@ -655,4 +1089,147 @@ pub fn write_report(report: &FixReport, out_dir: &Path, out: &mut dyn Write) -> 
         writeln!(out, "  {}", crate::report::describe(finding))?;
     }
     writeln!(out, "{}", crate::report::result(&report.output))
+}
+
+#[derive(serde::Serialize)]
+struct JsonReport<'a> {
+    sqlca: &'static str,
+    dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    out: Option<String>,
+    in_place: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_suffix: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<String>,
+    rounds: usize,
+    files: Vec<JsonFile<'a>>,
+    removed: Vec<JsonRemoval<'a>>,
+    left: Vec<JsonLeft<'a>>,
+    output: JsonOutput<'a>,
+}
+#[derive(serde::Serialize)]
+struct JsonFile<'a> {
+    input: &'a str,
+    output: String,
+    changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256_before: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256_after: Option<&'a str>,
+}
+#[derive(serde::Serialize)]
+struct JsonRemoval<'a> {
+    file: &'a str,
+    line: u64,
+    round: usize,
+    clause: bool,
+    reasons: Vec<JsonReason<'a>>,
+}
+#[derive(serde::Serialize)]
+struct JsonReason<'a> {
+    kind: FindingKind,
+    text: &'a str,
+}
+#[derive(serde::Serialize)]
+struct JsonLeft<'a> {
+    finding: &'a Finding,
+    why: &'a str,
+}
+#[derive(serde::Serialize)]
+struct JsonOutput<'a> {
+    findings: &'a [Finding],
+    summary: crate::report::Summary<'a>,
+}
+
+/// `fix-report.json`: `fix-report.txt` for tools, with each written file's SHA-256 before and after.
+pub fn write_json_report(report: &FixReport, out: &mut dyn Write) -> io::Result<()> {
+    let (out_dir, backup_suffix) = match &report.target.destination {
+        Destination::Out(dir) => (Some(check::display(dir)), None),
+        Destination::InPlace { backup } => (None, backup.as_deref()),
+    };
+    let json = JsonReport {
+        sqlca: env!("CARGO_PKG_VERSION"),
+        dry_run: report.target.dry_run,
+        in_place: out_dir.is_none(),
+        out: out_dir,
+        backup_suffix,
+        report: report.report.as_deref().map(check::display),
+        rounds: report.rounds,
+        files: report
+            .files
+            .iter()
+            .map(|f| JsonFile {
+                input: &f.input,
+                output: check::display(&f.path),
+                changed: f.changed,
+                backup: f.backup.as_deref().map(check::display),
+                sha256_before: f.sha256.as_ref().map(|d| d.before.as_str()),
+                sha256_after: f.sha256.as_ref().map(|d| d.after.as_str()),
+            })
+            .collect(),
+        removed: report
+            .removed
+            .iter()
+            .map(|r| JsonRemoval {
+                file: &r.file,
+                line: r.line,
+                round: r.round,
+                clause: r.clause,
+                reasons: r
+                    .reasons
+                    .iter()
+                    .map(|reason| JsonReason {
+                        kind: reason.kind,
+                        text: &reason.text,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        left: report
+            .left
+            .iter()
+            .map(|l| JsonLeft {
+                finding: &l.finding,
+                why: l.why,
+            })
+            .collect(),
+        output: JsonOutput {
+            findings: &report.output.findings,
+            summary: crate::report::summary(&report.output, &crate::report::Omitted::default()),
+        },
+    };
+    serde_json::to_writer_pretty(&mut *out, &json).map_err(io::Error::other)?;
+    writeln!(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn utc_stamps_match_the_calendar() {
+        // From `date -u -d @SECONDS +%Y%m%dT%H%M%SZ`.
+        for (seconds, stamp) in [
+            (0, "19700101T000000Z"),
+            (951_782_400, "20000229T000000Z"),
+            (1_709_251_199, "20240229T235959Z"),
+            (1_793_318_400, "20261030T000000Z"),
+            (4_102_444_799, "20991231T235959Z"),
+        ] {
+            assert_eq!(utc_stamp(UNIX_EPOCH + Duration::from_secs(seconds)), stamp);
+        }
+    }
+
+    #[test]
+    fn a_backup_is_the_file_name_with_the_suffix() {
+        assert_eq!(
+            beside(Path::new("data/emp.sql"), ".orig"),
+            Path::new("data/emp.sql.orig")
+        );
+    }
 }

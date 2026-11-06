@@ -60,7 +60,7 @@ fn count(report: &check::Report, kind: FindingKind) -> usize {
     reason = "byte bookkeeping over files the test wrote; a mismatch fails the test"
 )]
 fn assert_restores(files: &[InputFile], report: &FixReport) {
-    for (file, written) in files.iter().zip(&report.written) {
+    for (file, written) in files.iter().zip(report.files.iter().map(|f| &f.path)) {
         let original = fs::read(&file.path).unwrap();
         let output = fs::read(written).unwrap();
         let name = check::display(&file.path);
@@ -86,7 +86,13 @@ fn assert_restores(files: &[InputFile], report: &FixReport) {
 )]
 fn run(files: &[InputFile], options: &Options) -> (tempfile::TempDir, FixReport) {
     let out = tempfile::tempdir().unwrap();
-    let report = fix::fix(files, options, Policy::default(), &out.path().join("fixed")).unwrap();
+    let report = fix::fix(
+        files,
+        options,
+        Policy::default(),
+        &fix::Target::out(out.path().join("fixed")),
+    )
+    .unwrap();
     (out, report)
 }
 
@@ -166,7 +172,7 @@ fn fix_sql(sql: &str) -> (tempfile::TempDir, Vec<InputFile>, FixReport) {
         &files,
         &Options::default(),
         Policy::default(),
-        &dir.path().join("out"),
+        &fix::Target::out(dir.path().join("out")),
     )
     .unwrap();
     assert_restores(&files, &report);
@@ -178,7 +184,7 @@ fn fix_sql(sql: &str) -> (tempfile::TempDir, Vec<InputFile>, FixReport) {
     reason = "a fixture or folder that fails fails the test"
 )]
 fn output(report: &FixReport) -> String {
-    fs::read_to_string(report.written.first().unwrap()).unwrap()
+    fs::read_to_string(&report.files.first().unwrap().path).unwrap()
 }
 
 const FAMILY: &str = "CREATE TABLE G (ID NUMBER PRIMARY KEY);\n\
@@ -233,7 +239,7 @@ fn what_the_output_still_has_is_told_at_the_output_even_when_nothing_was_removed
     assert_eq!(place(&report.input), [Some(check::display(&files[0].path))]);
     assert_eq!(
         place(&report.output),
-        [Some(check::display(&report.written[0]))]
+        [Some(check::display(&report.files[0].path))]
     );
 }
 
@@ -320,7 +326,7 @@ fn fix_files(
         &files,
         &Options::default(),
         Policy::default(),
-        &dir.path().join("out"),
+        &fix::Target::out(dir.path().join("out")),
     );
     (dir, files, report)
 }
@@ -362,7 +368,7 @@ fn temporary_files_never_take_an_inputs_name() {
         .map(|f| fs::read_to_string(&f.path).unwrap())
         .collect();
     assert_eq!(originals, [bad, other, also_bad.as_str()]);
-    assert_eq!(fs::read_to_string(&report.written[1]).unwrap(), other);
+    assert_eq!(fs::read_to_string(&report.files[1].path).unwrap(), other);
 }
 
 #[test]
@@ -394,8 +400,86 @@ fn an_output_folder_that_isnt_empty_is_refused() {
         bytes: 8,
         order: OrderSource::Given,
     }];
-    let error = fix::fix(&files, &Options::default(), Policy::default(), dir.path()).unwrap_err();
+    let error = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &fix::Target::out(dir.path()),
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("isn't empty"), "{error}");
+}
+
+#[test]
+fn an_output_folder_that_leads_back_to_the_inputs_is_refused() {
+    let (dir, files) = two_files();
+    let error = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &fix::Target {
+            report: fix::ReportPlace::Off,
+            ..fix::Target::out(dir.path().join("new/.."))
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("isn't empty"), "{error}");
+    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), ORPHAN);
+    assert!(!dir.path().join("new").exists());
+}
+
+#[test]
+fn a_failed_backup_leaves_every_input_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let late = "INSERT INTO C VALUES (3, 8);\n";
+    let files: Vec<InputFile> = [("a.sql", ORPHAN), ("b.sql", late)]
+        .into_iter()
+        .map(|(name, sql)| {
+            let path = dir.path().join(name);
+            fs::write(&path, sql).unwrap();
+            InputFile {
+                path,
+                role: Role::Data,
+                bytes: u64::try_from(sql.len()).unwrap(),
+                order: OrderSource::Given,
+            }
+        })
+        .collect();
+    // The report folder takes the second input's backup name.
+    let error = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &in_place(
+            Some(".orig"),
+            fix::ReportPlace::At(dir.path().join("b.sql.orig")),
+        ),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("already exists"), "{error}");
+    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), ORPHAN);
+    assert_eq!(fs::read_to_string(&files[1].path).unwrap(), late);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_output_folder_that_cant_be_listed_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (dir, files) = two_files();
+    let mode = |m| fs::set_permissions(dir.path(), fs::Permissions::from_mode(m)).unwrap();
+    mode(0o300);
+    let result = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &fix::Target {
+            report: fix::ReportPlace::Off,
+            ..fix::Target::out(dir.path())
+        },
+    );
+    mode(0o700);
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), ORPHAN);
 }
 
 #[test]
@@ -405,8 +489,9 @@ fn outputs_keep_the_inputs_relative_paths() {
     let files = inputs(&root);
     let (dir, report) = run(&files, &Options::default());
     let relative: BTreeMap<PathBuf, PathBuf> = report
-        .written
+        .files
         .iter()
+        .map(|f| &f.path)
         .zip(&files)
         .map(|(w, f)| {
             (
@@ -420,6 +505,255 @@ fn outputs_keep_the_inputs_relative_paths() {
     for (written, given) in relative {
         assert_eq!(written, given);
     }
+}
+
+const ORPHAN: &str = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+                      CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+                      INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2, 9);\n";
+const CLEAN: &str = "INSERT INTO P VALUES (2);\n";
+
+/// `t.sql` with an orphan and `u.sql` with nothing to fix, in a new folder.
+#[expect(clippy::unwrap_used, reason = "a folder that fails fails the test")]
+fn two_files() -> (tempfile::TempDir, Vec<InputFile>) {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [("t.sql", ORPHAN), ("u.sql", CLEAN)]
+        .into_iter()
+        .map(|(name, sql)| {
+            let path = dir.path().join(name);
+            fs::write(&path, sql).unwrap();
+            InputFile {
+                path,
+                role: Role::Data,
+                bytes: u64::try_from(sql.len()).unwrap(),
+                order: OrderSource::Given,
+            }
+        })
+        .collect();
+    (dir, files)
+}
+
+fn in_place(backup: Option<&str>, report: fix::ReportPlace) -> fix::Target {
+    fix::Target {
+        destination: fix::Destination::InPlace {
+            backup: backup.map(str::to_owned),
+        },
+        report,
+        dry_run: false,
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .flat_map(|b| [b >> 4, b & 0xf])
+        .filter_map(|n| char::from_digit(u32::from(n), 16))
+        .collect()
+}
+
+#[test]
+fn an_in_place_fix_keeps_each_changed_original_as_its_backup() {
+    let (dir, files) = two_files();
+    let folder = dir.path().join("report");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&files[0].path, fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    let report = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &in_place(Some(".orig"), fix::ReportPlace::At(folder.clone())),
+    )
+    .unwrap();
+    let fixed = fs::read_to_string(&files[0].path).unwrap();
+    assert_eq!(fixed, ORPHAN.replace("INSERT INTO C VALUES (2, 9);\n", ""));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("t.sql.orig")).unwrap(),
+        ORPHAN
+    );
+    assert_eq!(fs::read_to_string(&files[1].path).unwrap(), CLEAN);
+    assert!(
+        !dir.path().join("u.sql.orig").exists(),
+        "an unchanged file gets no backup"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(&files[0].path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+    }
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+    assert_eq!(
+        report.output.findings.len() + report.removed.len(),
+        1,
+        "the orphan went"
+    );
+
+    assert_eq!(
+        sha256(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    let digests = report.files[0].sha256.clone().unwrap();
+    assert_eq!(digests.before, sha256(ORPHAN.as_bytes()));
+    assert_eq!(digests.after, sha256(fixed.as_bytes()));
+    assert_eq!(report.files[1].sha256, None);
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(folder.join("fix-report.json")).unwrap()).unwrap();
+    assert_eq!(json["in_place"], true);
+    assert_eq!(json["files"][0]["sha256_before"], digests.before.as_str());
+    assert_eq!(json["files"][0]["sha256_after"], digests.after.as_str());
+    assert_eq!(json["files"][1]["changed"], false);
+    assert_eq!(
+        json["removed"][0]["reasons"][0]["kind"],
+        "fk_missing_parent"
+    );
+    let rejects = fs::read_to_string(folder.join("rejects.sql")).unwrap();
+    assert!(
+        rejects.contains("INSERT INTO C VALUES (2, 9);"),
+        "{rejects}"
+    );
+    let text = fs::read_to_string(folder.join("fix-report.txt")).unwrap();
+    assert!(
+        text.contains("t.sql, original kept beside it as t.sql.orig"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_existing_backup_stops_the_fix_before_it_writes() {
+    let (dir, files) = two_files();
+    fs::write(dir.path().join("t.sql.orig"), "older").unwrap();
+    let folder = dir.path().join("report");
+    let error = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &in_place(Some(".orig"), fix::ReportPlace::At(folder.clone())),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("already exists"), "{error}");
+    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), ORPHAN);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("t.sql.orig")).unwrap(),
+        "older"
+    );
+    assert!(!folder.exists());
+}
+
+#[test]
+fn an_in_place_fix_must_keep_the_removed_rows_somewhere() {
+    let (_dir, files) = two_files();
+    let error = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &in_place(None, fix::ReportPlace::Off),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("nowhere"), "{error}");
+    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), ORPHAN);
+
+    let (dir, files) = two_files();
+    let folder = dir.path().join("report");
+    fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &in_place(None, fix::ReportPlace::At(folder.clone())),
+    )
+    .unwrap();
+    assert!(!dir.path().join("t.sql.orig").exists());
+    let rejects = fs::read_to_string(folder.join("rejects.sql")).unwrap();
+    assert!(
+        rejects.contains("INSERT INTO C VALUES (2, 9);"),
+        "{rejects}"
+    );
+}
+
+#[test]
+fn a_dry_run_writes_nothing_and_plans_what_the_fix_does() {
+    let (dir, files) = two_files();
+    let out = dir.path().join("out");
+    let plan = |target: fix::Target| {
+        fix::fix(&files, &Options::default(), Policy::default(), &target).unwrap()
+    };
+    let planned = plan(fix::Target {
+        dry_run: true,
+        ..fix::Target::out(&out)
+    });
+    let in_place = plan(fix::Target {
+        dry_run: true,
+        ..in_place(
+            Some(".orig"),
+            fix::ReportPlace::At(dir.path().join("report")),
+        )
+    });
+    let mut left: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["t.sql", "u.sql"], "nothing written");
+    assert_eq!(fs::read_to_string(&files[0].path).unwrap(), ORPHAN);
+    assert_eq!(in_place.removed, planned.removed);
+    assert!(planned.files.iter().all(|f| f.sha256.is_none()));
+
+    let done = plan(fix::Target::out(&out));
+    assert_eq!(done.removed, planned.removed);
+    assert_eq!(done.rounds, planned.rounds);
+    assert_eq!(
+        done.files
+            .iter()
+            .map(|f| (&f.path, f.changed))
+            .collect::<Vec<_>>(),
+        planned
+            .files
+            .iter()
+            .map(|f| (&f.path, f.changed))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_report_goes_where_it_is_told_or_nowhere() {
+    let (dir, files) = two_files();
+    let fix_to =
+        |target: fix::Target| fix::fix(&files, &Options::default(), Policy::default(), &target);
+    let full = dir.path().join("full");
+    fs::create_dir(&full).unwrap();
+    fs::write(full.join("x"), "").unwrap();
+    let error = fix_to(fix::Target {
+        report: fix::ReportPlace::At(full),
+        ..fix::Target::out(dir.path().join("a"))
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("isn't empty"), "{error}");
+    assert!(!dir.path().join("a").exists(), "refused before writing");
+
+    let report = fix_to(fix::Target {
+        report: fix::ReportPlace::Off,
+        ..fix::Target::out(dir.path().join("b"))
+    })
+    .unwrap();
+    assert_eq!(report.report, None);
+    assert!(dir.path().join("b/t.sql").exists());
+    assert!(!dir.path().join("b").join(fix::REPORT_FOLDER).exists());
+
+    let elsewhere = dir.path().join("reports/run");
+    fix_to(fix::Target {
+        report: fix::ReportPlace::At(elsewhere.clone()),
+        ..fix::Target::out(dir.path().join("c"))
+    })
+    .unwrap();
+    assert!(elsewhere.join("rejects.sql").exists());
+    assert!(elsewhere.join("fix-report.json").exists());
+    assert!(!dir.path().join("c").join(fix::REPORT_FOLDER).exists());
 }
 
 #[cfg(feature = "gen")]

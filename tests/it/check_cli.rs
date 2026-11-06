@@ -374,8 +374,144 @@ fn a_report_folder_that_already_exists_in_the_output_stops_the_run() {
         && !dir.path().join("out/sqlca-report/fix-report.txt").exists();
     if case_insensitive {
         assert_eq!(output.status.code(), Some(2), "{stderr}");
-        assert!(stderr.contains("cannot make the report folder"), "{stderr}");
+        assert!(
+            stderr.contains("report folder") && stderr.contains("isn't empty"),
+            "{stderr}"
+        );
     } else {
         assert_eq!(output.status.code(), Some(0), "{stderr}");
     }
+}
+
+const ORPHAN: &str = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+                      CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+                      INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (2, 9);\n";
+
+/// `sqlca fix t.sql ARGS` in a new folder holding `t.sql` with an orphan.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a missing binary or folder fails the test"
+)]
+fn fix_orphan(args: &[&str]) -> (tempfile::TempDir, i32, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("t.sql"), ORPHAN).unwrap();
+    let output = Command::cargo_bin("sqlca")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["fix", "t.sql", "--progress", "never"])
+        .args(args)
+        .output()
+        .unwrap();
+    let text = |b: Vec<u8>| String::from_utf8(b).unwrap();
+    (
+        dir,
+        output.status.code().unwrap(),
+        text(output.stdout),
+        text(output.stderr),
+    )
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn fix_in_place_keeps_backups_and_a_report_named_by_the_time() {
+    let (dir, code, _, stderr) = fix_orphan(&["--in-place"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains(
+            "Output     the inputs, in place; each changed one kept first as <file>.orig"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("t.sql.orig")).unwrap(),
+        ORPHAN
+    );
+    assert!(
+        !fs::read_to_string(dir.path().join("t.sql"))
+            .unwrap()
+            .contains("(2, 9)")
+    );
+    let names = names(dir.path());
+    let [report, fixed, backup] = names.as_slice() else {
+        panic!("{names:?}");
+    };
+    assert_eq!((fixed.as_str(), backup.as_str()), ("t.sql", "t.sql.orig"));
+    let stamp = report.strip_prefix("sqlca-fix-").unwrap();
+    assert!(
+        stamp.len() == 16 && stamp.starts_with("20") && stamp.ends_with('Z'),
+        "{report}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "Report     {}",
+            dir.path().canonicalize().unwrap().join(report).display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        self::names(&dir.path().join(report)),
+        ["fix-report.json", "fix-report.txt", "rejects.sql"]
+    );
+}
+
+#[test]
+fn fix_refuses_unclear_or_unsafe_destinations() {
+    for args in [
+        &["--in-place", "--no-backup", "--no-report"][..],
+        &[][..],
+        &["--in-place", "--out", "o"][..],
+        &["--out", "o", "--backup", ".bak"][..],
+        &["--out", "o", "--no-backup"][..],
+        &["--in-place", "--backup", ""][..],
+        &["--in-place", "--backup", "x/y"][..],
+        &["--in-place", "--report-dir", "r", "--no-report"][..],
+    ] {
+        let (dir, code, _, stderr) = fix_orphan(args);
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        assert_eq!(names(dir.path()), ["t.sql"], "{args:?}: nothing written");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("t.sql")).unwrap(),
+            ORPHAN
+        );
+    }
+    let (_, _, _, stderr) = fix_orphan(&["--in-place", "--no-backup", "--no-report"]);
+    assert!(
+        stderr.contains("would keep the removed rows nowhere"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_dry_run_prints_the_report_it_would_write() {
+    let (dir, code, stdout, stderr) = fix_orphan(&["--in-place", "--dry-run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(names(dir.path()), ["t.sql"], "nothing written");
+    assert!(stdout.contains("Dry run: nothing was written"), "{stdout}");
+    assert!(
+        stdout.contains("Would fix  1 rows in 1 round (missing parent 1)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("t.sql, original kept beside it as t.sql.orig"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("(would be)"), "{stderr}");
+
+    let (dir, code, stdout, stderr) = fix_orphan(&["--out", "o", "--dry-run", "--format", "json"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(names(dir.path()), ["t.sql"], "nothing written");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["dry_run"], true);
+    assert_eq!(json["removed"][0]["line"], 4);
+    assert!(json["files"][0].get("sha256_after").is_none(), "{json}");
 }
