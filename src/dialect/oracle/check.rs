@@ -14,7 +14,7 @@ use crate::finding::{Finding, FindingKind};
 use crate::fix::{self, FixReport, OnDuplicate, OnFk, Policy, Removal, ReportPlace, Target};
 use crate::input::{InputFile, OrderSource, Role};
 use crate::synth::schema::{APP_TABLES, Kind, REF_TABLES, constraints_of};
-use crate::synth::{self, Encoding, LineEnding, Manifest, Noise, Options, Placement};
+use crate::synth::{self, Encoding, Layout, LineEnding, Manifest, Noise, Options, Placement};
 
 const PDB: &str = "//localhost/FREEPDB1";
 
@@ -296,29 +296,65 @@ fn generate(options: &Options) -> (tempfile::TempDir, std::path::PathBuf, Manife
     (dir, export, manifest)
 }
 
-/// Constraints in before the data: Oracle rejects each bad row at its insert, so every manifest finding must be
-/// one rejected row, on the same line. With `exact` off (wrapped statements, multi-line strings, where SQL*Plus
-/// prints a line other than the first), only the kinds and counts are compared.
+/// Constraints in before the data: Oracle rejects each bad row at its insert, so the rows with manifest findings
+/// must be the rejected rows, on the same lines. With `exact` off (wrapped statements, multi-line strings, where
+/// SQL*Plus prints a line other than the first), only the kinds and counts are compared.
 fn check_load_order(oracle: &Oracle, options: &Options, run: &str, exact: bool) {
     let (_dir, export, manifest) = generate(options);
     let spool = oracle.load(&export, options.encoding, run);
     let observed = observed_load_order(&spool, &line_index(&export, &manifest), run, exact);
     let expected = expected_load_order(&manifest.findings, exact);
-    assert_eq!(
-        observed, expected,
-        "{run}: Oracle's rejections (left) differ from the manifest (right)"
+    assert_rejections(
+        &observed,
+        &expected,
+        &format!("{run}: Oracle's rejections (left) differ from the manifest (right)"),
     );
-    if exact {
-        // Oracle reports one error per row, so the manifest must have one finding per row.
-        let mut rows: Vec<_> = expected.keys().map(|s| &s.location).collect();
-        let all = rows.len();
-        rows.dedup();
-        assert_eq!(
-            rows.len(),
-            all,
-            "{run}: a row has two findings, but Oracle reports one"
-        );
+}
+
+/// A rejected row's place, and the reasons for it.
+type Rows<'a> = BTreeMap<&'a Option<(String, u64)>, Vec<(&'static str, &'a str)>>;
+
+/// Each row's reasons, once per count.
+fn by_row(signatures: &BTreeMap<Signature, usize>) -> Rows<'_> {
+    let mut rows: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for (signature, &count) in signatures {
+        let reasons = rows.entry(&signature.location).or_default();
+        reasons.extend((0..count).map(|_| (signature.what, signature.detail.as_str())));
     }
+    rows
+}
+
+/// Oracle rejects a row once, for the first constraint it fails, while a row can have several findings: a child
+/// before its parent that is also a duplicate, say. With places, each rejected row must be a row with findings, and
+/// Oracle's reason one of them; every row with findings must be rejected. Without places, the counts must match.
+fn assert_rejections(
+    observed: &BTreeMap<Signature, usize>,
+    expected: &BTreeMap<Signature, usize>,
+    message: &str,
+) {
+    if observed
+        .keys()
+        .chain(expected.keys())
+        .any(|s| s.location.is_none())
+    {
+        assert_eq!(observed, expected, "{message}");
+        return;
+    }
+    let (observed, expected) = (by_row(observed), by_row(expected));
+    let mismatched: Vec<_> = observed
+        .keys()
+        .chain(expected.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|row| match (observed.get(*row), expected.get(*row)) {
+            (Some(rejected), Some(found)) => {
+                rejected.len() != 1 || !rejected.iter().all(|reason| found.contains(reason))
+            }
+            _ => true,
+        })
+        .map(|row| (row, observed.get(row), expected.get(row)))
+        .collect();
+    assert!(mismatched.is_empty(), "{message}: {mismatched:#?}");
 }
 
 fn observed_load_order(
@@ -785,10 +821,12 @@ fn check_fixed(
             acted.is_empty(),
             "{run}: Oracle rejects fixed rows {acted:?}"
         );
-        assert_eq!(
-            observed,
-            expected_load_order(&left, exact),
-            "{run}: Oracle's rejections (left) differ from the fix's check of its output (right)"
+        assert_rejections(
+            &observed,
+            &expected_load_order(&left, exact),
+            &format!(
+                "{run}: Oracle's rejections (left) differ from the fix's check of its output (right)"
+            ),
         );
         observed.values().sum::<usize>()
     };
@@ -838,12 +876,21 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         deferred_violations: true,
         ..base.clone()
     };
+    // The departments come before their managers with other tables between, and children before their parents: no
+    // COMMIT may come before the managers, and a bad row can be a child before its parent too.
+    let shuffled = Options {
+        seed: 6,
+        layout: Layout::Single,
+        shuffle_order: true,
+        ..base.clone()
+    };
     // With `exact` off, only kinds and counts are compared.
     let exports = [
         (base, "sqldev", true),
         (quirks, "quirks", true),
         (wrapped, "wrapped", false),
         (after, "after-data", true),
+        (shuffled, "shuffled", true),
     ];
     for (options, run, exact) in &exports {
         match options.constraints {
