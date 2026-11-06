@@ -5,11 +5,12 @@
 mod rows;
 mod structure;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 pub use structure::{Row, StructureError, resolve_row};
 
-use crate::catalog::{Catalog, CatalogBuilder, Issue, Kind, Origin};
+use crate::catalog::{Catalog, CatalogBuilder, Issue, Kind, Origin, Parent};
 use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::Finding;
 use crate::input::{self, InputError, InputFile, Role};
@@ -78,6 +79,8 @@ pub struct Report {
     pub unused: u64,
     pub rows: u64,
     pub schema: SchemaCounts,
+    /// The parent keys enabled foreign keys point at, by table and columns as findings name them.
+    pub referenced: BTreeSet<(String, Vec<String>)>,
 }
 
 /// What the schema pass found, for the run's summary.
@@ -124,14 +127,26 @@ pub fn run_with(
     run_inner(files, options, &[], observer)
 }
 
-/// `run`, reading each file as if the rows inside its `removed` spans weren't there. `removed` is by file position,
-/// each file's spans sorted and apart.
+/// The catalog the schema pass built from the files' DDL, with what the pass reported.
+pub struct Schema {
+    catalog: Catalog,
+    report: Report,
+}
+
+/// The schema pass of `run`, for `run_without` to check rows against as often as it is asked.
+pub fn schema(files: &[InputFile], options: &Options) -> Result<Schema, InputError> {
+    read_schema(files, options, &mut Quiet)
+}
+
+/// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there.
+/// `removed` is by file position, each file's spans sorted and apart.
 pub fn run_without(
     files: &[InputFile],
     options: &Options,
+    schema: &Schema,
     removed: &[Vec<Span>],
 ) -> Result<Report, InputError> {
-    run_inner(files, options, removed, &mut Quiet)
+    check_rows(files, options, schema, removed, &mut Quiet)
 }
 
 /// Whether `span` lies inside one of the sorted, separate `cuts`.
@@ -149,6 +164,21 @@ fn run_inner(
     removed: &[Vec<Span>],
     observer: &mut dyn Observer,
 ) -> Result<Report, InputError> {
+    let schema = read_schema(files, options, observer)?;
+    check_rows(files, options, &schema, removed, observer)
+}
+
+/// The files a pass reads, and their bytes in all.
+fn total(files: &[InputFile], pass: impl Fn(&InputFile) -> bool) -> (usize, u64) {
+    let read: Vec<&InputFile> = files.iter().filter(|f| pass(f)).collect();
+    (read.len(), read.iter().map(|f| f.bytes).sum::<u64>())
+}
+
+fn read_schema(
+    files: &[InputFile],
+    options: &Options,
+    observer: &mut dyn Observer,
+) -> Result<Schema, InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
     let reading = Reading {
         names: &names,
@@ -157,14 +187,8 @@ fn run_inner(
     let mut report = Report::default();
     let schema_given = files.iter().any(|f| f.role == Role::Schema);
     let in_schema_pass = |f: &InputFile| !(schema_given && f.role == Role::Data);
-    let in_rows_pass = |f: &InputFile| f.role != Role::Schema;
-    let total = |pass: &dyn Fn(&InputFile) -> bool| {
-        let read: Vec<&InputFile> = files.iter().filter(|f| pass(f)).collect();
-        (read.len(), read.iter().map(|f| f.bytes).sum::<u64>())
-    };
-
     let mut builder = CatalogBuilder::new(options.dialect.rules(), options.default_schema.clone());
-    let (count, bytes) = total(&in_schema_pass);
+    let (count, bytes) = total(files, in_schema_pass);
     observer.pass(Pass::Schema, count, bytes);
     for (index, file) in files.iter().enumerate() {
         if !in_schema_pass(file) {
@@ -184,17 +208,35 @@ fn run_inner(
     }
     let (catalog, issues) = builder.finish();
     report.schema = schema_counts(&catalog);
+    report.referenced = referenced(&catalog);
     observer.schema(&catalog);
     report.catalog = issues
         .into_iter()
         .map(|Issue { origin, message }| problem(&names, origin.file, Some(origin.line), message))
         .collect();
+    Ok(Schema { catalog, report })
+}
 
-    let mut checker = rows::Checker::new(&catalog, options.dialect, options.load_order, &names);
+fn check_rows(
+    files: &[InputFile],
+    options: &Options,
+    schema: &Schema,
+    removed: &[Vec<Span>],
+    observer: &mut dyn Observer,
+) -> Result<Report, InputError> {
+    let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
+    let reading = Reading {
+        names: &names,
+        options,
+    };
+    let catalog = &schema.catalog;
+    let mut report = schema.report.clone();
+    let in_rows_pass = |f: &InputFile| f.role != Role::Schema;
+    let mut checker = rows::Checker::new(catalog, options.dialect, options.load_order, &names);
     let mut not_followed = Vec::new();
     let mut unused = 0;
     let mut count = 0;
-    let (files_read, bytes) = total(&in_rows_pass);
+    let (files_read, bytes) = total(files, in_rows_pass);
     observer.pass(Pass::Rows, files_read, bytes);
     for (index, file) in files.iter().enumerate() {
         if !in_rows_pass(file) {
@@ -220,10 +262,10 @@ fn run_inner(
                             offset: row.span.start,
                             line: row.line,
                         };
-                        match resolve_row(&catalog, row) {
+                        match resolve_row(catalog, row) {
                             Ok(resolved) => matched.push((resolved, row, at)),
                             Err(error) => {
-                                checker.structure(error.finding(&catalog, row, file), reference);
+                                checker.structure(error.finding(catalog, row, file), reference);
                             }
                         }
                     }
@@ -284,6 +326,41 @@ fn schema_counts(catalog: &Catalog) -> SchemaCounts {
         counts.deferred += usize::from(key.state.initially_deferred);
     }
     counts
+}
+
+fn referenced(catalog: &Catalog) -> BTreeSet<(String, Vec<String>)> {
+    let mut keys = BTreeSet::new();
+    for constraint in catalog.tables().iter().flat_map(|t| &t.constraints) {
+        let Kind::ForeignKey {
+            parent:
+                Parent::Key {
+                    table,
+                    constraint: key,
+                },
+            ..
+        } = &constraint.kind
+        else {
+            continue;
+        };
+        if !constraint.state.enabled {
+            continue;
+        }
+        let Some(parent) = catalog.table(*table) else {
+            continue;
+        };
+        let Some(Kind::PrimaryKey { columns } | Kind::Unique { columns, .. }) =
+            parent.constraints.get(*key).map(|c| &c.kind)
+        else {
+            continue;
+        };
+        let names = columns
+            .iter()
+            .filter_map(|&c| parent.columns.get(c))
+            .map(|c| c.name.clone())
+            .collect();
+        keys.insert((catalog.display(&parent.name), names));
+    }
+    keys
 }
 
 /// A path as the user gave it, with `/` between its parts on Windows too, so findings read the same everywhere.

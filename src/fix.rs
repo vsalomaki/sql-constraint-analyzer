@@ -223,7 +223,7 @@ pub fn fix(
         cuts,
         mut removed,
         left,
-    } = run_rounds(files, options, policy, &names)?;
+    } = run_rounds(files, options, policy, &names, target.dry_run)?;
 
     let outputs: Vec<Output> = names
         .into_iter()
@@ -249,7 +249,8 @@ pub fn fix(
     describe_removals(&mut removed, files, target.annotate)?;
     let mut report = FixReport {
         input,
-        output: last,
+        // Without a last round, the verify supplies it.
+        output: last.unwrap_or_default(),
         rounds,
         removed,
         left,
@@ -322,8 +323,8 @@ fn write(
 struct Plan {
     /// The first round's check.
     input: Report,
-    /// The last round's check, of the input as the output will be.
-    last: Report,
+    /// The check of the input as the output will be, unless the rounds ended once nothing more could be found.
+    last: Option<Report>,
     rounds: usize,
     /// By input position: the sorted, separate spans to remove.
     cuts: Vec<Vec<Span>>,
@@ -337,14 +338,16 @@ fn run_rounds(
     options: &check::Options,
     policy: Policy,
     names: &[String],
+    confirm: bool,
 ) -> Result<Plan, FixError> {
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
     let mut removed = Vec::new();
     let mut left = Vec::new();
     let mut first_report = None;
     let mut rounds = 0;
+    let schema = check::schema(files, options)?;
     let last = loop {
-        let report = check::run_without(files, options, &cuts)?;
+        let report = check::run_without(files, options, &schema, &cuts)?;
         let mut scans = BTreeMap::new();
         for (index, lines) in named_rows(&report.findings, names, policy) {
             let (Some(file), Some(file_cuts)) = (files.get(index), cuts.get(index)) else {
@@ -358,10 +361,15 @@ fn run_rounds(
             .iter()
             .flat_map(|(index, scan)| scan.crowded.iter().map(move |line| (*index, *line)))
             .collect();
-        let (targets, skipped) = targets(&report.findings, files, names, policy, &crowded);
+        let Decision {
+            targets,
+            left: skipped,
+            waiting,
+        } = targets(&report.findings, files, names, policy, &crowded);
         if rounds == 0 {
             left.extend(skipped);
         }
+        let settled = !waiting && !can_orphan(&targets, &report.referenced);
         let mut changed = false;
         for (index, lines) in &targets {
             let (Some(file), Some(file_cuts), Some(scanned)) =
@@ -398,15 +406,19 @@ fn run_rounds(
             }
         }
         if !changed {
-            break report;
+            break Some(report);
         }
         if first_report.is_none() {
             first_report = Some(report);
         }
         rounds += 1;
+        // Another round would find nothing new; the verify checks the output instead.
+        if settled && !confirm {
+            break None;
+        }
     };
     Ok(Plan {
-        input: first_report.unwrap_or_else(|| last.clone()),
+        input: first_report.or_else(|| last.clone()).unwrap_or_default(),
         last,
         rounds,
         cuts,
@@ -641,13 +653,40 @@ fn named_rows(
     rows
 }
 
+/// What one round removes, and what it leaves.
+struct Decision<'a> {
+    targets: Targets<'a>,
+    /// Findings the fix leaves for review, with why.
+    left: Vec<Left>,
+    /// Some rows wait for a later round to show which row of their key to keep.
+    waiting: bool,
+}
+
+/// Whether the rows going can leave another row without its parent: a row goes from a table a foreign key points
+/// at, other than as a duplicate of each key pointed at, which a kept row still holds.
+fn can_orphan(targets: &Targets, referenced: &BTreeSet<(String, Vec<String>)>) -> bool {
+    targets.values().flat_map(BTreeMap::values).any(|findings| {
+        let Some(table) = findings.first().map(|f| &f.table) else {
+            return false;
+        };
+        referenced
+            .iter()
+            .filter(|(parent, _)| parent == table)
+            .any(|(_, columns)| {
+                !findings
+                    .iter()
+                    .any(|f| f.kind == FindingKind::DuplicateKey && f.columns == *columns)
+            })
+    })
+}
+
 fn targets<'a>(
     findings: &'a [Finding],
     files: &[InputFile],
     names: &[String],
     policy: Policy,
     crowded: &BTreeSet<Row>,
-) -> (Targets<'a>, Vec<Left>) {
+) -> Decision<'a> {
     let row_of = |file: &str, line: u64| Some((names.iter().position(|n| n == file)?, line));
     let keep_last = policy.on_duplicate == OnDuplicate::KeepLast;
     let mut going: Vec<(Row, &Finding)> = Vec::new();
@@ -701,6 +740,7 @@ fn targets<'a>(
             })),
         }
     }
+    let acting = going.len() + lasts.len();
     // Duplicates wait while anything else goes: the row they would keep may go itself, or lose its parent in a later
     // round, and only the rounds after show which row is left to keep.
     if going
@@ -725,12 +765,15 @@ fn targets<'a>(
         let first = f.first.as_ref().and_then(|l| row_of(&l.file, l.line));
         f.kind != FindingKind::DuplicateKey || first.is_none_or(|first| !doomed.contains(&first))
     });
+    let mut taken = going.len();
     // Likewise a key whose last row goes this round: once the last row is gone, the one before it is the one to keep.
     for (last, rows) in lasts {
         if !doomed.contains(&last) {
+            taken += 1;
             going.extend(rows);
         }
     }
+    let waiting = taken < acting;
     let mut targets: Targets = BTreeMap::new();
     for ((index, line), finding) in going {
         targets
@@ -740,7 +783,11 @@ fn targets<'a>(
             .or_default()
             .push(finding);
     }
-    (targets, left)
+    Decision {
+        targets,
+        left,
+        waiting,
+    }
 }
 
 /// The rows of one duplicate key that keep-last removes, each with a finding on its key, after the last row in run
@@ -826,6 +873,10 @@ fn scan(
         let Ok(piece) = piece else {
             break;
         };
+        let last_line = piece.line + newlines(&piece.text);
+        if lines.range(piece.line..=last_line).next().is_none() {
+            continue;
+        }
         let Ok(Some(Statement::Insert(mut rows))) =
             options.dialect.parse(&piece, options.encoding, Pass::Rows)
         else {

@@ -609,6 +609,29 @@ fn a_duplicate_of_a_removed_row_is_kept() {
 }
 
 #[test]
+fn a_duplicate_held_back_goes_in_a_later_round_even_from_a_table_no_key_points_at() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+         INSERT INTO T VALUES (1, 5);\nINSERT INTO T VALUES (1, 6);\nINSERT INTO T VALUES (2, NULL);\n",
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(3, 2), (4, 1)]);
+    assert!(report.output.findings.is_empty());
+}
+
+#[test]
+fn a_duplicate_on_another_key_takes_the_children_of_its_primary_key() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, NAME VARCHAR2(9) UNIQUE);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+         INSERT INTO P VALUES (1, 'a');\nINSERT INTO P VALUES (2, 'a');\nINSERT INTO C VALUES (1, 2);\n",
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(4, 1), (5, 2)]);
+    assert!(report.output.findings.is_empty());
+}
+
+#[test]
 fn what_the_output_still_has_is_told_at_the_output_even_when_nothing_was_removed() {
     let (_dir, files, report) = fix_sql(
         "CREATE TABLE T (ID NUMBER PRIMARY KEY);\nINSERT INTO T VALUES (1);\nINSERT INTO U VALUES (1);\n",
