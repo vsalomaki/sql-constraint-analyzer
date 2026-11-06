@@ -18,7 +18,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | Command | Does |
 |---|---|
 | `make install-hooks` | `git config core.hooksPath .githooks` |
-| `make lint` | `cargo fmt --check`, `cargo deny check`, clippy on all targets and features with `-D warnings` |
+| `make lint` | `cargo fmt --check`, `cargo deny check`, `cargo vet --locked`, clippy on all targets and features with `-D warnings` |
 | `make test` | `cargo nextest run --all-features` |
 | `make fmt` | `cargo fmt` |
 | `bacon` | clippy on save; `t` for tests |
@@ -82,6 +82,15 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - **Dependencies:** add with `cargo add`; pin features (`default-features = false` when the defaults pull in more
   than needed). A dependency that brings a new licence adds it to `deny.toml`'s allowlist, permissive licences only.
   The generator's dependencies are `optional = true` and enabled by the `gen` feature.
+- **Supply chain:** `cargo vet` (`supply-chain/`) requires every crate, at its exact version, to be covered by an
+  imported audit (Mozilla, Google, Bytecode Alliance, ISRG, Zcash, Embark), a trusted publisher, an audit of ours or
+  an exemption. A shipped dependency needs `safe-to-deploy`, a dev or generator one `safe-to-run`.
+  - When a new crate or version fails it, run `cargo vet` (it refreshes the imports, which may cover it already).
+    Otherwise review it with `cargo vet inspect` or `cargo vet diff` and record it with `cargo vet certify`. An
+    exemption is a last resort and says why.
+  - Trust a new publisher only if Mozilla, ISRG or the Bytecode Alliance trust them. Trust entries expire after a
+    year; renew them with `cargo vet trust`.
+  - Issue #35 lists the exemptions still to vet; a PR that vets one removes its exemption.
 
 ## Engineering principles
 
@@ -159,7 +168,7 @@ doesn't map means SQL Oracle doesn't accept.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: `lint` (rustfmt, cargo-deny, clippy) on
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: `lint` (rustfmt, cargo-deny, cargo-vet, clippy) on
 Linux, and `test` (a default-features build, then nextest with all features) on Linux, Windows and macOS.
 
 - **Pull requests from forks never run** any workflow: every job is gated on the head branch being in this
@@ -167,7 +176,7 @@ Linux, and `test` (a default-features build, then nextest with all features) on 
 - **Actions are pinned by commit SHA** with the version in a comment; Dependabot (`.github/dependabot.yml`) proposes
   updates weekly, after a 7-day cooldown. Permissions default to `contents: read`; a job that needs more asks for it
   itself.
-- Tool versions (`cargo-deny`, `cargo-nextest`) are pinned in the workflow. Bumping one means bumping it there and
+- Tool versions (`cargo-deny`, `cargo-vet`, `cargo-nextest`) are pinned in the workflow. Bumping one means bumping it there and
   checking the local version.
 - Check workflow edits with `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7`.
 - `.github/workflows/oracle.yml` runs `scripts/oracle/check.sh` on a runner, started by hand only (`workflow_dispatch`).
