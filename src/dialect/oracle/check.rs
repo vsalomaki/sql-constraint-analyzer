@@ -1,14 +1,18 @@
 //! Ground truth from a real Oracle: loads generated exports into Oracle Free and checks that Oracle rejects exactly
-//! the rows and constraints the generator's manifest expects. Run it with `make oracle-check`, which starts the
-//! container and sets `SQLCA_ORACLE_CONTAINER`.
+//! the rows and constraints the generator's manifest expects, then loads what `sqlca fix` writes of them and checks
+//! that Oracle rejects only what the fix's check of its output still finds. Run it with `make oracle-check`, which
+//! starts the container and sets `SQLCA_ORACLE_CONTAINER`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use super::RULES;
+use crate::check;
 use crate::finding::{Finding, FindingKind};
+use crate::fix::{self, FixReport, OnDuplicate, OnFk, Policy, Removal, ReportPlace, Target};
+use crate::input::{InputFile, OrderSource, Role};
 use crate::synth::schema::{APP_TABLES, Kind, REF_TABLES, constraints_of};
 use crate::synth::{self, Encoding, LineEnding, Manifest, Noise, Options, Placement};
 
@@ -76,7 +80,18 @@ impl Oracle {
         // A foreign key into another schema needs the REFERENCES privilege on the parent.
         driver.push("GRANT REFERENCES ON REF.COUNTRIES TO APP;".into());
         driver.extend(files.iter().filter(|f| !f.starts_with("ref/")).map(include));
-        driver.extend(["COMMIT;", "SPOOL OFF", "EXIT", ""].map(String::from));
+        driver.extend(["COMMIT;", "SET HEADING OFF", "SET FEEDBACK OFF"].map(String::from));
+        driver.push(format!("SPOOL /tmp/sqlca-{run}-rows.log"));
+        let tables: Vec<String> = REF_TABLES
+            .iter()
+            .chain(APP_TABLES.iter())
+            .map(|t| format!("SELECT 1 FROM {}", t.qualified(&RULES)))
+            .collect();
+        driver.push(format!(
+            "SELECT COUNT(*) FROM ({});",
+            tables.join(" UNION ALL ")
+        ));
+        driver.extend(["SPOOL OFF", "EXIT", ""].map(String::from));
         fs::write(export.join("driver.sql"), driver.join("\n")).unwrap();
         fs::write(
             export.join("users.sql"),
@@ -128,6 +143,22 @@ impl Oracle {
             Encoding::Utf8 => String::from_utf8(spool).unwrap(),
             Encoding::Windows1252 => encoding_rs::WINDOWS_1252.decode(&spool).0.into_owned(),
         }
+    }
+
+    /// The rows the schema's tables hold after the `load` named `run`.
+    fn rows(&self, run: &str) -> u64 {
+        let spool = Self::docker(&[
+            "exec",
+            "-u",
+            "root",
+            &self.container,
+            "cat",
+            &format!("/tmp/sqlca-{run}-rows.log"),
+        ]);
+        let text = String::from_utf8(spool).unwrap();
+        text.trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{run}: no row count in {text:?}"))
     }
 }
 
@@ -269,33 +300,8 @@ fn generate(options: &Options) -> (tempfile::TempDir, std::path::PathBuf, Manife
 fn check_load_order(oracle: &Oracle, options: &Options, run: &str, exact: bool) {
     let (_dir, export, manifest) = generate(options);
     let spool = oracle.load(&export, options.encoding, run);
-    let index = line_index(&export, &manifest);
-    let mut observed = Vec::new();
-    for error in errors(&spool) {
-        let (what, detail) =
-            row_signature(&error).unwrap_or_else(|| panic!("{run}: unexpected {error:?}"));
-        let location = exact.then(|| locate(&index, error.echo.as_deref().unwrap_or_default()));
-        observed.push(Signature {
-            location,
-            what,
-            detail,
-        });
-    }
-    let expected = manifest.findings.iter().map(|f| {
-        let (what, detail) = expected_row(f);
-        let location = exact.then(|| {
-            (
-                f.file.clone().unwrap_or_default(),
-                f.line.unwrap_or_default(),
-            )
-        });
-        Signature {
-            location,
-            what,
-            detail,
-        }
-    });
-    let (expected, observed) = (counts(expected), counts(observed));
+    let observed = observed_load_order(&spool, &line_index(&export, &manifest), run, exact);
+    let expected = expected_load_order(&manifest.findings, exact);
     assert_eq!(
         observed, expected,
         "{run}: Oracle's rejections (left) differ from the manifest (right)"
@@ -311,6 +317,41 @@ fn check_load_order(oracle: &Oracle, options: &Options, run: &str, exact: bool) 
             "{run}: a row has two findings, but Oracle reports one"
         );
     }
+}
+
+fn observed_load_order(
+    spool: &str,
+    index: &BTreeMap<String, Vec<(String, u64)>>,
+    run: &str,
+    exact: bool,
+) -> BTreeMap<Signature, usize> {
+    counts(errors(spool).into_iter().map(|error| {
+        let (what, detail) =
+            row_signature(&error).unwrap_or_else(|| panic!("{run}: unexpected {error:?}"));
+        let location = exact.then(|| locate(index, error.echo.as_deref().unwrap_or_default()));
+        Signature {
+            location,
+            what,
+            detail,
+        }
+    }))
+}
+
+fn expected_load_order(findings: &[Finding], exact: bool) -> BTreeMap<Signature, usize> {
+    counts(findings.iter().map(|f| {
+        let (what, detail) = expected_row(f);
+        let location = exact.then(|| {
+            (
+                f.file.clone().unwrap_or_default(),
+                f.line.unwrap_or_default(),
+            )
+        });
+        Signature {
+            location,
+            what,
+            detail,
+        }
+    }))
 }
 
 /// What an after-data load ends with: the rows rejected at insert, the keys that failed to validate, the foreign
@@ -383,10 +424,10 @@ fn observed_after_data(
     .sorted()
 }
 
-fn expected_after_data(manifest: &Manifest) -> AfterData {
+fn expected_after_data(findings: &[Finding]) -> AfterData {
     let mut rows = Vec::new();
     let mut want = AfterData::default();
-    for finding in &manifest.findings {
+    for finding in findings {
         match (finding.kind, &finding.constraint) {
             (FindingKind::DuplicateKey | FindingKind::NotNull, Some(c)) => {
                 want.keys.push(c.clone());
@@ -435,7 +476,7 @@ fn check_after_data(oracle: &Oracle, options: &Options, run: &str) {
     let observed = observed_after_data(&spool, &line_index(&export, &manifest), run);
     assert_eq!(
         observed,
-        expected_after_data(&manifest),
+        expected_after_data(&manifest.findings),
         "{run}: Oracle (left) differs from the manifest (right)"
     );
 }
@@ -465,6 +506,292 @@ fn blocked_fk(name: &str, failed_keys: &[String]) -> bool {
         })
 }
 
+/// `sqlca fix` of `export` into `fixed`, with its order file, and the findings its check of the output still has, by
+/// the export's relative paths as the manifest names files.
+fn fix_export(
+    export: &Path,
+    fixed: &Path,
+    check: &check::Options,
+    policy: Policy,
+    annotate: bool,
+) -> (FixReport, Vec<Finding>) {
+    let order = fs::read_to_string(export.join(synth::ORDER_FILE)).unwrap();
+    let relative: Vec<&str> = order.lines().filter(|l| !l.trim().is_empty()).collect();
+    let files: Vec<InputFile> = relative
+        .iter()
+        .map(|path| InputFile {
+            path: export.join(path),
+            role: if path.starts_with("ref/") {
+                Role::Reference
+            } else {
+                Role::Data
+            },
+            bytes: fs::metadata(export.join(path)).unwrap().len(),
+            order: OrderSource::Given,
+        })
+        .collect();
+    let target = Target {
+        report: ReportPlace::Off,
+        annotate,
+        ..Target::out(fixed)
+    };
+    let report = fix::fix(&files, check, policy, &target).unwrap();
+    fs::copy(
+        export.join(synth::ORDER_FILE),
+        fixed.join(synth::ORDER_FILE),
+    )
+    .unwrap();
+    let names: BTreeMap<String, &str> = report
+        .files
+        .iter()
+        .zip(&relative)
+        .map(|(output, path)| {
+            assert_eq!(output.path, fixed.join(path), "outputs keep their paths");
+            (check::display(&output.path), *path)
+        })
+        .collect();
+    let left = report
+        .output
+        .findings
+        .iter()
+        .map(|f| Finding {
+            file: f.file.as_ref().map(|name| names[name].to_owned()),
+            ..f.clone()
+        })
+        .collect();
+    (report, left)
+}
+
+/// Every input has an output, and each output with the removed bytes put back in place of what it has there instead
+/// is its input exactly: the fix changed nothing but the rows it reports, and a row it set to NULL reads as
+/// `nulled_row` builds it. `inputs` are the bytes read before the fix, since an unchanged output is a hard link to its
+/// input.
+fn assert_restores(
+    inputs: &[(String, Vec<u8>)],
+    fixed: &Path,
+    report: &FixReport,
+    annotate: bool,
+    run: &str,
+) {
+    assert_eq!(
+        report.files.len(),
+        inputs.len(),
+        "{run}: every input has an output"
+    );
+    for (output, (path, input)) in report.files.iter().zip(inputs) {
+        let written = fs::read(fixed.join(path))
+            .unwrap_or_else(|e| panic!("{run}: {path} has no output: {e}"));
+        let mut removed: Vec<&Removal> = report
+            .removed
+            .iter()
+            .filter(|r| r.file == output.input)
+            .collect();
+        removed.sort_by_key(|r| r.span.start);
+        let (mut rebuilt, mut at_input, mut at_output) = (Vec::new(), 0_usize, 0_usize);
+        // `get`, not indexing: an output cut short fails the comparison below, not a slice.
+        for removal in removed {
+            let start = usize::try_from(removal.span.start).unwrap();
+            let kept = start - at_input;
+            rebuilt.extend_from_slice(written.get(at_output..at_output + kept).unwrap_or_default());
+            at_output += kept;
+            let replaced = written.get(at_output..at_output + removal.replacement.len());
+            assert_eq!(
+                replaced,
+                Some(removal.replacement.as_slice()),
+                "{run}: {path} has no replacement at {start}"
+            );
+            if !removal.nulled.is_empty() {
+                assert!(
+                    removal.replacement == nulled_row(removal, annotate),
+                    "{run}: {path} has the row at {start} other than with NULL in {:?}",
+                    removal.nulled
+                );
+            }
+            rebuilt.extend_from_slice(&removal.text);
+            at_output += removal.replacement.len();
+            at_input = usize::try_from(removal.span.end).unwrap();
+        }
+        rebuilt.extend_from_slice(written.get(at_output..).unwrap_or_default());
+        assert!(
+            rebuilt == *input,
+            "{run}: {path} with its removed rows put back isn't its input"
+        );
+    }
+}
+
+/// Each row set to NULL is one the manifest names as missing a parent, and its NULL columns are those foreign keys'
+/// columns; NULL in the wrong value of them would leave the key broken, which Oracle rejects.
+fn assert_nulled_columns(
+    report: &FixReport,
+    inputs: &[(String, Vec<u8>)],
+    manifest: &Manifest,
+    run: &str,
+) {
+    let relative: BTreeMap<&str, &str> = report
+        .files
+        .iter()
+        .zip(inputs)
+        .map(|(output, (path, _))| (output.input.as_str(), path.as_str()))
+        .collect();
+    for change in report.removed.iter().filter(|r| !r.nulled.is_empty()) {
+        let file = relative.get(change.file.as_str()).copied();
+        let mut wanted: Vec<&str> = manifest
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::FkMissingParent)
+            .filter(|f| f.file.as_deref() == file && f.line == Some(change.line))
+            .flat_map(|f| f.columns.iter().map(String::as_str))
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut got: Vec<&str> = change.nulled.iter().map(|(c, _)| c.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got, wanted,
+            "{run}: {file:?}:{} is set to NULL other than in its missing parents' columns",
+            change.line
+        );
+    }
+}
+
+/// A row set to NULL as the output should have it, from its original text alone: NULL at each value's place, after it
+/// with `annotate` the comment saying so, and every other byte as it was.
+fn nulled_row(removal: &Removal, annotate: bool) -> Vec<u8> {
+    let offset = |at: u64| usize::try_from(at - removal.span.start).unwrap();
+    let (mut row, mut at) = (Vec::new(), 0);
+    for (column, span) in &removal.nulled {
+        row.extend_from_slice(removal.text.get(at..offset(span.start)).unwrap_or_default());
+        row.extend_from_slice(b"NULL");
+        if annotate {
+            row.extend_from_slice(
+                format!(" /* sqlca fix set {column} to NULL; see rejects.sql */").as_bytes(),
+            );
+        }
+        at = offset(span.end);
+    }
+    row.extend_from_slice(removal.text.get(at..).unwrap_or_default());
+    row
+}
+
+/// The rejections of a kind the fix removes, beyond the rows the fix's check of the output finds before their
+/// parents, which the fix leaves.
+fn acted_on(
+    observed: &BTreeMap<Signature, usize>,
+    load_order: &BTreeMap<Signature, usize>,
+) -> Vec<(Signature, usize)> {
+    observed
+        .iter()
+        .filter(|(s, _)| ["fk", "duplicate", "not null"].contains(&s.what))
+        .filter_map(|(s, &n)| {
+            let extra = n.saturating_sub(load_order.get(s).copied().unwrap_or_default());
+            (extra > 0).then(|| (s.clone(), extra))
+        })
+        .collect()
+}
+
+/// `sqlca fix` of an export, loaded the way the export is: Oracle rejects no row for a kind the fix acts on, rejects
+/// exactly what the fix's check of its output still finds, and keeps every other row the output holds. Before the
+/// data, constraints judge rows as they come, so the fix runs in load-order mode.
+fn check_fixed(
+    oracle: &Oracle,
+    options: &Options,
+    run: &str,
+    exact: bool,
+    policy: Policy,
+    annotate: bool,
+) {
+    let (dir, export, manifest) = generate(options);
+    let fixed = fs::canonicalize(dir.path()).unwrap().join("fixed");
+    let after_data = options.constraints == Placement::AfterData;
+    let check = check::Options {
+        encoding: options.encoding,
+        load_order: !after_data,
+        ..check::Options::default()
+    };
+    let inputs: Vec<(String, Vec<u8>)> = manifest
+        .files
+        .iter()
+        .map(|f| (f.path.clone(), fs::read(export.join(&f.path)).unwrap()))
+        .collect();
+    let (report, left) = fix_export(&export, &fixed, &check, policy, annotate);
+    assert!(!report.removed.is_empty(), "{run}: the fix removed nothing");
+    assert!(
+        policy.on_fk != OnFk::Null || report.removed.iter().any(|r| !r.nulled.is_empty()),
+        "{run}: the fix set nothing to NULL"
+    );
+    // A planted bad row is no other row's parent, so under keep-first the fix removes exactly the rows the manifest
+    // names, less those it keeps with a foreign key set to NULL; one row fewer in the output is a valid row lost.
+    if policy.on_duplicate == OnDuplicate::KeepFirst {
+        let kept = report
+            .removed
+            .iter()
+            .filter(|r| !r.nulled.is_empty())
+            .count();
+        let bad: BTreeSet<(&str, u64)> = manifest
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    FindingKind::DuplicateKey | FindingKind::FkMissingParent | FindingKind::NotNull
+                )
+            })
+            .filter_map(|f| Some((f.file.as_deref()?, f.line?)))
+            .collect();
+        assert_eq!(
+            report.input.rows - report.output.rows,
+            u64::try_from(bad.len() - kept).unwrap(),
+            "{run}: the fix removed other than the manifest's bad rows"
+        );
+    }
+    assert_restores(&inputs, &fixed, &report, annotate, run);
+    assert_nulled_columns(&report, &inputs, &manifest, run);
+    let spool = oracle.load(&fixed, options.encoding, run);
+    let index = line_index(&fixed, &manifest);
+    let rejected = if after_data {
+        let observed = observed_after_data(&spool, &index, run);
+        let failed = [&observed.keys, &observed.fks, &observed.blocked];
+        assert!(
+            failed.iter().all(|list| list.is_empty()),
+            "{run}: Oracle fails constraints on the fixed output: {failed:?}"
+        );
+        let acted = acted_on(&observed.rows, &BTreeMap::new());
+        assert!(
+            acted.is_empty(),
+            "{run}: Oracle rejects fixed rows {acted:?}"
+        );
+        assert_eq!(
+            observed,
+            expected_after_data(&left),
+            "{run}: Oracle (left) differs from the fix's check of its output (right)"
+        );
+        observed.rows.values().sum::<usize>()
+    } else {
+        let observed = observed_load_order(&spool, &index, run, exact);
+        let load_order: Vec<Finding> = left
+            .iter()
+            .filter(|f| f.kind == FindingKind::FkLoadOrder)
+            .cloned()
+            .collect();
+        let acted = acted_on(&observed, &expected_load_order(&load_order, exact));
+        assert!(
+            acted.is_empty(),
+            "{run}: Oracle rejects fixed rows {acted:?}"
+        );
+        assert_eq!(
+            observed,
+            expected_load_order(&left, exact),
+            "{run}: Oracle's rejections (left) differ from the fix's check of its output (right)"
+        );
+        observed.values().sum::<usize>()
+    };
+    assert_eq!(
+        oracle.rows(run),
+        report.output.rows - u64::try_from(rejected).unwrap(),
+        "{run}: Oracle holds other than the output's rows less those it rejected"
+    );
+}
+
 fn every_quirk_but_wrapping() -> Noise {
     Noise {
         wrapped_statements: false,
@@ -475,7 +802,7 @@ fn every_quirk_but_wrapping() -> Noise {
 
 #[test]
 #[ignore = "needs Oracle Free in Docker: run `make oracle-check`"]
-fn oracle_agrees_with_the_manifest() {
+fn oracle_agrees_with_the_manifest_and_the_fix() {
     let oracle = Oracle::from_env();
     // A deferred violation would roll back the whole load at COMMIT, with no row to match.
     let base = Options {
@@ -484,7 +811,6 @@ fn oracle_agrees_with_the_manifest() {
         deferred_violations: false,
         ..Options::default()
     };
-    check_load_order(&oracle, &base, "sqldev", true);
     let quirks = Options {
         seed: 2,
         noise: every_quirk_but_wrapping(),
@@ -492,24 +818,61 @@ fn oracle_agrees_with_the_manifest() {
         encoding: Encoding::Windows1252,
         ..base.clone()
     };
-    check_load_order(&oracle, &quirks, "quirks", true);
-    check_load_order(
-        &oracle,
-        &Options {
-            seed: 3,
-            noise: Noise::all(),
-            ..base.clone()
-        },
-        "wrapped",
-        false,
-    );
+    let wrapped = Options {
+        seed: 3,
+        noise: Noise::all(),
+        ..base.clone()
+    };
     let after = Options {
         seed: 4,
         constraints: Placement::AfterData,
         deferred_violations: true,
-        ..base
+        ..base.clone()
     };
-    check_after_data(&oracle, &after, "after-data");
+    // With `exact` off, only kinds and counts are compared.
+    let exports = [
+        (base, "sqldev", true),
+        (quirks, "quirks", true),
+        (wrapped, "wrapped", false),
+        (after, "after-data", true),
+    ];
+    for (options, run, exact) in &exports {
+        match options.constraints {
+            Placement::BeforeData => check_load_order(&oracle, options, run, *exact),
+            Placement::AfterData => check_after_data(&oracle, options, run),
+        }
+    }
+    let keep_last = Policy {
+        on_duplicate: OnDuplicate::KeepLast,
+        ..Policy::default()
+    };
+    let null_fk = Policy {
+        on_fk: OnFk::Null,
+        ..Policy::default()
+    };
+    let fixes = [
+        (Policy::default(), false, "fix"),
+        (Policy::default(), true, "fix-annotate"),
+        (keep_last, true, "fix-keep-last-annotate"),
+        (null_fk, true, "fix-null-annotate"),
+    ];
+    for (options, run, exact) in &exports {
+        // The fix removes the deferred violation, so the load commits.
+        let options = Options {
+            deferred_violations: true,
+            ..options.clone()
+        };
+        for (policy, annotate, how) in fixes {
+            check_fixed(
+                &oracle,
+                &options,
+                &format!("{how}-{run}"),
+                *exact,
+                policy,
+                annotate,
+            );
+        }
+    }
 }
 
 #[test]

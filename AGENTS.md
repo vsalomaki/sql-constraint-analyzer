@@ -25,7 +25,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `cargo run -- <args>` | Runs `sqlca` |
 | `cargo run -F gen --bin sqlca-gen -- <args>` | Runs the generator; it builds only with the `gen` feature |
 | `make fixtures` | Regenerates `tests/fixtures/gen/<dialect>/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
-| `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect; see "Ground truth" below |
+| `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect, and only what `sqlca fix` leaves in its output; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
 | `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/` (reused while their options match), times `sqlca check` (release) on both in both modes, and fails unless the findings equal the manifest; prints wall time, MB/s and peak RSS (Linux only) |
@@ -136,11 +136,17 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 
 ### Ground truth
 
-`make oracle-check` (`scripts/oracle/check.sh`) runs the ignored test `oracle_agrees_with_the_manifest` against
-Oracle Free in Docker: image pinned by digest, no published port, a throwaway password. It loads generated exports
-and requires Oracle's rejections to match the manifest, by file and line where SQL\*Plus allows. Run it after any
-change to the generator's schema, plants or Oracle syntax. A failure is either a generator bug or a wrong Oracle
-rule: find out which before changing either. A new `ORA-` code the test doesn't map means SQL Oracle doesn't accept.
+`make oracle-check` (`scripts/oracle/check.sh`, about a minute) runs the ignored test
+`oracle_agrees_with_the_manifest_and_the_fix` against Oracle Free in Docker: image pinned by digest, no published
+port, a throwaway password. It loads generated exports and requires Oracle's rejections to match the manifest, by
+file and line where SQL\*Plus allows. Then it fixes the same exports (default policy, with `--annotate`, and
+`--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires each output
+with its removed rows put back to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
+rejects no duplicate, NULL or missing-parent row other than a child the fix leaves before its parent, that its
+rejections match the fix's check of its output, and that it holds the output's rows less those it rejected. Run it
+after any change to the generator's schema, plants or Oracle syntax, or to what `fix` writes. A failure is a
+generator bug, a fix bug or a wrong Oracle rule: find out which before changing any. A new `ORA-` code the test
+doesn't map means SQL Oracle doesn't accept.
 
 ## CI
 
