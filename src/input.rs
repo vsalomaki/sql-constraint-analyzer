@@ -52,6 +52,15 @@ pub enum InputError {
          (--schema and --reference files are read for their tables only)"
     )]
     NoData,
+    #[error(
+        "{again}: table {table} is created again; it was first created at {first} \
+         (--folder-schema decides which folder names the schema of an unqualified name)"
+    )]
+    TableCreatedTwice {
+        table: String,
+        first: String,
+        again: String,
+    },
 }
 
 /// What a file is for. Schema files count as loaded first, then reference files, then the data.

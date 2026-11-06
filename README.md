@@ -14,6 +14,10 @@ constraints, foreign keys above all, and writes fixed copies.
   `file:line`, by the database's own rules: which values count as NULL, how identifiers fold, how partly NULL keys
   compare, and constraint states such as disabled or deferred.
 - Optionally checks the load order too: a child row inserted before its parent.
+- Checks several exports at once: an unqualified table name means its folder's schema first (`a/x.sql` is in
+  schema A), so two exports with the same table names stay apart. `--folder-schema top` takes the first folder
+  instead (for `a/tables/`, `a/data/`), `off` turns it off, and `--default-schema` overrides it. A table created
+  twice stops the run.
 - Reports rows at the end of a data file with no COMMIT after them (or a statement that commits, such as DDL in
   Oracle). `--no-commit-check` turns this off.
 - Fixes: writes corrected files to another folder or in place, with every removed or changed row kept in a rejects
@@ -27,6 +31,7 @@ Oracle is the supported dialect today. Others are meant to plug in the same way.
 sqlca check 'export/*.sql'                       # report violations
 sqlca check 'app/**/*.sql' --reference 'ref/**/*.sql'  # parents from another schema, not checked
 sqlca check --load-order --files-from order.txt  # also check the load order given
+sqlca check 'exports/**/*.sql' --folder-schema top  # exports/a/tables/…, exports/b/data/…: schemas A and B
 sqlca check 'export/*.sql' --no-commit-check     # don't require a COMMIT after each data file's rows
 sqlca check 'export/*.sql' --format json > findings.jsonl  # JSON Lines; progress stays on stderr
 sqlca fix 'export/*.sql' --out fixed/            # write fixed copies; removed rows in fixed/sqlca-report/rejects.sql

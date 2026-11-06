@@ -1189,8 +1189,8 @@ fn nullable_values(
     findings: &[&Finding],
     catalog: &Catalog,
 ) -> Result<Vec<(String, Span)>, String> {
-    let resolved =
-        check::resolve_row(catalog, row).map_err(|_| "its table can't be matched".to_owned())?;
+    let resolved = check::resolve_row(catalog, row, file)
+        .map_err(|_| "its table can't be matched".to_owned())?;
     let table = catalog
         .table(resolved.table)
         .ok_or_else(|| "its table can't be matched".to_owned())?;

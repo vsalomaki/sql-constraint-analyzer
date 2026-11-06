@@ -70,12 +70,16 @@ fn every_piece_of_every_export_belongs_to_exactly_one_pass() {
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "a table created twice in a fixture fails the test"
+)]
 fn catalog(statements: &[(String, Statement<'static>, Origin)]) -> Catalog {
-    let mut builder = CatalogBuilder::new(DialectId::Oracle.rules(), None);
+    let mut builder = CatalogBuilder::new(DialectId::Oracle.rules(), None, Vec::new());
     for (_, statement, origin) in statements {
         builder.add(statement.clone(), *origin);
     }
-    let (catalog, issues) = builder.finish();
+    let (catalog, issues) = builder.finish().unwrap();
     assert!(issues.is_empty(), "{issues:?}");
     catalog
 }
@@ -122,7 +126,7 @@ fn matched(sql: &str) -> Vec<Result<Vec<String>, StructureError>> {
     rows(&statements)
         .into_iter()
         .map(|row| {
-            check::resolve_row(&catalog, row).map(|r| {
+            check::resolve_row(&catalog, row, 0).map(|r| {
                 r.values
                     .iter()
                     .map(|v| match v.map(|v| &v.expr) {
@@ -195,9 +199,9 @@ fn an_unqualified_name_in_several_schemas_is_ambiguous_and_named_as_written() {
     let findings: Vec<(FindingKind, String, Option<u64>)> = rows(&statements)
         .into_iter()
         .map(|row| {
-            let f = check::resolve_row(&catalog, row)
+            let f = check::resolve_row(&catalog, row, 0)
                 .unwrap_err()
-                .finding(&catalog, row, "t.sql");
+                .finding(&catalog, row, "t.sql", 0);
             (f.kind, f.table, f.line)
         })
         .collect();

@@ -75,6 +75,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   rules with tests. `DROP` and `TRUNCATE` stay statements the check doesn't follow and end no transaction for it;
   `ROLLBACK`, `EXIT` and `QUIT` are others it doesn't follow. A change to one changes test expectations on purpose,
   never as a side effect.
+- **Unqualified table names** (neutral) mean the default schema when one is given. Else the file's folder's schema
+  first (`FolderSchema`: the file's own folder, or the first below the folder all inputs share; named through
+  `Rules::folder_schema`), then the only table of that name in any schema. A file in the shared folder has no folder
+  schema. A table created twice is a fatal error, never a choice between two definitions.
 - **Dependencies:** add with `cargo add`; pin features (`default-features = false` when the defaults pull in more
   than needed). A dependency that brings a new licence adds it to `deny.toml`'s allowlist, permissive licences only.
   The generator's dependencies are `optional = true` and enabled by the `gen` feature.

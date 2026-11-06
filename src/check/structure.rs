@@ -27,13 +27,14 @@ pub enum StructureError {
     },
 }
 
-/// Matches `row` to its table and columns. Without a column list the values follow the table's column order, without
-/// invisible columns, as Oracle and the SQL standard fill them.
+/// Matches `row`, in the file at `file`, to its table and columns. Without a column list the values follow the
+/// table's column order, without invisible columns, as Oracle and the SQL standard fill them.
 pub fn resolve_row<'a>(
     catalog: &Catalog,
     row: &'a InsertRow<'a>,
+    file: usize,
 ) -> Result<Row<'a>, StructureError> {
-    let id = match catalog.resolve(&row.table) {
+    let id = match catalog.resolve(&row.table, file) {
         Lookup::Found(id) => id,
         Lookup::Missing => return Err(StructureError::UnknownTable),
         Lookup::Ambiguous(_) => return Err(StructureError::AmbiguousTable),
@@ -83,18 +84,22 @@ fn count_matches(columns: usize, row: &InsertRow) -> Result<(), StructureError> 
     }
 }
 
-/// A row's table as findings show it: the catalog's name for it, else the name as written.
-pub(super) fn table_name(catalog: &Catalog, row: &InsertRow) -> String {
-    let table = match catalog.resolve(&row.table) {
-        Lookup::Found(id) => catalog.table(id).map(|t| catalog.display(&t.name)),
-        _ => None,
-    };
-    table.unwrap_or_else(|| catalog.display_name(&row.table))
+/// The table of `row`, in the file at `file`, as findings show it: the catalog's name for it; else the name in the
+/// schema it would be in, or as written when several schemas have it.
+pub(super) fn table_name(catalog: &Catalog, row: &InsertRow, file: usize) -> String {
+    match catalog.resolve(&row.table, file) {
+        Lookup::Found(id) => catalog.table(id).map_or_else(
+            || catalog.display_name(&row.table, Some(file)),
+            |t| catalog.display(&t.name),
+        ),
+        Lookup::Missing => catalog.display_name(&row.table, Some(file)),
+        Lookup::Ambiguous(_) => catalog.display_name(&row.table, None),
+    }
 }
 
 impl StructureError {
-    /// The finding for `row` in `file`.
-    pub fn finding(&self, catalog: &Catalog, row: &InsertRow, file: &str) -> Finding {
+    /// The finding for `row` in `file`, the file at `index` in the run.
+    pub fn finding(&self, catalog: &Catalog, row: &InsertRow, file: &str, index: usize) -> Finding {
         let (kind, columns) = match self {
             Self::UnknownTable => (FindingKind::UnknownTable, Vec::new()),
             Self::AmbiguousTable => (FindingKind::AmbiguousTable, Vec::new()),
@@ -104,7 +109,7 @@ impl StructureError {
         Finding {
             kind,
             constraint: None,
-            table: table_name(catalog, row),
+            table: table_name(catalog, row, index),
             columns,
             file: Some(file.to_owned()),
             line: Some(row.line),

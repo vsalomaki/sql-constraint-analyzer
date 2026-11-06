@@ -587,3 +587,49 @@ fn a_dry_run_prints_the_report_it_would_write() {
     assert_eq!(json["removed"][0]["line"], 4);
     assert!(json["files"][0].get("sha256_after").is_none(), "{json}");
 }
+
+#[test]
+fn two_unqualified_exports_are_checked_apart_and_a_table_created_twice_stops_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    for (folder, parent) in [("a", 1), ("b", 5)] {
+        fs::create_dir_all(dir.path().join(folder)).unwrap();
+        fs::write(
+            dir.path().join(folder).join("x.sql"),
+            format!(
+                "CREATE TABLE T (ID NUMBER PRIMARY KEY, P NUMBER REFERENCES P);\n\
+                 CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+                 INSERT INTO P VALUES ({parent});\nINSERT INTO T VALUES (1, 1);\nCOMMIT;\n"
+            ),
+        )
+        .unwrap();
+    }
+    let run = |args: &[&str]| {
+        let output = Command::cargo_bin("sqlca")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["check", "a/x.sql", "b/x.sql", "--progress", "never"])
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (code, stdout, _) = run(&[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        stdout,
+        "b/x.sql:4: missing parent for a foreign key of B.T: P='1'\n"
+    );
+    let (code, _, stderr) = run(&["--folder-schema", "off"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "error: b/x.sql:1: table T is created again; it was first created at a/x.sql:1 \
+             (--folder-schema decides which folder names the schema of an unqualified name)\n"
+        ),
+        "{stderr}"
+    );
+}

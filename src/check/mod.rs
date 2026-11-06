@@ -6,11 +6,11 @@ mod rows;
 mod structure;
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub use structure::{Row, StructureError, resolve_row};
 
-use crate::catalog::{Catalog, CatalogBuilder, Issue, Kind, Origin, Parent};
+use crate::catalog::{Catalog, CatalogBuilder, CreatedTwice, Issue, Kind, Origin, Parent};
 use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role};
@@ -28,6 +28,20 @@ pub struct Options {
     pub load_order: bool,
     /// Report the rows at the end of a data file that no commit follows.
     pub commit_check: bool,
+    /// Which folder an unqualified table name's schema is named after, unless there is a default schema.
+    pub folder_schema: FolderSchema,
+}
+
+/// Which folder, below the one all inputs share, names the schema of an unqualified table name in a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum FolderSchema {
+    /// The file's own folder: `a/x.sql` is in schema `A`.
+    #[default]
+    Immediate,
+    /// The first folder below the shared one: `a/tables/x.sql` is in schema `A`.
+    Top,
+    /// None: an unqualified name matches a table of that name in any schema.
+    Off,
 }
 
 impl Default for Options {
@@ -39,6 +53,7 @@ impl Default for Options {
             default_schema: None,
             load_order: false,
             commit_check: true,
+            folder_schema: FolderSchema::default(),
         }
     }
 }
@@ -197,6 +212,58 @@ fn run_inner(
     check_rows(files, options, &schema, removed, &[], observer)
 }
 
+/// By file position, the schema named after the file's folder as `mode` picks it, below the folder all files share.
+fn homes(
+    files: &[InputFile],
+    mode: FolderSchema,
+    schema: impl Fn(&str) -> String,
+) -> Vec<Option<String>> {
+    let folders: Vec<PathBuf> = files
+        .iter()
+        // The real folder, as `fix` writes outputs after it: `a/../b` is `b`, and a link counts where it points.
+        .map(|f| {
+            let path = std::fs::canonicalize(&f.path)
+                .or_else(|_| std::path::absolute(&f.path))
+                .unwrap_or_else(|_| f.path.clone());
+            path.parent().map(Path::to_path_buf).unwrap_or_default()
+        })
+        .collect();
+    let shared = shared_folder(&folders);
+    folders
+        .iter()
+        .map(|folder| {
+            let mut below = folder.strip_prefix(&shared).ok()?.components();
+            let part = match mode {
+                FolderSchema::Immediate => below.next_back(),
+                FolderSchema::Top => below.next(),
+                FolderSchema::Off => None,
+            };
+            match part {
+                Some(Component::Normal(name)) => name.to_str().map(&schema),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The deepest folder that holds all of `folders`.
+fn shared_folder(folders: &[PathBuf]) -> PathBuf {
+    let mut folders = folders.iter();
+    let Some(first) = folders.next() else {
+        return PathBuf::new();
+    };
+    let mut shared: Vec<Component> = first.components().collect();
+    for folder in folders {
+        let same = shared
+            .iter()
+            .zip(folder.components())
+            .take_while(|(a, b)| *a == b)
+            .count();
+        shared.truncate(same);
+    }
+    shared.iter().collect()
+}
+
 /// The files a pass reads, and their bytes in all.
 fn total(files: &[InputFile], pass: impl Fn(&InputFile) -> bool) -> (usize, u64) {
     let read: Vec<&InputFile> = files.iter().filter(|f| pass(f)).collect();
@@ -216,7 +283,11 @@ fn read_schema(
     let mut report = Report::default();
     let schema_given = files.iter().any(|f| f.role == Role::Schema);
     let in_schema_pass = |f: &InputFile| !(schema_given && f.role == Role::Data);
-    let mut builder = CatalogBuilder::new(options.dialect.rules(), options.default_schema.clone());
+    let rules = options.dialect.rules();
+    let homes = homes(files, options.folder_schema, |folder| {
+        rules.folder_schema(folder)
+    });
+    let mut builder = CatalogBuilder::new(rules, options.default_schema.clone(), homes);
     let (count, bytes) = total(files, in_schema_pass);
     observer.pass(Pass::Schema, count, bytes);
     for (index, file) in files.iter().enumerate() {
@@ -235,7 +306,26 @@ fn read_schema(
             },
         )?;
     }
-    let (catalog, issues) = builder.finish();
+    let (catalog, issues) = builder.finish().map_err(
+        |CreatedTwice {
+             table,
+             first,
+             again,
+         }| {
+            let place = |o: Origin| {
+                format!(
+                    "{}:{}",
+                    names.get(o.file).map_or("", String::as_str),
+                    o.line
+                )
+            };
+            InputError::TableCreatedTwice {
+                table,
+                first: place(first),
+                again: place(again),
+            }
+        },
+    )?;
     report.schema = schema_counts(&catalog);
     report.referenced = referenced(&catalog);
     observer.schema(&catalog);
@@ -301,14 +391,15 @@ fn check_rows(
                             offset: row.span.start,
                             line: row.line,
                         };
-                        match resolve_row(catalog, row) {
+                        match resolve_row(catalog, row, index) {
                             Ok(resolved) => {
-                                open.add(catalog, row);
+                                open.add(catalog, row, index);
                                 matched.push((resolved, row, at));
                             }
                             Err(error) => {
-                                open.add(catalog, row);
-                                checker.structure(error.finding(catalog, row, file), reference);
+                                open.add(catalog, row, index);
+                                let finding = error.finding(catalog, row, file, index);
+                                checker.structure(finding, reference);
                             }
                         }
                     }
@@ -346,10 +437,10 @@ struct Open {
 }
 
 impl Open {
-    fn add(&mut self, catalog: &Catalog, row: &crate::statement::InsertRow) {
+    fn add(&mut self, catalog: &Catalog, row: &crate::statement::InsertRow, file: usize) {
         self.rows += 1;
         if self.first.is_none() {
-            self.first = Some((row.line, structure::table_name(catalog, row)));
+            self.first = Some((row.line, structure::table_name(catalog, row, file)));
         }
     }
 

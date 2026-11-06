@@ -113,10 +113,17 @@ struct CheckArgs {
 
     /// The schema of unqualified table names. Folded like an unquoted name unless written in double quotes.
     ///
-    /// Without it, an unqualified name means the only table of that name in any schema, and a name several
-    /// schemas have is reported as ambiguous.
+    /// Without it, an unqualified name means its folder's schema (see --folder-schema) when that has the table, else
+    /// the only table of that name in any schema; a name several schemas have is reported as ambiguous.
     #[arg(long, value_name = "NAME")]
     default_schema: Option<String>,
+
+    /// Which folder names the schema of an unqualified table name, below the folder all inputs share.
+    ///
+    /// `a/x.sql` with `immediate` and `a/tables/x.sql` with `top` are in schema A; a file in the shared folder itself
+    /// has no folder schema. A folder name that couldn't be written unquoted is the schema's name as written.
+    #[arg(long, value_enum, default_value_t)]
+    folder_schema: check::FolderSchema,
 
     /// Also report children inserted before their parent, judging rows in the order the files run.
     ///
@@ -350,6 +357,7 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
         default_schema: args.default_schema(spec.dialect),
         load_order: args.load_order,
         commit_check: !args.no_commit_check,
+        folder_schema: args.folder_schema,
     };
     let mut progress = progress::Progress::new(
         display(args.progress, verbosity),
@@ -418,6 +426,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         default_schema: check.default_schema(spec.dialect),
         load_order: check.load_order,
         commit_check: !check.no_commit_check,
+        folder_schema: check.folder_schema,
     };
     let policy = fix::Policy {
         on_fk: args.on_fk,

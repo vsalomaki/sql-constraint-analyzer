@@ -144,6 +144,8 @@ pub enum Lookup {
 pub struct Catalog {
     rules: &'static Rules,
     default_schema: Option<String>,
+    /// By file position, the schema an unqualified name in the file means first: its folder's.
+    homes: Vec<Option<String>>,
     tables: Vec<Table>,
     by_name: HashMap<String, Vec<TableId>>,
 }
@@ -165,28 +167,42 @@ impl Catalog {
         self.tables.get(id.0)
     }
 
-    /// A qualified name matches its schema only. An unqualified one matches the default schema when one is given,
-    /// else a table of that name in any schema.
-    pub fn resolve(&self, name: &Name<'_>) -> Lookup {
+    /// The schema an unqualified name in the file at `file` means: the default schema, else the file's folder's.
+    fn home(&self, file: usize) -> Option<&str> {
+        self.default_schema
+            .as_deref()
+            .or_else(|| self.homes.get(file).and_then(Option::as_deref))
+    }
+
+    /// The table `name` means in the file at `file`. A qualified name matches its schema only, and an unqualified
+    /// one the default schema when one is given. Else an unqualified name matches its file's folder's schema first,
+    /// then a table of that name in any schema.
+    pub fn resolve(&self, name: &Name<'_>, file: usize) -> Lookup {
         let candidates = self
             .by_name
             .get(&*name.name.value)
             .map_or(&[][..], Vec::as_slice);
-        let schema = name
-            .schema
-            .as_ref()
-            .map(|s| &*s.value)
-            .or(self.default_schema.as_deref());
-        let mut found = candidates.iter().copied().filter(|&id| {
-            schema.is_none() || self.table(id).and_then(|t| t.name.schema.as_deref()) == schema
-        });
-        match (found.next(), found.next()) {
-            (None, _) => Lookup::Missing,
-            (Some(id), None) => Lookup::Found(id),
-            (Some(first), Some(second)) => {
-                Lookup::Ambiguous([first, second].into_iter().chain(found).collect())
-            }
+        let given = name.schema.as_ref().map(|s| &*s.value);
+        if let Some(schema) = given.or(self.default_schema.as_deref()) {
+            return one_of(self.in_schema(candidates, schema));
         }
+        if let Some(id) = self
+            .home(file)
+            .and_then(|home| self.in_schema(candidates, home).next())
+        {
+            return Lookup::Found(id);
+        }
+        one_of(candidates.iter().copied())
+    }
+
+    fn in_schema<'c>(
+        &'c self,
+        candidates: &'c [TableId],
+        schema: &'c str,
+    ) -> impl Iterator<Item = TableId> + 'c {
+        candidates.iter().copied().filter(move |&id| {
+            self.table(id).and_then(|t| t.name.schema.as_deref()) == Some(schema)
+        })
     }
 
     /// A table's name as the dialect displays it.
@@ -194,8 +210,9 @@ impl Catalog {
         display(self.rules, name)
     }
 
-    /// A name from a statement as the dialect displays it, in the default schema when it has none.
-    pub fn display_name(&self, name: &Name<'_>) -> String {
+    /// A name from a statement as the dialect displays it; unqualified, in the schema it means first in the file at
+    /// `file`, when one is given.
+    pub fn display_name(&self, name: &Name<'_>, file: Option<usize>) -> String {
         display(
             self.rules,
             &TableName {
@@ -203,7 +220,7 @@ impl Catalog {
                     .schema
                     .as_ref()
                     .map(|s| s.value.to_string())
-                    .or_else(|| self.default_schema.clone()),
+                    .or_else(|| file.and_then(|f| self.home(f)).map(str::to_owned)),
                 name: name.name.value.to_string(),
             },
         )
@@ -219,20 +236,46 @@ impl Catalog {
     }
 }
 
+/// One of several tables, matched or found, as a lookup.
+fn one_of(mut found: impl Iterator<Item = TableId>) -> Lookup {
+    match (found.next(), found.next()) {
+        (None, _) => Lookup::Missing,
+        (Some(id), None) => Lookup::Found(id),
+        (Some(first), Some(second)) => {
+            Lookup::Ambiguous([first, second].into_iter().chain(found).collect())
+        }
+    }
+}
+
+/// A table that two `CREATE TABLE`s define: which, and where each is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedTwice {
+    pub table: String,
+    pub first: Origin,
+    pub again: Origin,
+}
+
 /// Collects DDL statements in input order; `finish` builds the catalog from them.
 #[derive(Debug)]
 pub struct CatalogBuilder {
     rules: &'static Rules,
     default_schema: Option<String>,
+    homes: Vec<Option<String>>,
     statements: Vec<(Statement<'static>, Origin)>,
 }
 
 impl CatalogBuilder {
-    /// `default_schema` as the dialect stores it (already folded).
-    pub fn new(rules: &'static Rules, default_schema: Option<String>) -> Self {
+    /// `default_schema` as the dialect stores it (already folded), and by file position the schema an unqualified
+    /// name in the file means first.
+    pub fn new(
+        rules: &'static Rules,
+        default_schema: Option<String>,
+        homes: Vec<Option<String>>,
+    ) -> Self {
         Self {
             rules,
             default_schema,
+            homes,
             statements: Vec::new(),
         }
     }
@@ -249,11 +292,13 @@ impl CatalogBuilder {
         }
     }
 
-    pub fn finish(self) -> (Catalog, Vec<Issue>) {
+    /// The catalog, and what it couldn't follow; a table created twice leaves no catalog to check against.
+    pub fn finish(self) -> Result<(Catalog, Vec<Issue>), CreatedTwice> {
         let mut build = Build {
             catalog: Catalog {
                 rules: self.rules,
                 default_schema: self.default_schema,
+                homes: self.homes,
                 tables: Vec::new(),
                 by_name: HashMap::new(),
             },
@@ -271,7 +316,7 @@ impl CatalogBuilder {
                 constraints,
             } = statement
             {
-                build.create(&name, columns, constraints, origin);
+                build.create(&name, columns, constraints, origin)?;
             }
         }
         for (statement, origin) in changes {
@@ -288,7 +333,7 @@ impl CatalogBuilder {
         }
         build.resolve();
         build.issues.sort_by_key(|i| i.origin);
-        (build.catalog, build.issues)
+        Ok((build.catalog, build.issues))
     }
 }
 
@@ -488,23 +533,22 @@ impl Build {
         columns: Vec<ColumnDef>,
         constraints: Vec<ConstraintDef>,
         origin: Origin,
-    ) {
+    ) -> Result<(), CreatedTwice> {
         let rules = self.catalog.rules;
         let table_name = TableName {
             schema: name
                 .schema
                 .as_ref()
                 .map(|s| s.value.to_string())
-                .or_else(|| self.catalog.default_schema.clone()),
+                .or_else(|| self.catalog.home(origin.file).map(str::to_owned)),
             name: name.name.value.to_string(),
         };
-        if self.catalog.tables.iter().any(|t| t.name == table_name) {
-            let shown = display(rules, &table_name);
-            self.issue(
-                origin,
-                format!("table {shown} is created again; the first definition is kept"),
-            );
-            return;
+        if let Some(first) = self.catalog.tables.iter().find(|t| t.name == table_name) {
+            return Err(CreatedTwice {
+                table: display(rules, &table_name),
+                first: first.created,
+                again: origin,
+            });
         }
         let mut draft = Draft::default();
         let mut table = Table {
@@ -526,12 +570,13 @@ impl Build {
             .extend(constraints.into_iter().map(|c| Written::new(c, origin)));
         self.catalog.add_table(table);
         self.drafts.push(draft);
+        Ok(())
     }
 
     /// The position of the table a statement changes, or an issue saying why there is none.
     fn target(&mut self, name: &Name<'_>, origin: Origin, what: &str) -> Option<usize> {
         let shown = display_name(self.catalog.rules, name);
-        match self.catalog.resolve(name) {
+        match self.catalog.resolve(name, origin.file) {
             Lookup::Found(id) => return Some(id.0),
             Lookup::Missing => self.issue(
                 origin,
@@ -783,7 +828,7 @@ impl Build {
         };
         let child = self.positions(index, &columns, origin, &label)?;
         let rules = self.catalog.rules;
-        let kind = match self.catalog.resolve(&parent) {
+        let kind = match self.catalog.resolve(&parent, origin.file) {
             Lookup::Found(id) => {
                 let table = self.catalog.table(id)?;
                 match parent_key(rules, id, table, parent_columns.as_deref(), &child) {
