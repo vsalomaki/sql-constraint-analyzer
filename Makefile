@@ -34,6 +34,7 @@ install-hooks:
 lint:
 	cargo fmt --check
 	cargo deny check
+	cargo vet --locked
 	cargo clippy --all-targets --all-features -- -D warnings
 
 fmt:
