@@ -105,10 +105,12 @@ pub trait Observer {
     fn schema(&mut self, _catalog: &Catalog) {}
     /// Every row is in; the foreign keys left pending are being resolved.
     fn resolve(&mut self) {}
+    /// A run made of several checks, such as a fix, starts its next stage: `check 2`, `write`, `verify`.
+    fn stage(&mut self, _stage: &str) {}
 }
 
 /// An observer that ignores everything.
-struct Quiet;
+pub struct Quiet;
 
 impl Observer for Quiet {}
 
@@ -140,8 +142,12 @@ impl Schema {
 }
 
 /// The schema pass of `run`, for `run_without` to check rows against as often as it is asked.
-pub fn schema(files: &[InputFile], options: &Options) -> Result<Schema, InputError> {
-    read_schema(files, options, &mut Quiet)
+pub fn schema(
+    files: &[InputFile],
+    options: &Options,
+    observer: &mut dyn Observer,
+) -> Result<Schema, InputError> {
+    read_schema(files, options, observer)
 }
 
 /// `run` with the schema already read, reading each file as if the rows inside its `removed` spans weren't there and
@@ -152,8 +158,9 @@ pub fn run_without(
     schema: &Schema,
     removed: &[Vec<Span>],
     nulled: &[Vec<Span>],
+    observer: &mut dyn Observer,
 ) -> Result<Report, InputError> {
-    check_rows(files, options, schema, removed, nulled, &mut Quiet)
+    check_rows(files, options, schema, removed, nulled, observer)
 }
 
 /// Whether `span` lies inside one of the sorted, separate `cuts`.

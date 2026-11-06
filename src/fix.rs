@@ -211,6 +211,17 @@ pub fn fix(
     policy: Policy,
     target: &Target,
 ) -> Result<FixReport, FixError> {
+    fix_with(files, options, policy, target, &mut check::Quiet)
+}
+
+/// `fix`, telling `observer` how it goes.
+pub fn fix_with(
+    files: &[InputFile],
+    options: &check::Options,
+    policy: Policy,
+    target: &Target,
+    observer: &mut dyn check::Observer,
+) -> Result<FixReport, FixError> {
     let backup = match &target.destination {
         Destination::InPlace { backup: None } if target.report == ReportPlace::Off => {
             return Err(FixError::NothingKept);
@@ -238,7 +249,7 @@ pub fn fix(
         rounds,
         mut removed,
         left,
-    } = run_rounds(files, options, policy, &names, target.dry_run)?;
+    } = run_rounds(files, options, policy, &names, target.dry_run, observer)?;
 
     let outputs: Vec<Output> = names
         .into_iter()
@@ -280,7 +291,7 @@ pub fn fix(
         report.files = outputs;
         return Ok(report);
     }
-    write(files, options, &originals, outputs, report)
+    write(files, options, &originals, outputs, report, observer)
 }
 
 /// Writes the outputs and the report folder, and checks what was written. An in-place fix writes `rejects.sql` before
@@ -291,6 +302,7 @@ fn write(
     originals: &[PathBuf],
     mut outputs: Vec<Output>,
     mut report: FixReport,
+    observer: &mut dyn check::Observer,
 ) -> Result<FixReport, FixError> {
     let target = report.target.clone();
     let rejects = |report: &FixReport| -> Result<(), FixError> {
@@ -305,26 +317,33 @@ fn write(
     match target.destination {
         // The copies first: on a file system that ignores case, a copied folder can take the report's name.
         Destination::Out(_) => {
-            write_outputs(originals, &report.removed, &mut outputs)?;
+            write_outputs(files, originals, &report.removed, &mut outputs, observer)?;
             rejects(&report)?;
         }
         Destination::InPlace { .. } => {
             rejects(&report)?;
-            write_outputs(originals, &report.removed, &mut outputs)?;
+            write_outputs(files, originals, &report.removed, &mut outputs, observer)?;
         }
     }
-    let written: Vec<InputFile> = match target.destination {
-        Destination::Out(_) => files
-            .iter()
-            .zip(&outputs)
-            .map(|(f, o)| InputFile {
-                path: o.path.clone(),
+    let written: Vec<InputFile> = files
+        .iter()
+        .zip(&outputs)
+        .map(|(f, o)| {
+            let path = match target.destination {
+                Destination::Out(_) => o.path.clone(),
+                Destination::InPlace { .. } => f.path.clone(),
+            };
+            // The verify's progress counts the bytes as written; a file that can't be read fails the check itself.
+            let bytes = fs::metadata(&path).map_or(f.bytes, |m| m.len());
+            InputFile {
+                path,
+                bytes,
                 ..f.clone()
-            })
-            .collect(),
-        Destination::InPlace { .. } => files.to_vec(),
-    };
-    report.output = check::run(&written, options)?;
+            }
+        })
+        .collect();
+    observer.stage("verify");
+    report.output = check::run_with(&written, options, observer)?;
     report.files = outputs;
     if let Some(folder) = &report.report {
         write_file(&folder.join("fix-report.txt"), None, |w| {
@@ -355,16 +374,21 @@ fn run_rounds(
     policy: Policy,
     names: &[String],
     confirm: bool,
+    observer: &mut dyn check::Observer,
 ) -> Result<Plan, FixError> {
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
     let mut removed = Vec::new();
     let mut left = Vec::new();
     let mut first_report = None;
     let mut rounds = 0;
-    let schema = check::schema(files, options)?;
+    observer.stage("check 1");
+    let schema = check::schema(files, options, observer)?;
     let last = loop {
+        if rounds > 0 {
+            observer.stage(&format!("check {}", rounds + 1));
+        }
         let nulls = nulled_values(&removed, names);
-        let report = check::run_without(files, options, &schema, &cuts, &nulls)?;
+        let report = check::run_without(files, options, &schema, &cuts, &nulls, observer)?;
         let mut scans = BTreeMap::new();
         for (index, lines) in named_rows(&report.findings, names, policy) {
             let (Some(file), Some(file_cuts)) = (files.get(index), cuts.get(index)) else {
@@ -502,19 +526,24 @@ fn nulled_values(removed: &[Removal], names: &[String]) -> Vec<Vec<Span>> {
 /// Writes each output that differs from its input. Every backup is made before any input is rewritten, so a backup
 /// that fails leaves all inputs as they were.
 fn write_outputs(
+    files: &[InputFile],
     originals: &[PathBuf],
     removed: &[Removal],
     outputs: &mut [Output],
+    observer: &mut dyn check::Observer,
 ) -> Result<(), FixError> {
     for (original, output) in originals.iter().zip(outputs.iter()) {
         if let Some(backup) = &output.backup {
             keep_backup(original, backup)?;
         }
     }
-    for (original, output) in originals.iter().zip(outputs) {
+    observer.stage("write");
+    for (index, (original, output)) in originals.iter().zip(outputs).enumerate() {
         if !output.changed && output.path == *original {
             continue;
         }
+        let bytes = files.get(index).map_or(0, |f| f.bytes);
+        observer.file(index, &output.input, bytes);
         let edits: Vec<Edit> = removed
             .iter()
             .filter(|r| r.file == output.input)
