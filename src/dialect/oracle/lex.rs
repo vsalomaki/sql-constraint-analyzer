@@ -97,7 +97,8 @@ const OPERATORS: [&[u8]; 9] = [
 ];
 
 pub fn lex(source: &[u8]) -> Result<Vec<Token>, LexError> {
-    let mut tokens = Vec::new();
+    // About one token per four bytes in an exported INSERT.
+    let mut tokens = Vec::with_capacity(source.len() / 4);
     let mut i = 0;
     while let Some(&b) = source.get(i) {
         let next = source.get(i + 1).copied();

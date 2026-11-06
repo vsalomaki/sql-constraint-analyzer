@@ -18,7 +18,7 @@
 //!   (`SET SQLBLANKLINES OFF`); exports don't have them.
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 
 use super::lex::{Delimiter, alternative_delimiter, is_word_byte};
 use crate::source::{Piece, PieceKind, Span};
@@ -49,9 +49,12 @@ impl Current {
     fn is_block(&mut self, more: &[u8]) -> bool {
         let text = &self.text;
         *self.block.get_or_insert_with(|| {
-            let mut head = text.clone();
-            head.extend_from_slice(more);
-            head_kind(&head) == PieceKind::Block
+            let kind = if text.is_empty() {
+                head_kind(more)
+            } else {
+                head_kind(&[text.as_slice(), more].concat())
+            };
+            kind == PieceKind::Block
         })
     }
 }
@@ -222,6 +225,15 @@ impl Machine {
                 i += self.inside_quote(quote, content, i);
                 continue;
             }
+            // Inside a piece only these bytes can change the state.
+            if self.current.is_some() && !matches!(b, b'-' | b'/' | b'\'' | b'"' | b';') {
+                let rest = content.get(i..).unwrap_or_default();
+                i += rest
+                    .iter()
+                    .position(|&b| matches!(b, b'-' | b'/' | b'\'' | b'"' | b';'))
+                    .unwrap_or(rest.len());
+                continue;
+            }
             match (b, next) {
                 (b'-', Some(b'-')) => break,
                 (b'/', Some(b'*')) => {
@@ -285,15 +297,16 @@ impl Machine {
     fn inside_quote(&mut self, quote: Quote, content: &[u8], i: usize) -> usize {
         let at = content.get(i..).unwrap_or_default();
         match quote {
-            Quote::Single if at.starts_with(b"''") => 2,
-            Quote::Double if at.starts_with(b"\"\"") => 2,
-            Quote::Single if at.starts_with(b"'") => {
-                self.quote = None;
-                1
-            }
-            Quote::Double if at.starts_with(b"\"") => {
-                self.quote = None;
-                1
+            Quote::Single | Quote::Double => {
+                let mark = if quote == Quote::Single { b'\'' } else { b'"' };
+                match at.iter().position(|&b| b == mark) {
+                    None => at.len(),
+                    Some(p) if at.get(p + 1) == Some(&mark) => p + 2,
+                    Some(p) => {
+                        self.quote = None;
+                        p + 1
+                    }
+                }
             }
             Quote::Alternative(delimiter)
                 if at.starts_with(delimiter.close())
@@ -302,7 +315,7 @@ impl Machine {
                 self.quote = None;
                 delimiter.close().len() + 1
             }
-            _ => 1,
+            Quote::Alternative(_) => 1,
         }
     }
 
@@ -375,26 +388,17 @@ impl<R: BufRead> Splitter<R> {
         )
     }
 
-    /// Reads one line, with its line end, without ever holding more than the limit of it.
+    /// Reads one line, with its line end, holding no more of it than one byte past the limit.
     fn read_bounded_line(&mut self) -> io::Result<()> {
         self.buffer.clear();
-        loop {
-            let available = self.reader.fill_buf()?;
-            if available.is_empty() {
-                return Ok(());
-            }
-            let newline = available.iter().position(|&b| b == b'\n');
-            let take = newline.map_or(available.len(), |p| p + 1);
-            if self.buffer.len() + take > self.limit.saturating_add(2) {
-                return Err(self.too_long("line", self.line));
-            }
-            self.buffer
-                .extend_from_slice(available.get(..take).unwrap_or_default());
-            self.reader.consume(take);
-            if newline.is_some() {
-                return Ok(());
-            }
+        let most = self.limit.saturating_add(2);
+        (&mut self.reader)
+            .take(u64::try_from(most.saturating_add(1)).unwrap_or(u64::MAX))
+            .read_until(b'\n', &mut self.buffer)?;
+        if self.buffer.len() > most {
+            return Err(self.too_long("line", self.line));
         }
+        Ok(())
     }
 
     fn read_line(&mut self) -> io::Result<()> {
@@ -483,64 +487,73 @@ fn ends_line_blank(rest: &[u8]) -> bool {
         .is_some_and(|eol| rest.iter().take(eol).all(u8::is_ascii_whitespace))
 }
 
-fn head_words(text: &[u8]) -> Vec<String> {
-    let mut words = Vec::new();
+/// The leading words as written, past blanks and comments.
+fn head_words(text: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut i = 0;
-    while words.len() < 6 {
-        match (text.get(i), text.get(i + 1)) {
-            (Some(b), _) if b.is_ascii_whitespace() => i += 1,
-            (Some(b'-'), Some(b'-')) => {
-                i += text
-                    .get(i..)
-                    .and_then(|rest| rest.iter().position(|&b| b == b'\n'))
-                    .unwrap_or(text.len());
+    std::iter::from_fn(move || {
+        loop {
+            match (text.get(i), text.get(i + 1)) {
+                (Some(b), _) if b.is_ascii_whitespace() => i += 1,
+                (Some(b'-'), Some(b'-')) => {
+                    i += text
+                        .get(i..)
+                        .and_then(|rest| rest.iter().position(|&b| b == b'\n'))
+                        .unwrap_or(text.len());
+                }
+                (Some(b'/'), Some(b'*')) => {
+                    let rest = text.get(i + 2..).unwrap_or_default();
+                    i += 2 + rest
+                        .windows(2)
+                        .position(|w| w == b"*/")
+                        .map_or(rest.len(), |p| p + 2);
+                }
+                // SQL*Plus joins a line ending in `-` to the next before it reads the first words.
+                (Some(b'-'), _) if ends_line_blank(text.get(i + 1..).unwrap_or_default()) => i += 1,
+                (Some(&b), _) if is_word_byte(b) => {
+                    let rest = text.get(i..).unwrap_or_default();
+                    let len = rest.iter().take_while(|&&b| is_word_byte(b)).count();
+                    i += len;
+                    return rest.get(..len);
+                }
+                _ => return None,
             }
-            (Some(b'/'), Some(b'*')) => {
-                let rest = text.get(i + 2..).unwrap_or_default();
-                i += 2 + rest
-                    .windows(2)
-                    .position(|w| w == b"*/")
-                    .map_or(rest.len(), |p| p + 2);
-            }
-            // SQL*Plus joins a line ending in `-` to the next before it reads the first words.
-            (Some(b'-'), _) if ends_line_blank(text.get(i + 1..).unwrap_or_default()) => i += 1,
-            (Some(&b), _) if is_word_byte(b) => {
-                let word: Vec<u8> = text
-                    .get(i..)
-                    .unwrap_or_default()
-                    .iter()
-                    .copied()
-                    .take_while(|&b| is_word_byte(b))
-                    .collect();
-                i += word.len();
-                words.push(String::from_utf8_lossy(&word).to_ascii_uppercase());
-            }
-            _ => break,
         }
-    }
-    words
+    })
+}
+
+fn is(word: &[u8], keyword: &str) -> bool {
+    word.eq_ignore_ascii_case(keyword.as_bytes())
 }
 
 /// Whether a piece is a block, from its first words.
 fn head_kind(text: &[u8]) -> PieceKind {
-    let words = head_words(text);
-    let word = |i: usize| words.get(i).map(String::as_str);
-    let block = match word(0) {
-        Some("DECLARE" | "BEGIN") => true,
-        Some("CREATE") => {
-            let mut i = 1;
-            if word(i) == Some("OR") && word(i + 1) == Some("REPLACE") {
-                i += 2;
+    let mut words = head_words(text);
+    let block = match words.next() {
+        Some(w) if is(w, "DECLARE") || is(w, "BEGIN") => true,
+        Some(w) if is(w, "CREATE") => {
+            let mut word = words.next();
+            if word.is_some_and(|w| is(w, "OR")) {
+                word = words
+                    .next()
+                    .filter(|w| is(w, "REPLACE"))
+                    .and_then(|_| words.next());
             }
-            if matches!(word(i), Some("EDITIONABLE" | "NONEDITIONABLE")) {
-                i += 1;
+            if word.is_some_and(|w| is(w, "EDITIONABLE") || is(w, "NONEDITIONABLE")) {
+                word = words.next();
             }
-            matches!(
-                word(i),
-                Some(
-                    "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE" | "LIBRARY" | "JAVA"
-                )
-            )
+            word.is_some_and(|w| {
+                [
+                    "PROCEDURE",
+                    "FUNCTION",
+                    "PACKAGE",
+                    "TRIGGER",
+                    "TYPE",
+                    "LIBRARY",
+                    "JAVA",
+                ]
+                .iter()
+                .any(|k| is(w, k))
+            })
         }
         _ => false,
     };
@@ -610,22 +623,29 @@ fn is_command(trimmed: &[u8]) -> bool {
     if trimmed.starts_with(b"@") || trimmed.starts_with(b"!") {
         return true;
     }
-    let words = head_words(trimmed);
-    let Some(first) = words.first() else {
+    let mut words = head_words(trimmed);
+    let Some(first) = words.next() else {
         return false;
     };
     // `SET TRANSACTION`, `SET ROLE` and `SET CONSTRAINT[S]` are SQL.
-    if first == "SET"
-        && matches!(
-            words.get(1).map(String::as_str),
-            Some("TRANSACTION" | "ROLE" | "CONSTRAINT" | "CONSTRAINTS")
-        )
+    if is(first, "SET")
+        && words.next().is_some_and(|w| {
+            ["TRANSACTION", "ROLE", "CONSTRAINT", "CONSTRAINTS"]
+                .iter()
+                .any(|k| is(w, k))
+        })
     {
         return false;
     }
-    COMMANDS
-        .iter()
-        .any(|(shortest, full)| first.len() >= shortest.len() && full.starts_with(first.as_str()))
+    let initial = first.first().map(u8::to_ascii_uppercase);
+    COMMANDS.iter().any(|(shortest, full)| {
+        full.as_bytes().first() == initial.as_ref()
+            && first.len() >= shortest.len()
+            && full
+                .as_bytes()
+                .get(..first.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(first))
+    })
 }
 
 #[cfg(test)]

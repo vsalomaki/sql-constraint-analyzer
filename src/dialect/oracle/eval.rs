@@ -168,23 +168,22 @@ fn is_separator(b: u8) -> bool {
     (b.is_ascii_punctuation() && b != b'"') || b == b' '
 }
 
-fn elements(mask: &str) -> Result<Vec<Element>, String> {
-    let upper = mask.to_ascii_uppercase();
-    let mut rest = upper.as_bytes();
-    let mut out = Vec::new();
-    while let Some(&b) = rest.first() {
-        let (element, len) = match ELEMENTS
-            .iter()
-            .find(|(name, _)| rest.starts_with(name.as_bytes()))
-        {
-            Some((name, element)) => (*element, name.len()),
-            None if is_separator(b) => (Element::Separator, 1),
-            None => return Err(format!("the date mask `{mask}`")),
+/// The mask's elements in order; `None` for a part that is no element.
+fn elements(mask: &str) -> impl Iterator<Item = Option<Element>> {
+    let mut rest = mask.as_bytes();
+    std::iter::from_fn(move || {
+        let &b = rest.first()?;
+        let (element, len) = match ELEMENTS.iter().find(|(name, _)| {
+            rest.get(..name.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()))
+        }) {
+            Some((name, element)) => (Some(*element), name.len()),
+            None if is_separator(b) => (Some(Element::Separator), 1),
+            None => (None, rest.len()),
         };
-        out.push(element);
         rest = rest.get(len..).unwrap_or_default();
-    }
-    Ok(out)
+        Some(element)
+    })
 }
 
 /// Up to `max` digits from the start of `rest`, and how many there were.
@@ -247,7 +246,11 @@ fn datetime(text: &str, mask: &str, conversion: Conversion) -> Result<Literal, S
     let mismatch = || format!("`{text}` read with the date mask `{mask}`");
     let mut parts = Parts::default();
     let mut rest = text.as_bytes();
-    for element in elements(mask)? {
+    // The whole mask is checked before any of the text is read.
+    if elements(mask).any(|e| e.is_none()) {
+        return Err(format!("the date mask `{mask}`"));
+    }
+    for element in elements(mask).flatten() {
         let read = |rest: &mut &[u8], max| digits(rest, max).ok_or_else(mismatch);
         match element {
             Element::Separator => rest = one(rest, is_separator).ok_or_else(mismatch)?,

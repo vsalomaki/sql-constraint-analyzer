@@ -143,17 +143,15 @@ impl Catalog {
             .as_ref()
             .map(|s| &s.value)
             .or(self.default_schema.as_ref());
-        let found: Vec<TableId> = candidates
-            .iter()
-            .copied()
-            .filter(|&id| {
-                schema.is_none() || self.table(id).and_then(|t| t.name.schema.as_ref()) == schema
-            })
-            .collect();
-        match found.as_slice() {
-            [] => Lookup::Missing,
-            [id] => Lookup::Found(*id),
-            _ => Lookup::Ambiguous(found),
+        let mut found = candidates.iter().copied().filter(|&id| {
+            schema.is_none() || self.table(id).and_then(|t| t.name.schema.as_ref()) == schema
+        });
+        match (found.next(), found.next()) {
+            (None, _) => Lookup::Missing,
+            (Some(id), None) => Lookup::Found(id),
+            (Some(first), Some(second)) => {
+                Lookup::Ambiguous([first, second].into_iter().chain(found).collect())
+            }
         }
     }
 

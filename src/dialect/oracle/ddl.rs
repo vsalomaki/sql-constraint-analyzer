@@ -1,7 +1,7 @@
 //! Oracle DDL into neutral statements: `CREATE TABLE`, `ALTER TABLE` and `CREATE INDEX`, as far as the catalog needs
 //! them. Physical attributes (storage, tablespaces, partitions, LOB clauses) are skipped by balancing parentheses.
 
-use super::cursor::{Cursor, leading_words};
+use super::cursor::{Cursor, words};
 use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
@@ -38,13 +38,18 @@ pub fn parse_ddl(piece: &Piece, encoding: Encoding) -> Result<Option<Statement>,
 
 /// Whether a statement is table or index DDL, by its first words, without lexing it.
 pub(crate) fn is_table_ddl(text: &[u8]) -> bool {
-    let words = leading_words(text, 4);
-    let mut words = words.iter().map(String::as_str);
+    let is = |word: &[u8], keyword: &str| word.eq_ignore_ascii_case(keyword.as_bytes());
+    let mut words = words(text).take(4);
     match words.next() {
-        Some("ALTER") => words.next() == Some("TABLE"),
-        Some("CREATE") => words
-            .find(|w| !TABLE_MODIFIERS.contains(w) && !INDEX_MODIFIERS.contains(w))
-            .is_some_and(|w| w == "TABLE" || w == "INDEX"),
+        Some(w) if is(w, "ALTER") => words.next().is_some_and(|w| is(w, "TABLE")),
+        Some(w) if is(w, "CREATE") => words
+            .find(|w| {
+                !TABLE_MODIFIERS
+                    .iter()
+                    .chain(INDEX_MODIFIERS)
+                    .any(|m| is(w, m))
+            })
+            .is_some_and(|w| is(w, "TABLE") || is(w, "INDEX")),
         _ => false,
     }
 }
@@ -1707,7 +1712,7 @@ mod fixtures {
 
     use super::parse_ddl;
     use crate::catalog::{Catalog, CatalogBuilder, Kind, Lookup, Origin, Parent, Table};
-    use crate::dialect::oracle::cursor::first_word;
+    use crate::dialect::oracle::cursor::leading_words;
 
     use crate::dialect::Runner;
     use crate::dialect::oracle::RULES;
@@ -1750,7 +1755,7 @@ mod fixtures {
                 assert_ne!(piece.kind, PieceKind::Unterminated, "{at}");
                 let parsed = parse_ddl(&piece, encoding)
                     .unwrap_or_else(|e| panic!("{path}:{}: {}", e.line, e.message));
-                let head = first_word(&piece.text);
+                let head = leading_words(&piece.text, 1).pop();
                 let Some(statement) = parsed else {
                     assert!(
                         piece.kind != PieceKind::Sql

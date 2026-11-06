@@ -30,6 +30,28 @@ impl At {
     }
 }
 
+/// One constraint's keys, by hash, with each key's first row.
+type KeyMap = HashMap<u128, First>;
+
+/// Where a key was first seen, and whether its value rests on an assumption. Kept to 16 bytes, as the key maps
+/// hold one per key.
+#[derive(Debug, Clone, Copy)]
+struct First {
+    line: u64,
+    file: u32,
+    assumed: bool,
+}
+
+impl First {
+    fn new(at: At, assumed: bool) -> Self {
+        Self {
+            line: at.line,
+            file: u32::try_from(at.file).unwrap_or(u32::MAX),
+            assumed,
+        }
+    }
+}
+
 /// A foreign key value with no parent row yet.
 struct Pending {
     table: TableId,
@@ -66,8 +88,7 @@ pub(super) struct Checker<'a> {
     load_order: bool,
     /// File names by position, as findings show them.
     files: &'a [String],
-    /// Each key's first row, and whether its value rests on an assumption.
-    keys: HashMap<(TableId, usize), HashMap<u128, (At, bool)>>,
+    keys: HashMap<(TableId, usize), KeyMap>,
     /// What makes a key map less than certain, by key; lookups against it inherit the doubt.
     doubt: HashMap<(TableId, usize), Doubt>,
     rows: HashMap<TableId, u64>,
@@ -190,34 +211,15 @@ impl<'a> Checker<'a> {
             .zip(&matched.values)
             .map(|(column, value)| self.literal(column, value.map(|v| &v.expr), encoding))
             .collect();
-        let own: Vec<Canonical> = table
-            .columns
-            .iter()
-            .zip(&literals)
-            .map(|(column, literal)| value::canonical(literal, &column.data_type, self.rules))
-            .collect();
-        let assumed: Vec<bool> = table
-            .columns
-            .iter()
-            .zip(&literals)
-            .map(|(column, literal)| value::assumption(literal, column.data_type.family).is_some())
-            .collect();
         if !reference {
-            for (position, _) in assumed.iter().enumerate().filter(|(_, a)| **a) {
-                *self.dates.entry((matched.table, position)).or_default() += 1;
+            for (position, (column, literal)) in table.columns.iter().zip(&literals).enumerate() {
+                if value::assumption(literal, column.data_type.family).is_some() {
+                    *self.dates.entry((matched.table, position)).or_default() += 1;
+                }
             }
-            self.not_null(table, &own, row, at);
+            self.not_null(table, &literals, row, at);
         }
-        self.keys_of(
-            matched.table,
-            table,
-            &own,
-            &literals,
-            &assumed,
-            row,
-            at,
-            reference,
-        );
+        self.keys_of(matched.table, table, &literals, row, at, reference);
         literals
     }
 
@@ -256,7 +258,7 @@ impl<'a> Checker<'a> {
     }
 
     /// NULL in a NOT NULL column or a primary key column: one finding per column.
-    fn not_null(&mut self, table: &Table, own: &[Canonical], row: &InsertRow, at: At) {
+    fn not_null(&mut self, table: &Table, literals: &[Literal], row: &InsertRow, at: At) {
         let mut reported: Vec<usize> = Vec::new();
         let not_nulls = table.constraints.iter().filter_map(|c| match &c.kind {
             Kind::NotNull { column } => Some((c, std::slice::from_ref(column))),
@@ -271,7 +273,9 @@ impl<'a> Checker<'a> {
                 continue;
             }
             for &column in columns {
-                if own.get(column) == Some(&Canonical::Null) && !reported.contains(&column) {
+                if literals.get(column).is_some_and(|l| self.is_null(l))
+                    && !reported.contains(&column)
+                {
                     reported.push(column);
                     let mut finding =
                         self.finding(FindingKind::NotNull, table, constraint, &[column]);
@@ -284,17 +288,11 @@ impl<'a> Checker<'a> {
     }
 
     /// Puts the row's primary and unique keys into their maps, reporting a key that is already there.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one row's views, computed once by `row`"
-    )]
     fn keys_of(
         &mut self,
         id: TableId,
         table: &Table,
-        own: &[Canonical],
         literals: &[Literal],
-        assumed: &[bool],
         row: &InsertRow,
         at: At,
         reference: bool,
@@ -305,15 +303,30 @@ impl<'a> Checker<'a> {
                 Kind::Unique { columns, .. } => (columns, false),
                 _ => continue,
             };
-            let parts: Vec<&Canonical> = columns.iter().filter_map(|&c| own.get(c)).collect();
-            if parts.contains(&&Canonical::Unknown) {
+            let typed = || {
+                columns.iter().filter_map(|&c| {
+                    Some((literals.get(c)?, table.columns.get(c)?.data_type.family))
+                })
+            };
+            let parts: Vec<Canonical> = columns
+                .iter()
+                .filter_map(|&c| {
+                    let column = table.columns.get(c)?;
+                    Some(value::canonical(
+                        literals.get(c)?,
+                        &column.data_type,
+                        self.rules,
+                    ))
+                })
+                .collect();
+            if parts.contains(&Canonical::Unknown) {
                 self.doubt.entry((id, position)).or_default().unknown = true;
                 if !reference && Self::applies(constraint, at) {
                     self.undecided((id, position), columns, literals);
                 }
                 continue;
             }
-            let nulls = parts.iter().filter(|p| ***p == Canonical::Null).count();
+            let nulls = parts.iter().filter(|p| **p == Canonical::Null).count();
             let skip = if primary {
                 nulls > 0
             } else {
@@ -324,30 +337,30 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let hash = hash(&parts);
-            let assumed = columns.iter().any(|&c| assumed.get(c) == Some(&true));
+            let assumed =
+                typed().any(|(literal, family)| value::assumption(literal, family).is_some());
             if assumed {
                 self.doubt.entry((id, position)).or_default().assumed = true;
             }
-            let (first, first_assumed) =
-                match self.keys.entry((id, position)).or_default().entry(hash) {
-                    Entry::Occupied(first) => *first.get(),
-                    Entry::Vacant(slot) => {
-                        slot.insert((at, assumed));
-                        continue;
-                    }
-                };
+            let first = match self.keys.entry((id, position)).or_default().entry(hash) {
+                Entry::Occupied(first) => *first.get(),
+                Entry::Vacant(slot) => {
+                    slot.insert(First::new(at, assumed));
+                    continue;
+                }
+            };
             if reference || !Self::applies(constraint, at) {
                 continue;
             }
             let mut finding = self.finding(FindingKind::DuplicateKey, table, constraint, columns);
             finding.file = Some(self.file(at.file));
             finding.line = Some(row.line);
-            finding.key = parts.iter().map(|p| shown(p)).collect();
+            finding.key = parts.iter().map(shown).collect();
             finding.first = Some(Location {
-                file: self.file(first.file),
+                file: self.file(usize::try_from(first.file).unwrap_or(usize::MAX)),
                 line: first.line,
             });
-            finding.assumed = assumed || first_assumed;
+            finding.assumed = assumed || first.assumed;
             self.findings.push(finding);
         }
     }
@@ -396,25 +409,26 @@ impl<'a> Checker<'a> {
                     continue;
                 }
             };
-            let Some(parent_columns) = self.catalog.table(parent_id).and_then(|p| {
-                let key = p.constraints.get(parent_key)?;
-                let (Kind::PrimaryKey { columns } | Kind::Unique { columns, .. }) = &key.kind
-                else {
-                    return None;
-                };
-                Some(
-                    columns
-                        .iter()
-                        .filter_map(|&c| p.columns.get(c))
-                        .collect::<Vec<_>>(),
-                )
-            }) else {
+            let Some((parent_table, parent_columns)) =
+                self.catalog.table(parent_id).and_then(|p| {
+                    let key = p.constraints.get(parent_key)?;
+                    let (Kind::PrimaryKey { columns } | Kind::Unique { columns, .. }) = &key.kind
+                    else {
+                        return None;
+                    };
+                    Some((p, columns))
+                })
+            else {
                 continue;
             };
             // A child value is stored as its own column stores numbers, then compared as the parent's type compares.
             let parts: Vec<(Canonical, bool)> = columns
                 .iter()
-                .zip(&parent_columns)
+                .zip(
+                    parent_columns
+                        .iter()
+                        .filter_map(|&c| parent_table.columns.get(c)),
+                )
                 .map(|(&child, parent)| {
                     let literal = literals.get(child).unwrap_or(&Literal::Null);
                     let compared = DataType {
@@ -434,8 +448,7 @@ impl<'a> Checker<'a> {
                 self.undecided((id, position), columns, literals);
                 continue;
             }
-            let canonical: Vec<&Canonical> = parts.iter().map(|(p, _)| p).collect();
-            let hash = hash(&canonical);
+            let hash = hash(parts.iter().map(|(p, _)| p));
             let found = self
                 .keys
                 .get(&(parent_id, parent_key))
@@ -450,7 +463,7 @@ impl<'a> Checker<'a> {
                         line: row.line,
                         ..at
                     },
-                    key: canonical.iter().map(|p| shown(p)).collect(),
+                    key: parts.iter().map(|(p, _)| shown(p)).collect(),
                     load_order: self.load_order
                         && at.after(constraint.enabled_at)
                         && !constraint.state.initially_deferred,
@@ -596,7 +609,7 @@ fn shown(part: &Canonical) -> Option<String> {
 }
 
 /// The 128-bit hash of a key's canonical values, each one tagged and length-prefixed so no two keys run together.
-fn hash(parts: &[&Canonical]) -> u128 {
+fn hash<'p>(parts: impl IntoIterator<Item = &'p Canonical>) -> u128 {
     let mut hasher = Xxh3::new();
     for part in parts {
         match part {

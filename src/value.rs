@@ -45,10 +45,13 @@ pub fn canonical(literal: &Literal, column: &DataType, rules: &Rules) -> Canonic
             return Canonical::Null;
         }
         _ => match column.family {
-            TypeFamily::Number => number_value(literal).and_then(|n| stored(&n, column.decimal)),
+            TypeFamily::Number => number_value(literal).and_then(|n| stored(n, column.decimal)),
             // Blank-padded comparison: `'FI'` and `'FI '` are equal, and `' '` is a value, not NULL.
             TypeFamily::FixedText if rules.char_ignores_trailing_spaces => {
-                text_value(literal).map(|text| text.trim_end_matches(' ').to_owned())
+                text_value(literal).map(|mut text| {
+                    text.truncate(text.trim_end_matches(' ').len());
+                    text
+                })
             }
             TypeFamily::Text | TypeFamily::FixedText => text_value(literal),
             TypeFamily::Date => instant(literal, false),
@@ -81,9 +84,9 @@ pub fn assumption(literal: &Literal, family: TypeFamily) -> Option<Assumption> {
 
 /// A canonical number as a decimal column stores it: rounded half away from zero to its scale; `None` when it has
 /// more digits than the precision allows, which the database refuses.
-fn stored(number: &str, decimal: Option<Decimal>) -> Option<String> {
+fn stored(number: String, decimal: Option<Decimal>) -> Option<String> {
     let Some(Decimal { precision, scale }) = decimal else {
-        return Some(number.to_owned());
+        return Some(number);
     };
     let rounded = round(number, scale)?;
     let unsigned = rounded.strip_prefix('-').unwrap_or(&rounded);
@@ -100,12 +103,15 @@ fn stored(number: &str, decimal: Option<Decimal>) -> Option<String> {
 }
 
 /// A canonical number rounded half away from zero to `scale` digits after the point (before it when negative).
-fn round(number: &str, scale: i16) -> Option<String> {
+fn round(number: String, scale: i16) -> Option<String> {
     let (negative, unsigned) = match number.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, number),
+        None => (false, number.as_str()),
     };
     let (int, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if usize::try_from(scale).is_ok_and(|scale| fraction.len() <= scale) {
+        return Some(number);
+    }
     let mut digits: Vec<u8> = int
         .bytes()
         .chain(fraction.bytes())
@@ -116,9 +122,6 @@ fn round(number: &str, scale: i16) -> Option<String> {
     let Ok(keep_digits) = usize::try_from(keep) else {
         return Some("0".to_owned());
     };
-    if keep_digits >= digits.len() {
-        return Some(number.to_owned());
-    }
     let up = digits.get(keep_digits).is_some_and(|&d| d >= 5);
     digits.truncate(keep_digits);
     if up {
@@ -179,6 +182,13 @@ fn text_value(literal: &Literal) -> Option<String> {
 /// Decimal text in canonical form: no exponent, no leading or trailing zeros, `0` for zero, `-` only on a negative
 /// number. `None` when it isn't a number, or is beyond the range of a 38-digit decimal type (1E-130 up to 1E126).
 fn normalize_number(text: &str) -> Option<String> {
+    // Most exported numbers are plain integers, already canonical.
+    let plain = text.bytes().all(|b| b.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'))
+        && (1..=126).contains(&text.len());
+    if plain {
+        return Some(text.to_owned());
+    }
     let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text.strip_prefix('+').unwrap_or(text)),
