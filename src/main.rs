@@ -341,17 +341,14 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
         default_schema: args.default_schema(spec.dialect),
         load_order: args.load_order,
     };
-    let display = match (args.progress, verbosity) {
-        (_, report::Verbosity::Quiet) | (ProgressArg::Never, _) => progress::Display::Off,
-        (ProgressArg::Auto, _) if io::stderr().is_terminal() => progress::Display::Live {
-            width: terminal_width(),
-        },
-        (ProgressArg::Auto, _) => progress::Display::Plain,
-    };
-    let mut progress =
-        progress::Progress::new(display, verbosity == report::Verbosity::Verbose, err);
-    let result = check::run_with(&resolved.files, &options, &mut progress)?;
+    let mut progress = progress::Progress::new(
+        display(args.progress, verbosity),
+        verbosity == report::Verbosity::Verbose,
+        err,
+    );
+    let result = check::run_with(&resolved.files, &options, &mut progress);
     let phases = progress.finish();
+    let result = result?;
     let omitted =
         report::write_findings(&result.findings, args.format, args.max_per_constraint, out)?;
     if args.format == report::Format::Json {
@@ -359,6 +356,16 @@ fn check(args: &CheckArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::
     }
     report::write_run(&result, Some(&phases), &omitted, verbosity, err)?;
     Ok(ExitCode::from(report::exit_code(&result)))
+}
+
+fn display(progress: ProgressArg, verbosity: report::Verbosity) -> progress::Display {
+    match (progress, verbosity) {
+        (_, report::Verbosity::Quiet) | (ProgressArg::Never, _) => progress::Display::Off,
+        (ProgressArg::Auto, _) if io::stderr().is_terminal() => progress::Display::Live {
+            width: terminal_width(),
+        },
+        (ProgressArg::Auto, _) => progress::Display::Plain,
+    }
 }
 
 /// The terminal's width from `COLUMNS` when the shell exports it, else 80.
@@ -407,7 +414,10 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         on_not_null: args.on_not_null,
         fix_assumed: args.fix_assumed,
     };
-    let result = fix::fix(&resolved.files, &options, policy, &target)?;
+    let mut progress = progress::Progress::new(display(check.progress, verbosity), false, err);
+    let result = fix::fix_with(&resolved.files, &options, policy, &target, &mut progress);
+    progress.finish();
+    let result = result?;
 
     let omitted = if target.dry_run {
         match check.format {

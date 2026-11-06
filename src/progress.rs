@@ -42,6 +42,8 @@ pub struct Progress<'a> {
     list_catalog: bool,
     err: &'a mut dyn Write,
     phases: Phases,
+    /// The stage of a fix, which takes the place of the check's `n/3`.
+    stage: Option<String>,
     pass: Option<(Pass, Instant)>,
     resolving: Option<Instant>,
     /// Bytes of the pass read before the current file, the current file's name, size and start.
@@ -61,6 +63,7 @@ impl<'a> Progress<'a> {
             list_catalog,
             err,
             phases: Phases::default(),
+            stage: None,
             pass: None,
             resolving: None,
             done: 0,
@@ -94,18 +97,32 @@ impl<'a> Progress<'a> {
         }
     }
 
-    /// Writes the finished file's line in plain display.
+    /// `[2/3]` in a check, `[check 2]` in a fix.
+    fn step(&self) -> String {
+        match (&self.stage, self.pass) {
+            (Some(stage), _) => format!("[{stage}]"),
+            (None, Some((Pass::Schema, _))) => "[1/3]".to_owned(),
+            (None, _) => "[2/3]".to_owned(),
+        }
+    }
+
+    /// Writes the finished file's line in plain display: a file the rows pass read, or one a stage outside any pass
+    /// wrote.
     fn end_file(&mut self) {
         let Some((name, bytes, started)) = self.file.take() else {
             return;
         };
         self.done += bytes;
-        let rows_pass = matches!(self.pass, Some((Pass::Rows, _)));
-        if self.display == Display::Plain && rows_pass {
+        let listed = match self.pass {
+            Some((pass, _)) => pass == Pass::Rows,
+            None => self.stage.is_some(),
+        };
+        if self.display == Display::Plain && listed {
             // A write that fails here has nowhere better to go; the summary will fail too.
             drop(writeln!(
                 self.err,
-                "[2/3] {name}  {}  {}",
+                "{} {name}  {}  {}",
+                self.step(),
                 size(bytes),
                 seconds(started.elapsed())
             ));
@@ -127,12 +144,32 @@ impl<'a> Progress<'a> {
         if self.drawn.is_some_and(|at| at.elapsed() < REDRAW) {
             return;
         }
-        let Some((pass, started)) = self.pass else {
-            return;
+        let name = self.file.as_ref().map_or("", |(n, _, _)| n.as_str());
+        let name: String = name
+            .chars()
+            .rev()
+            .take(24)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let line = match self.pass {
+            Some((pass, started)) => self.bar(pass, started, &name),
+            None if self.stage.is_some() => format!("{} {name}", self.step()),
+            None => return,
         };
-        let (number, label) = match pass {
-            Pass::Schema => (1, "Schema"),
-            Pass::Rows => (2, "Rows"),
+        // One column short of the width, so the cursor never wraps to the next line.
+        let line: String = line.chars().take(width.saturating_sub(1)).collect();
+        drop(write!(self.err, "\r\x1b[2K{line}"));
+        drop(self.err.flush());
+        self.drawn = Some(Instant::now());
+    }
+
+    /// `[2/3] Rows    ███░░░░░░░  30%  a.sql · 40.0 MB/s · ETA 12 s`.
+    fn bar(&self, pass: Pass, started: Instant, name: &str) -> String {
+        let label = match pass {
+            Pass::Schema => "Schema",
+            Pass::Rows => "Rows",
         };
         let total = match pass {
             Pass::Schema => self.phases.schema.bytes,
@@ -162,25 +199,12 @@ impl<'a> Progress<'a> {
         } else {
             String::new()
         };
-        let name = self.file.as_ref().map_or("", |(n, _, _)| n.as_str());
-        let name: String = name
-            .chars()
-            .rev()
-            .take(24)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let line = format!(
-            "[{number}/3] {label:<7} {bar} {:>3.0}%  {name} · {}/s{eta}",
+        format!(
+            "{} {label:<7} {bar} {:>3.0}%  {name} · {}/s{eta}",
+            self.step(),
             share * 100.0,
             size(rate_bytes(rate)),
-        );
-        // One column short of the width, so the cursor never wraps to the next line.
-        let line: String = line.chars().take(width.saturating_sub(1)).collect();
-        drop(write!(self.err, "\r\x1b[2K{line}"));
-        drop(self.err.flush());
-        self.drawn = Some(Instant::now());
+        )
     }
 }
 
@@ -220,6 +244,15 @@ impl Observer for Progress<'_> {
         self.end_file();
         self.end_pass();
         self.resolving = Some(Instant::now());
+    }
+
+    fn stage(&mut self, stage: &str) {
+        self.end_file();
+        self.end_pass();
+        self.clear();
+        self.stage = Some(stage.to_owned());
+        self.done = 0;
+        self.offset = 0;
     }
 }
 
@@ -388,6 +421,53 @@ mod tests {
             (phases.schema.files, phases.rows.files, phases.rows.bytes),
             (1, 2, 2500)
         );
+    }
+
+    #[test]
+    fn a_fix_names_its_stage_on_each_line() {
+        let mut out = Vec::new();
+        let mut progress = Progress::new(Display::Plain, false, &mut out);
+        progress.stage("check 1");
+        progress.pass(Pass::Schema, 1, 10);
+        progress.file(0, "a.sql", 10);
+        progress.pass(Pass::Rows, 1, 10);
+        progress.file(0, "a.sql", 10);
+        progress.resolve();
+        progress.stage("write");
+        progress.file(0, "a.sql", 10);
+        progress.stage("verify");
+        progress.pass(Pass::Rows, 1, 8);
+        progress.file(0, "a.sql", 8);
+        progress.finish();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| l.rsplit_once("  ").map_or(l, |(head, _)| head))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "[check 1] a.sql  10 B",
+                "[write] a.sql  10 B",
+                "[verify] a.sql  8 B"
+            ]
+        );
+
+        let mut out = Vec::new();
+        let mut progress = Progress::new(Display::Live { width: 80 }, false, &mut out);
+        progress.stage("check 2");
+        progress.pass(Pass::Rows, 1, 10);
+        progress.file(0, "a.sql", 10);
+        progress.stage("write");
+        progress.file(0, "b.sql", 10);
+        progress.finish();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.split("\r\x1b[2K").filter(|l| !l.is_empty()).collect();
+        assert!(
+            lines.first().unwrap().starts_with("[check 2] Rows    "),
+            "{text:?}"
+        );
+        assert_eq!(lines.last(), Some(&"[write] b.sql"), "{text:?}");
     }
 
     #[test]

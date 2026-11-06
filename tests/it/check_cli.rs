@@ -267,6 +267,48 @@ fn progress_lines_and_the_catalog_listing() {
 }
 
 #[test]
+fn fix_shows_its_progress_unless_told_not_to() {
+    let run = |args: &[&str]| {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("t.sql"), ORPHAN).unwrap();
+        let output = Command::cargo_bin("sqlca")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["fix", "t.sql", "--in-place"])
+            .args(args)
+            .output()
+            .unwrap();
+        (dir, String::from_utf8(output.stderr).unwrap())
+    };
+    let (dir, plain) = run(&[]);
+    let fixed = fs::metadata(dir.path().join("t.sql")).unwrap().len();
+    assert!(fixed < ORPHAN.len() as u64);
+    let verify = format!("[verify] t.sql  {fixed} B  ");
+    for stage in ["[check 1] t.sql  ", "[write] t.sql  ", &verify] {
+        assert!(plain.contains(stage), "{stage:?} in {plain}");
+    }
+    for quiet in [&["--progress", "never"][..], &["-q"]] {
+        let (_, stderr) = run(quiet);
+        assert!(!stderr.contains("t.sql  "), "{quiet:?}: {stderr}");
+    }
+
+    // An unchanged file is written too with --out, copied in full where it can't be a hard link.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("t.sql"), ORPHAN).unwrap();
+    fs::write(dir.path().join("u.sql"), "INSERT INTO P VALUES (2);\n").unwrap();
+    let output = Command::cargo_bin("sqlca")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["fix", "t.sql", "u.sql", "--out", "out"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for stage in ["[write] t.sql  ", "[write] u.sql  "] {
+        assert!(stderr.contains(stage), "{stage:?} in {stderr}");
+    }
+}
+
+#[test]
 fn fix_writes_fixed_copies_and_a_report_folder() {
     let root = fixture("gen/oracle/separate-sqldev");
     let out = tempfile::tempdir().unwrap();
