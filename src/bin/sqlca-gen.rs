@@ -58,9 +58,15 @@ struct Cli {
     rows_per_file: Option<u64>,
 
     /// Hang rows from bad rows: children, and theirs, that the database rejects once their parent is rejected,
-    /// though they have no finding of their own. The manifest lists them. Not with `--omit-data`.
+    /// though they have no finding of their own, and duplicates of bad rows, which the database accepts. The manifest
+    /// lists them. Not with `--omit-data`.
     #[arg(long)]
     cascades: bool,
+
+    /// With `--cascades`, the length of the manager chain under each tree's employee: `fix` removes one of its rows
+    /// per round.
+    #[arg(long, value_name = "N", default_value_t = 3, requires = "cascades")]
+    manager_chain: u64,
 }
 
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -109,6 +115,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         omit_commit: cli.omit_commit,
         rows_per_file: cli.rows_per_file,
         cascades: cli.cascades,
+        manager_chain: if cli.cascades { cli.manager_chain } else { 0 },
     };
     let manifest = synth::generate(&options, &cli.out)
         .with_context(|| format!("writing {}", cli.out.display()))?;

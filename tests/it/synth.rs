@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sqlca::finding::{Finding, FindingKind};
+use sqlca::finding::{Finding, FindingKind, Location};
 use sqlca::synth::{self, Encoding, Layout, LineEnding, Manifest, Noise, Options, Placement};
 
 #[expect(
@@ -522,6 +522,7 @@ fn output_into_a_non_empty_folder_is_refused() {
 fn cascades_hang_from_rows_with_null_in_a_not_null_column() {
     let (dir, manifest) = generate(&Options {
         cascades: true,
+        manager_chain: 3,
         noise: Noise::all(),
         ..small()
     });
@@ -551,8 +552,8 @@ fn cascades_hang_from_rows_with_null_in_a_not_null_column() {
         depth
     };
     let depths: BTreeSet<usize> = rows.iter().cloned().map(depth).collect();
-    // A department with no name, its employee, the employee's assignment, and the assignment's timesheet.
-    assert_eq!(depths.last(), Some(&4));
+    // A department with no name, its employee, and the three employees of its manager chain.
+    assert_eq!(depths.last(), Some(&5));
     assert!(
         manifest
             .findings
@@ -588,6 +589,83 @@ fn cascades_hang_from_rows_with_null_in_a_not_null_column() {
         ),
         Err(synth::Error::CascadesWithoutData)
     ));
+}
+
+/// With cascades, some duplicates' first row is a bad row: one with a missing parent, one with NULL in a NOT NULL
+/// column, and a cascade row. The key's next row is the one the fix keeps, under `--on-fk null` too unless that keeps
+/// the first row; a third row stays a duplicate and goes.
+#[test]
+fn duplicates_of_bad_rows_are_kept_once_the_bad_row_goes() {
+    let (_dir, manifest) = generate(&Options {
+        cascades: true,
+        ..small()
+    });
+    let place = |f: &Finding| Location {
+        file: f.file.clone().unwrap(),
+        line: f.line.unwrap(),
+    };
+    let reason = |at: &Location| {
+        if manifest
+            .cascades
+            .iter()
+            .any(|c| c.file == at.file && c.line == at.line)
+        {
+            return Some(FindingKind::FkMissingParent);
+        }
+        manifest
+            .findings
+            .iter()
+            .find(|f| place(f) == *at && f.kind != FindingKind::DuplicateKey)
+            .map(|f| f.kind)
+    };
+    let mut seconds = BTreeMap::new();
+    let mut thirds = 0;
+    for finding in manifest
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DuplicateKey)
+    {
+        let first = finding.first.clone().unwrap();
+        let Some(why) = reason(&first) else {
+            continue;
+        };
+        let at = place(finding);
+        let earlier = manifest.findings.iter().any(|f| {
+            f.kind == FindingKind::DuplicateKey && f.first == finding.first && place(f) < at
+        });
+        if earlier {
+            thirds += 1;
+            assert!(manifest.fixes.removed.contains(&at), "{at:?}");
+            assert!(manifest.fixes.removed_on_fk_null.contains(&at), "{at:?}");
+            continue;
+        }
+        let first_stays = manifest
+            .fixes
+            .nulled_on_fk_null
+            .iter()
+            .any(|n| n.file == first.file && n.line == first.line);
+        assert!(!manifest.fixes.removed.contains(&at), "{at:?}");
+        assert_eq!(
+            manifest.fixes.removed_on_fk_null.contains(&at),
+            first_stays,
+            "{at:?}"
+        );
+        let cascade = manifest
+            .cascades
+            .iter()
+            .any(|c| c.file == first.file && c.line == first.line);
+        *seconds.entry((why, cascade)).or_insert(0) += 1;
+    }
+    let trees = 2;
+    assert_eq!(
+        seconds,
+        BTreeMap::from([
+            ((FindingKind::NotNull, false), trees),
+            ((FindingKind::FkMissingParent, false), trees),
+            ((FindingKind::FkMissingParent, true), trees / 2),
+        ])
+    );
+    assert_eq!(thirds, trees);
 }
 
 /// The committed fixtures (`tests/fixtures/gen/<dialect>/<variant>`) are what the generator writes today; `make

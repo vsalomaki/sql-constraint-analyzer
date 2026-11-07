@@ -30,7 +30,8 @@
     "encoding": "utf-8",
     "omit-data": [],
     "omit-commit": [],
-    "cascades": true
+    "cascades": true,
+    "manager-chain": 3
   },
   "files": [
     {
@@ -111,7 +112,7 @@
     },
     {
       "path": "app/data/EMPLOYEES.sql",
-      "statements": 36
+      "statements": 53
     },
     {
       "path": "app/data/PROJECTS.sql",
@@ -538,19 +539,6 @@
     },
     {
       "kind": "fk_load_order",
-      "constraint": "APP.ASSIGNMENTS_EMP_FK",
-      "table": "APP.ASSIGNMENTS",
-      "columns": [
-        "EMP_ID"
-      ],
-      "file": "app/data/ASSIGNMENTS.sql",
-      "line": 18,
-      "key": [
-        "1056"
-      ]
-    },
-    {
-      "kind": "fk_load_order",
       "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
       "table": "APP.ASSIGNMENTS",
       "columns": [
@@ -560,6 +548,19 @@
       "line": 18,
       "key": [
         "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 18,
+      "key": [
+        "1056"
       ]
     },
     {
@@ -999,19 +1000,6 @@
     },
     {
       "kind": "fk_load_order",
-      "constraint": "APP.ASSIGNMENTS_EMP_FK",
-      "table": "APP.ASSIGNMENTS",
-      "columns": [
-        "EMP_ID"
-      ],
-      "file": "app/data/ASSIGNMENTS.sql",
-      "line": 35,
-      "key": [
-        "1057"
-      ]
-    },
-    {
-      "kind": "fk_load_order",
       "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
       "table": "APP.ASSIGNMENTS",
       "columns": [
@@ -1021,6 +1009,19 @@
       "line": 35,
       "key": [
         "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 35,
+      "key": [
+        "1066"
       ]
     },
     {
@@ -1546,6 +1547,79 @@
       "line": 13
     },
     {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 17,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 18,
+      "key": [
+        "shift0.0@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 17
+      }
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "LAST_NAME"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 19
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 20,
+      "key": [
+        "shift0.1@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 19
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 21,
+      "key": [
+        "shift0.1@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 19
+      }
+    },
+    {
       "kind": "fk_load_order",
       "constraint": "APP.EMPLOYEES_DEPT_FK",
       "table": "APP.EMPLOYEES",
@@ -1553,7 +1627,7 @@
         "DEPT_ID"
       ],
       "file": "app/data/EMPLOYEES.sql",
-      "line": 14,
+      "line": 22,
       "key": [
         "30"
       ]
@@ -1566,106 +1640,14 @@
         "EMAIL"
       ],
       "file": "app/data/EMPLOYEES.sql",
-      "line": 15,
+      "line": 23,
       "key": [
         "user7@example.com"
       ],
       "first": {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 14
+        "line": 22
       }
-    },
-    {
-      "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_DEPT_FK",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "DEPT_ID"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 17,
-      "key": [
-        "50"
-      ]
-    },
-    {
-      "kind": "not_null",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "EMAIL"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 18
-    },
-    {
-      "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_DEPT_FK",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "DEPT_ID"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 19,
-      "key": [
-        "10"
-      ]
-    },
-    {
-      "kind": "not_null",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "EMAIL"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 20
-    },
-    {
-      "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_MANAGER_FK",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "MANAGER_ID"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 21,
-      "key": [
-        "1011"
-      ]
-    },
-    {
-      "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_DEPT_FK",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "DEPT_ID"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 22,
-      "key": [
-        "20"
-      ]
-    },
-    {
-      "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_DEPT_FK",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "DEPT_ID"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 23,
-      "key": [
-        "30"
-      ]
-    },
-    {
-      "kind": "unknown_column",
-      "table": "APP.EMPLOYEES",
-      "columns": [
-        "EMAIL_ADDR"
-      ],
-      "file": "app/data/EMPLOYEES.sql",
-      "line": 24
     },
     {
       "kind": "fk_load_order",
@@ -1677,21 +1659,17 @@
       "file": "app/data/EMPLOYEES.sql",
       "line": 25,
       "key": [
-        "40"
+        "50"
       ]
     },
     {
-      "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "kind": "not_null",
       "table": "APP.EMPLOYEES",
       "columns": [
-        "DEPT_ID"
+        "EMAIL"
       ],
       "file": "app/data/EMPLOYEES.sql",
-      "line": 26,
-      "key": [
-        "82"
-      ]
+      "line": 26
     },
     {
       "kind": "fk_load_order",
@@ -1703,27 +1681,29 @@
       "file": "app/data/EMPLOYEES.sql",
       "line": 27,
       "key": [
-        "50"
+        "10"
       ]
     },
     {
-      "kind": "value_count_mismatch",
+      "kind": "not_null",
       "table": "APP.EMPLOYEES",
-      "columns": [],
+      "columns": [
+        "EMAIL"
+      ],
       "file": "app/data/EMPLOYEES.sql",
       "line": 28
     },
     {
       "kind": "fk_load_order",
-      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
       "table": "APP.EMPLOYEES",
       "columns": [
-        "DEPT_ID"
+        "MANAGER_ID"
       ],
       "file": "app/data/EMPLOYEES.sql",
       "line": 29,
       "key": [
-        "10"
+        "1011"
       ]
     },
     {
@@ -1740,11 +1720,26 @@
       ]
     },
     {
-      "kind": "unknown_table",
-      "table": "APP.EMPLOYEES_ARCHIVE",
-      "columns": [],
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
       "file": "app/data/EMPLOYEES.sql",
-      "line": 31
+      "line": 31,
+      "key": [
+        "30"
+      ]
+    },
+    {
+      "kind": "unknown_column",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL_ADDR"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 32
     },
     {
       "kind": "fk_load_order",
@@ -1761,13 +1756,182 @@
     },
     {
       "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 34,
+      "key": [
+        "82"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 38,
+      "key": [
+        "-2"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 39,
+      "key": [
+        "shift1.0@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 38
+      }
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "LAST_NAME"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 40
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 41,
+      "key": [
+        "shift1.1@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 40
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 42,
+      "key": [
+        "shift1.1@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 40
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 43,
+      "key": [
+        "cascade1@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 34
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 44,
+      "key": [
+        "50"
+      ]
+    },
+    {
+      "kind": "value_count_mismatch",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 45
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 46,
+      "key": [
+        "10"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 47,
+      "key": [
+        "20"
+      ]
+    },
+    {
+      "kind": "unknown_table",
+      "table": "APP.EMPLOYEES_ARCHIVE",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 48
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 50,
+      "key": [
+        "40"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
       "constraint": "APP.EMPLOYEES_MANAGER_FK",
       "table": "APP.EMPLOYEES",
       "columns": [
         "MANAGER_ID"
       ],
       "file": "app/data/EMPLOYEES.sql",
-      "line": 34,
+      "line": 51,
       "key": [
         "1019"
       ]
@@ -1780,7 +1944,7 @@
         "DEPT_ID"
       ],
       "file": "app/data/EMPLOYEES.sql",
-      "line": 35,
+      "line": 52,
       "key": [
         "50"
       ]
@@ -1992,6 +2156,33 @@
   ],
   "cascades": [
     {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 14,
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 13
+      }
+    },
+    {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 15,
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 14
+      }
+    },
+    {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 16,
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 15
+      }
+    },
+    {
       "file": "app/data/ASSIGNMENTS.sql",
       "line": 18,
       "constraint": "APP.ASSIGNMENTS_EMP_FK",
@@ -2020,11 +2211,38 @@
     },
     {
       "file": "app/data/EMPLOYEES.sql",
-      "line": 26,
+      "line": 34,
       "constraint": "APP.EMPLOYEES_DEPT_FK",
       "parent": {
         "file": "app/data/DEPARTMENTS.sql",
         "line": 11
+      }
+    },
+    {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 35,
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 34
+      }
+    },
+    {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 36,
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 35
+      }
+    },
+    {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 37,
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 36
       }
     },
     {
@@ -2033,7 +2251,7 @@
       "constraint": "APP.ASSIGNMENTS_EMP_FK",
       "parent": {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 26
+        "line": 34
       }
     },
     {
@@ -2051,7 +2269,7 @@
       "constraint": "APP.AUDITLOG_EMP_FK",
       "parent": {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 26
+        "line": 34
       }
     }
   ],
@@ -2103,15 +2321,39 @@
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 15
+        "line": 17
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 18
+        "line": 19
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 20
+        "line": 21
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 23
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 26
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 28
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 38
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 40
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 42
       },
       {
         "file": "app/data/PROJECTS.sql",
@@ -2154,6 +2396,18 @@
         "line": 13
       },
       {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 14
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 15
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 16
+      },
+      {
         "file": "app/data/ASSIGNMENTS.sql",
         "line": 18
       },
@@ -2167,7 +2421,19 @@
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 26
+        "line": 34
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 35
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 36
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 37
       },
       {
         "file": "app/data/ASSIGNMENTS.sql",
@@ -2217,15 +2483,43 @@
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 15
-      },
-      {
-        "file": "app/data/EMPLOYEES.sql",
         "line": 18
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 20
+        "line": 19
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 21
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 23
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 26
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 28
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 39
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 40
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 42
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 43
       },
       {
         "file": "app/data/PROJECTS.sql",
@@ -2280,6 +2574,20 @@
         ]
       },
       {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 17,
+        "columns": [
+          "DEPT_ID"
+        ]
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 38,
+        "columns": [
+          "DEPT_ID"
+        ]
+      },
+      {
         "file": "app/data/PROJECTS.sql",
         "line": 5,
         "columns": [
@@ -2308,6 +2616,13 @@
         ]
       },
       {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 14,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
         "file": "app/data/TIMESHEETS.sql",
         "line": 39,
         "columns": [
@@ -2324,7 +2639,7 @@
       },
       {
         "file": "app/data/EMPLOYEES.sql",
-        "line": 26,
+        "line": 34,
         "columns": [
           "DEPT_ID"
         ]

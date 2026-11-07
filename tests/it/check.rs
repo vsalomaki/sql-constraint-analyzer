@@ -284,6 +284,7 @@ mod generated {
             for constraints in [Placement::BeforeData, Placement::AfterData] {
                 assert_manifest(&synth::Options {
                     cascades: true,
+                    manager_chain: 3,
                     violations_ppm: 1_000_000,
                     shuffle_order,
                     constraints,
