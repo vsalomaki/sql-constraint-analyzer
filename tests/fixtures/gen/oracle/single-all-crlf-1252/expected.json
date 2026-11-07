@@ -404,5 +404,211 @@
         "-1"
       ]
     }
-  ]
+  ],
+  "fixes": {
+    "removed": [
+      {
+        "file": "app/export.sql",
+        "line": 264
+      },
+      {
+        "file": "app/export.sql",
+        "line": 275
+      },
+      {
+        "file": "app/export.sql",
+        "line": 279
+      },
+      {
+        "file": "app/export.sql",
+        "line": 290
+      },
+      {
+        "file": "app/export.sql",
+        "line": 301
+      },
+      {
+        "file": "app/export.sql",
+        "line": 327
+      },
+      {
+        "file": "app/export.sql",
+        "line": 332
+      },
+      {
+        "file": "app/export.sql",
+        "line": 373
+      },
+      {
+        "file": "app/export.sql",
+        "line": 393
+      },
+      {
+        "file": "app/export.sql",
+        "line": 413
+      },
+      {
+        "file": "app/export.sql",
+        "line": 440
+      },
+      {
+        "file": "app/export.sql",
+        "line": 611
+      },
+      {
+        "file": "app/export.sql",
+        "line": 622
+      },
+      {
+        "file": "app/export.sql",
+        "line": 635
+      },
+      {
+        "file": "app/export.sql",
+        "line": 695
+      },
+      {
+        "file": "app/export.sql",
+        "line": 743
+      },
+      {
+        "file": "app/export.sql",
+        "line": 800
+      },
+      {
+        "file": "app/export.sql",
+        "line": 843
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1059
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1227
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1390
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1531
+      }
+    ],
+    "removed_on_fk_null": [
+      {
+        "file": "app/export.sql",
+        "line": 275
+      },
+      {
+        "file": "app/export.sql",
+        "line": 279
+      },
+      {
+        "file": "app/export.sql",
+        "line": 290
+      },
+      {
+        "file": "app/export.sql",
+        "line": 373
+      },
+      {
+        "file": "app/export.sql",
+        "line": 393
+      },
+      {
+        "file": "app/export.sql",
+        "line": 413
+      },
+      {
+        "file": "app/export.sql",
+        "line": 440
+      },
+      {
+        "file": "app/export.sql",
+        "line": 622
+      },
+      {
+        "file": "app/export.sql",
+        "line": 635
+      },
+      {
+        "file": "app/export.sql",
+        "line": 695
+      },
+      {
+        "file": "app/export.sql",
+        "line": 743
+      },
+      {
+        "file": "app/export.sql",
+        "line": 800
+      },
+      {
+        "file": "app/export.sql",
+        "line": 843
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1227
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1390
+      }
+    ],
+    "nulled_on_fk_null": [
+      {
+        "file": "app/export.sql",
+        "line": 264,
+        "columns": [
+          "COUNTRY_CODE"
+        ]
+      },
+      {
+        "file": "app/export.sql",
+        "line": 301,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
+        "file": "app/export.sql",
+        "line": 327,
+        "columns": [
+          "DEPT_ID"
+        ]
+      },
+      {
+        "file": "app/export.sql",
+        "line": 332,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
+        "file": "app/export.sql",
+        "line": 611,
+        "columns": [
+          "DEPT_NAME"
+        ]
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1059,
+        "columns": [
+          "EMP_ID",
+          "PROJECT_CODE"
+        ]
+      },
+      {
+        "file": "app/export.sql",
+        "line": 1531,
+        "columns": [
+          "EMP_ID"
+        ]
+      }
+    ]
+  }
 }

@@ -10,11 +10,13 @@ use std::process::Command;
 
 use super::RULES;
 use crate::check;
-use crate::finding::{Finding, FindingKind};
+use crate::finding::{Finding, FindingKind, Location};
 use crate::fix::{self, FixReport, OnDuplicate, OnFk, Policy, Removal, ReportPlace, Target};
 use crate::input::{InputFile, OrderSource, Role};
 use crate::synth::schema::{APP_TABLES, Kind, REF_TABLES, constraints_of};
-use crate::synth::{self, Encoding, Layout, LineEnding, Manifest, Noise, Options, Placement};
+use crate::synth::{
+    self, Cascade, Encoding, Fixes, Layout, LineEnding, Manifest, Noise, Nulled, Options, Placement,
+};
 
 const PDB: &str = "//localhost/FREEPDB1";
 
@@ -303,7 +305,7 @@ fn check_load_order(oracle: &Oracle, options: &Options, run: &str, exact: bool) 
     let (_dir, export, manifest) = generate(options);
     let spool = oracle.load(&export, options.encoding, run);
     let observed = observed_load_order(&spool, &line_index(&export, &manifest), run, exact);
-    let expected = expected_load_order(&manifest.findings, exact);
+    let expected = expected_load_order(&manifest.findings, &manifest.cascades, exact);
     assert_rejections(
         &observed,
         &expected,
@@ -375,21 +377,38 @@ fn observed_load_order(
     }))
 }
 
-fn expected_load_order(findings: &[Finding], exact: bool) -> BTreeMap<Signature, usize> {
-    counts(findings.iter().filter_map(|f| {
-        let (what, detail) = expected_row(f)?;
-        let location = exact.then(|| {
-            (
+/// The findings' rows, and the cascade rows, rejected for their foreign key once their parent is.
+fn expected_load_order(
+    findings: &[Finding],
+    cascades: &[Cascade],
+    exact: bool,
+) -> BTreeMap<Signature, usize> {
+    let mut rows: Vec<Signature> = findings
+        .iter()
+        .filter_map(|f| {
+            let (what, detail) = expected_row(f)?;
+            let location = (
                 f.file.clone().unwrap_or_default(),
                 f.line.unwrap_or_default(),
-            )
-        });
-        Some(Signature {
-            location,
-            what,
-            detail,
+            );
+            Some(Signature {
+                location: Some(location),
+                what,
+                detail,
+            })
         })
-    }))
+        .collect();
+    rows.extend(cascades.iter().map(|cascade| Signature {
+        location: Some((cascade.file.clone(), cascade.line)),
+        what: "fk",
+        detail: cascade.constraint.clone(),
+    }));
+    if !exact {
+        for row in &mut rows {
+            row.location = None;
+        }
+    }
+    counts(rows)
 }
 
 /// What an after-data load ends with: the rows rejected at insert, the keys that failed to validate, the foreign
@@ -462,9 +481,27 @@ fn observed_after_data(
     .sorted()
 }
 
-fn expected_after_data(findings: &[Finding]) -> AfterData {
+/// A cascade row loads, since no foreign key is in place yet; its key fails once added when its parent is a row
+/// rejected at insert, one with NULL in a NOT NULL column.
+fn expected_after_data(findings: &[Finding], cascades: &[Cascade]) -> AfterData {
     let mut rows = Vec::new();
     let mut want = AfterData::default();
+    let rejected: BTreeSet<Location> = findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::NotNull)
+        .filter_map(|f| {
+            Some(Location {
+                file: f.file.clone()?,
+                line: f.line?,
+            })
+        })
+        .collect();
+    want.fks.extend(
+        cascades
+            .iter()
+            .filter(|c| rejected.contains(&c.parent))
+            .map(|c| c.constraint.clone()),
+    );
     for finding in findings {
         match (finding.kind, &finding.constraint) {
             (FindingKind::DuplicateKey | FindingKind::NotNull, Some(c)) => {
@@ -516,7 +553,7 @@ fn check_after_data(oracle: &Oracle, options: &Options, run: &str) {
     let observed = observed_after_data(&spool, &line_index(&export, &manifest), run);
     assert_eq!(
         observed,
-        expected_after_data(&manifest.findings),
+        expected_after_data(&manifest.findings, &manifest.cascades),
         "{run}: Oracle (left) differs from the manifest (right)"
     );
 }
@@ -662,12 +699,13 @@ fn assert_restores(
     }
 }
 
-/// Each row set to NULL is one the manifest names as missing a parent, and its NULL columns are those foreign keys'
-/// columns; NULL in the wrong value of them would leave the key broken, which Oracle rejects.
-fn assert_nulled_columns(
+/// Under keep-first the fix removes exactly the rows the manifest lists for its foreign key policy, and sets to NULL
+/// exactly the columns it lists: a row more is a valid row lost, and NULL in the wrong column leaves a key broken.
+fn assert_fixes(
     report: &FixReport,
     inputs: &[(String, Vec<u8>)],
-    manifest: &Manifest,
+    fixes: &Fixes,
+    on_fk: OnFk,
     run: &str,
 ) {
     let relative: BTreeMap<&str, &str> = report
@@ -676,25 +714,44 @@ fn assert_nulled_columns(
         .zip(inputs)
         .map(|(output, (path, _))| (output.input.as_str(), path.as_str()))
         .collect();
-    for change in report.removed.iter().filter(|r| !r.nulled.is_empty()) {
-        let file = relative.get(change.file.as_str()).copied();
-        let mut wanted: Vec<&str> = manifest
-            .findings
-            .iter()
-            .filter(|f| f.kind == FindingKind::FkMissingParent)
-            .filter(|f| f.file.as_deref() == file && f.line == Some(change.line))
-            .flat_map(|f| f.columns.iter().map(String::as_str))
-            .collect();
-        wanted.sort_unstable();
-        wanted.dedup();
-        let mut got: Vec<&str> = change.nulled.iter().map(|(c, _)| c.as_str()).collect();
-        got.sort_unstable();
-        assert_eq!(
-            got, wanted,
-            "{run}: {file:?}:{} is set to NULL other than in its missing parents' columns",
-            change.line
-        );
-    }
+    let file = |removal: &Removal| relative[removal.file.as_str()].to_owned();
+    let removed: BTreeSet<Location> = report
+        .removed
+        .iter()
+        .filter(|r| r.nulled.is_empty())
+        .map(|r| Location {
+            file: file(r),
+            line: r.line,
+        })
+        .collect();
+    let nulled: BTreeSet<Nulled> = report
+        .removed
+        .iter()
+        .filter(|r| !r.nulled.is_empty())
+        .map(|r| {
+            let mut columns: Vec<String> = r.nulled.iter().map(|(c, _)| c.clone()).collect();
+            columns.sort();
+            Nulled {
+                file: file(r),
+                line: r.line,
+                columns,
+            }
+        })
+        .collect();
+    let (want_removed, want_nulled) = match on_fk {
+        OnFk::Null => (&fixes.removed_on_fk_null, &fixes.nulled_on_fk_null[..]),
+        _ => (&fixes.removed, &[][..]),
+    };
+    assert_eq!(
+        removed,
+        want_removed.iter().cloned().collect(),
+        "{run}: the fix removed other rows (left) than the manifest lists (right)"
+    );
+    assert_eq!(
+        nulled,
+        want_nulled.iter().cloned().collect(),
+        "{run}: the fix set other columns to NULL (left) than the manifest lists (right)"
+    );
 }
 
 /// A row set to NULL as the output should have it, from its original text alone: NULL at each value's place, after it
@@ -762,33 +819,10 @@ fn check_fixed(
         policy.on_fk != OnFk::Null || report.removed.iter().any(|r| !r.nulled.is_empty()),
         "{run}: the fix set nothing to NULL"
     );
-    // A planted bad row is no other row's parent, so under keep-first the fix removes exactly the rows the manifest
-    // names, less those it keeps with a foreign key set to NULL; one row fewer in the output is a valid row lost.
     if policy.on_duplicate == OnDuplicate::KeepFirst {
-        let kept = report
-            .removed
-            .iter()
-            .filter(|r| !r.nulled.is_empty())
-            .count();
-        let bad: BTreeSet<(&str, u64)> = manifest
-            .findings
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.kind,
-                    FindingKind::DuplicateKey | FindingKind::FkMissingParent | FindingKind::NotNull
-                )
-            })
-            .filter_map(|f| Some((f.file.as_deref()?, f.line?)))
-            .collect();
-        assert_eq!(
-            report.input.rows - report.output.rows,
-            u64::try_from(bad.len() - kept).unwrap(),
-            "{run}: the fix removed other than the manifest's bad rows"
-        );
+        assert_fixes(&report, &inputs, &manifest.fixes, policy.on_fk, run);
     }
     assert_restores(&inputs, &fixed, &report, annotate, run);
-    assert_nulled_columns(&report, &inputs, &manifest, run);
     let spool = oracle.load(&fixed, options.encoding, run);
     let index = line_index(&fixed, &manifest);
     let rejected = if after_data {
@@ -805,7 +839,7 @@ fn check_fixed(
         );
         assert_eq!(
             observed,
-            expected_after_data(&left),
+            expected_after_data(&left, &[]),
             "{run}: Oracle (left) differs from the fix's check of its output (right)"
         );
         observed.rows.values().sum::<usize>()
@@ -816,14 +850,14 @@ fn check_fixed(
             .filter(|f| f.kind == FindingKind::FkLoadOrder)
             .cloned()
             .collect();
-        let acted = acted_on(&observed, &expected_load_order(&load_order, exact));
+        let acted = acted_on(&observed, &expected_load_order(&load_order, &[], exact));
         assert!(
             acted.is_empty(),
             "{run}: Oracle rejects fixed rows {acted:?}"
         );
         assert_rejections(
             &observed,
-            &expected_load_order(&left, exact),
+            &expected_load_order(&left, &[], exact),
             &format!(
                 "{run}: Oracle's rejections (left) differ from the fix's check of its output (right)"
             ),
@@ -865,6 +899,7 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         omit_commit: vec!["APP.TIMESHEETS".to_owned()],
         // Parts end inside the employees, before every manager the departments' deferred key points at is written.
         rows_per_file: Some(40),
+        cascades: true,
         ..base.clone()
     };
     let wrapped = Options {
@@ -878,14 +913,16 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         deferred_violations: true,
         layout: Layout::Type,
         rows_per_file: Some(150),
+        cascades: true,
         ..base.clone()
     };
     // The departments come before their managers with other tables between, and children before their parents: no
-    // COMMIT may come before the managers, and a bad row can be a child before its parent too.
+    // COMMIT may come before the managers, and a bad row or a cascade row can be a child before its parent too.
     let shuffled = Options {
         seed: 6,
         layout: Layout::Single,
         shuffle_order: true,
+        cascades: true,
         ..base.clone()
     };
     // With `exact` off, only kinds and counts are compared.

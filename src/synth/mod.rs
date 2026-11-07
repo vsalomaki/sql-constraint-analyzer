@@ -1,9 +1,14 @@
 //! Test-data generator: writes exports with planted constraint violations, and a manifest listing the findings an
 //! analyzer must report for them. The model, rows and plants here are neutral; the chosen dialect writes the syntax.
 //!
-//! Every planted violation is an extra row with keys outside the normal rows' range, so no child row ever
-//! references a bad one. The database (which rejects a bad row and then its children) and the analyzer (which judges
-//! each row on its own) therefore agree on the findings by construction.
+//! Every planted violation is an extra row with keys outside the normal rows' range, so no normal row references a
+//! bad one. The database rejects a bad row and then its children, while the analyzer judges each row on its own, so
+//! the two agree on the findings by construction.
+//!
+//! With `cascades`, trees of rows hang from bad rows: a row with NULL in a NOT NULL column, its children, and theirs.
+//! The analyzer finds nothing in the children, since their parent is in the export, but the database rejects them
+//! and `fix` removes them with their root. The manifest lists them, and the rows `fix` removes or sets to NULL under
+//! `--on-duplicate keep-first`.
 
 mod data;
 mod out;
@@ -19,7 +24,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::dialect::DialectId;
-use crate::finding::Finding;
+use crate::finding::{Finding, Location};
 pub use out::{Encoding, LineEnding, OutputFile};
 pub(crate) use render::Render;
 
@@ -180,6 +185,9 @@ pub struct Options {
     /// The most rows a data file holds before the rows go on in `<name>_2.sql`, `<name>_3.sql`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_per_file: Option<u64>,
+    /// Hang rows from bad rows: children the database rejects with their parent, and `fix` removes with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cascades: bool,
 }
 
 impl Default for Options {
@@ -199,6 +207,7 @@ impl Default for Options {
             omit_data: Vec::new(),
             omit_commit: Vec::new(),
             rows_per_file: None,
+            cascades: false,
         }
     }
 }
@@ -212,6 +221,39 @@ pub struct Manifest {
     /// The SQL files in load order; `load.sql` and `order.txt` list the same order.
     pub files: Vec<OutputFile>,
     pub findings: Vec<Finding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cascades: Vec<Cascade>,
+    pub fixes: Fixes,
+}
+
+/// A row whose parent is a bad row or another cascade row. It has no finding of its own, but the database rejects
+/// it once its parent is rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cascade {
+    pub file: String,
+    pub line: u64,
+    /// The foreign key that points at the parent.
+    pub constraint: String,
+    pub parent: Location,
+}
+
+/// What `sqlca fix` does to the rows under `--on-duplicate keep-first`. Under keep-last a duplicate's first row goes
+/// instead, a normal row that other rows depend on, and with it every row that depends on it; that isn't predicted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fixes {
+    /// The rows the default policy removes.
+    pub removed: Vec<Location>,
+    /// The rows `--on-fk null` removes.
+    pub removed_on_fk_null: Vec<Location>,
+    /// The rows `--on-fk null` keeps with these foreign key columns set to NULL.
+    pub nulled_on_fk_null: Vec<Nulled>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Nulled {
+    pub file: String,
+    pub line: u64,
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -229,6 +271,8 @@ pub enum Error {
     },
     #[error("--rows-per-file needs a layout with separate data files, not one file per schema")]
     SplitSingleFile,
+    #[error("--cascades needs every table's data, so not --omit-data")]
+    CascadesWithoutData,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -247,6 +291,10 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     // A schema's one file holds the DDL after its data too, which would then run before the later parts.
     if options.layout == Layout::Single && options.rows_per_file.is_some() {
         return Err(Error::SplitSingleFile);
+    }
+    // A cascade row whose parent table is left out would have no finding the fix acts on, and stay.
+    if options.cascades && !options.omit_data.is_empty() {
+        return Err(Error::CascadesWithoutData);
     }
     let render = options.dialect.render(options.noise);
     let switches = render.unsupported_noise();
@@ -272,8 +320,12 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     }
     fs::create_dir_all(root)?;
 
-    let (files, findings) =
-        data::write_export(options, render.as_ref(), root, &omitted, &uncommitted)?;
+    let data::Written {
+        files,
+        findings,
+        cascades,
+        fixes,
+    } = data::write_export(options, render.as_ref(), root, &omitted, &uncommitted)?;
 
     let eol = options.line_ending.as_str();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
@@ -290,6 +342,8 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
         options: options.clone(),
         files,
         findings,
+        cascades,
+        fixes,
     };
     let mut json = serde_json::to_string_pretty(&manifest)?;
     json.push('\n');

@@ -12,7 +12,7 @@ use super::schema::{
     TableId,
 };
 use super::value::Value;
-use super::{Layout, Options, Placement};
+use super::{Cascade, Fixes, Layout, Nulled, Options, Placement};
 use crate::dialect::{Fold, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::value::days_from_civil;
@@ -52,16 +52,29 @@ fn part_path(path: &str, part: u64) -> String {
     }
 }
 
-/// Writes the whole export; returns the files in load order and the findings they must produce.
+/// What an export holds, as the manifest lists it.
+pub(crate) struct Written {
+    /// In load order.
+    pub(crate) files: Vec<OutputFile>,
+    pub(crate) findings: Vec<Finding>,
+    pub(crate) cascades: Vec<Cascade>,
+    pub(crate) fixes: Fixes,
+}
+
+/// Writes the whole export.
 pub(crate) fn write_export(
     options: &Options,
     render: &dyn Render,
     root: &Path,
     omitted: &[TableId],
     uncommitted: &[TableId],
-) -> io::Result<(Vec<OutputFile>, Vec<Finding>)> {
+) -> io::Result<Written> {
     let mut w = Writer::new(options, render, root, omitted, uncommitted);
     let sizes = Sizes::from_rows(options.rows);
+    // One tree of each shape, and one more per extra plant the violation rate gives the employees.
+    if options.cascades {
+        w.trees = 2 + sizes.employees * u64::from(options.violations_ppm) / 1_000_000;
+    }
     let mut order_rng = Rng::new(options.seed, 0);
     for (schema, tables) in [(REF_SCHEMA, &REF_TABLES[..]), (APP_SCHEMA, &APP_TABLES[..])] {
         w.schema_ddl(schema, tables)?;
@@ -142,6 +155,31 @@ impl Sizes {
     fn extra_log_id(&self, k: u64) -> u64 {
         self.audit + k
     }
+
+    // A cascade tree's keys come after every extra's: a table has at most one extra per normal row, besides one of
+    // each kind.
+
+    fn cascade_dept_id(&self, tree: u64) -> u64 {
+        self.extra_dept_id(self.departments + EXTRA_KINDS + tree)
+    }
+
+    fn cascade_emp_id(&self, tree: u64) -> u64 {
+        self.extra_emp_id(self.employees + EXTRA_KINDS + tree)
+    }
+}
+
+/// More than any table's kinds of plant.
+const EXTRA_KINDS: u64 = 16;
+
+/// Days after 2000-01-01 where the extra timesheets' work dates start, and how many follow before Oracle's last date.
+const EXTRA_DAYS: u64 = 9000;
+const EXTRA_DAY_SPAN: u64 = 2_900_000;
+
+/// The work date of extra timesheet `k`, including cascade ones. A timesheet whose foreign key `--on-fk null` sets to
+/// NULL keeps only its work date in the day key, so these dates differ while a table has fewer extras than the span.
+fn extra_work_date(k: u64) -> Value {
+    let days = EXTRA_DAYS + k % EXTRA_DAY_SPAN;
+    Value::Date(days_from_civil(2000, 1, 1) + i64::try_from(days).unwrap_or(0))
 }
 
 /// A foreign key value no row has: every key in the export is positive.
@@ -155,6 +193,9 @@ enum Target {
     Row(u64),
     /// No parent row has this key.
     Missing,
+    /// A bad row or a cascade row: in the export, so the analyzer finds no missing parent, but the database rejects
+    /// it.
+    Bad,
 }
 
 struct Row {
@@ -263,6 +304,12 @@ struct Writer<'o> {
     last_index: u64,
     extras: u64,
     group_left: u64,
+    /// The cascade trees in the export, and the next one whose row the current table writes.
+    trees: u64,
+    next_tree: u64,
+    /// By tree and table stream: each cascade row, with the foreign key to its parent unless it is the root.
+    cascade_rows: BTreeMap<(u64, u64), (Location, Option<&'static Constraint>)>,
+    fixes: Fixes,
 }
 
 impl<'o> Writer<'o> {
@@ -294,6 +341,10 @@ impl<'o> Writer<'o> {
             last_index: 0,
             extras: 0,
             group_left: 0,
+            trees: 0,
+            next_tree: 0,
+            cascade_rows: BTreeMap::new(),
+            fixes: Fixes::default(),
         }
     }
 
@@ -372,6 +423,7 @@ impl<'o> Writer<'o> {
         self.last_index = 0;
         self.extras = 0;
         self.group_left = 0;
+        self.next_tree = 0;
         if self.omitted.contains(&table) {
             return Ok(());
         }
@@ -524,6 +576,37 @@ impl<'o> Writer<'o> {
         self.emit(row, self.last_index, refs, plants).map(drop)
     }
 
+    /// The cascade trees whose rows of the current table come after its normal row `index` of `n`: the trees spread
+    /// evenly over each table.
+    fn trees_at(&mut self, index: u64, n: u64) -> Vec<u64> {
+        let mut trees = Vec::new();
+        while self.next_tree < self.trees && (self.next_tree + 1) * n / (self.trees + 1) == index {
+            trees.push(self.next_tree);
+            self.next_tree += 1;
+        }
+        trees
+    }
+
+    /// A cascade tree's row in the current table: its root, with `plants`, or a row that `refs` ties to its parent
+    /// with `Target::Bad`.
+    fn cascade(
+        &mut self,
+        tree: u64,
+        row: &Row,
+        refs: &[(&'static Constraint, Target)],
+        plants: Vec<Plant>,
+    ) -> io::Result<()> {
+        let fk = refs
+            .iter()
+            .find(|(_, target)| matches!(target, Target::Bad))
+            .map(|(fk, _)| *fk);
+        if let Some(at) = self.emit(row, self.last_index, refs, plants)? {
+            self.cascade_rows
+                .insert((tree, self.table.stream()), (at, fk));
+        }
+        Ok(())
+    }
+
     fn emit(
         &mut self,
         row: &Row,
@@ -557,6 +640,9 @@ impl<'o> Writer<'o> {
                 {
                     FindingKind::FkLoadOrder
                 }
+                Target::Bad if self.checks_load_order(fk) && !self.loaded.contains(&parent) => {
+                    FindingKind::FkLoadOrder
+                }
                 _ => continue,
             };
             fk_findings.push(Plant {
@@ -574,8 +660,10 @@ impl<'o> Writer<'o> {
             && row.column_list
             && row.table_name.is_none()
             && !row.drop_last_value
-            && !has_nextval;
+            && !has_nextval
+            && !refs.iter().any(|(_, target)| matches!(target, Target::Bad));
         let at = self.write_row(row, groupable)?;
+        let before = self.findings.len();
         for plant in plants.into_iter().chain(fk_findings) {
             let key = if plant.key_from_row {
                 let columns: Vec<&str> = plant.columns.iter().map(String::as_str).collect();
@@ -597,6 +685,9 @@ impl<'o> Writer<'o> {
                 count: None,
                 assumed: false,
             });
+        }
+        if let Some(found) = self.findings.get(before..) {
+            record_fix(&mut self.fixes, self.table, &at, found);
         }
         Ok(Some(at))
     }
@@ -682,7 +773,7 @@ impl<'o> Writer<'o> {
         Ok(at)
     }
 
-    fn finish(mut self) -> io::Result<(Vec<OutputFile>, Vec<Finding>)> {
+    fn finish(mut self) -> io::Result<Written> {
         for (_, open) in std::mem::take(&mut self.open) {
             self.findings.push(Finding {
                 kind: FindingKind::Uncommitted,
@@ -711,8 +802,45 @@ impl<'o> Writer<'o> {
                 assumed: false,
             });
         }
+        let cascades = self.cascade_fixes();
         let files = self.out.finish()?;
-        Ok((files, self.findings))
+        Ok(Written {
+            files,
+            findings: self.findings,
+            cascades,
+            fixes: self.fixes,
+        })
+    }
+
+    /// The cascade rows below the roots, and what the fix does to them. A root's own finding decides its fix.
+    fn cascade_fixes(&mut self) -> Vec<Cascade> {
+        let rows = std::mem::take(&mut self.cascade_rows);
+        let mut cascades = Vec::new();
+        for (&(tree, table), (at, fk)) in &rows {
+            let Some(fk) = fk else {
+                continue;
+            };
+            let Some((parent, _)) = rows.get(&(tree, parent_of(fk).stream())) else {
+                continue;
+            };
+            cascades.push(Cascade {
+                file: at.file.clone(),
+                line: at.line,
+                constraint: fk.qualified(self.rules),
+                parent: parent.clone(),
+            });
+            self.fixes.removed.push(at.clone());
+            match fate_on_fk_null(&rows, tree, table) {
+                Fate::Removed => self.fixes.removed_on_fk_null.push(at.clone()),
+                Fate::Nulled => self.fixes.nulled_on_fk_null.push(Nulled {
+                    file: at.file.clone(),
+                    line: at.line,
+                    columns: sorted(fk.columns.iter().map(|c| (*c).to_owned())),
+                }),
+                Fate::Kept => {}
+            }
+        }
+        cascades
     }
 
     /// Kinds planted at normal row `index` of `n`: each kind once at a fixed position, plus one at random.
@@ -730,6 +858,77 @@ impl<'o> Writer<'o> {
             at.push(*kind);
         }
         at
+    }
+}
+
+/// What `--on-fk null` does to a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fate {
+    Removed,
+    Nulled,
+    Kept,
+}
+
+fn parent_of(fk: &Constraint) -> TableId {
+    match fk.kind {
+        Kind::Foreign { parent, .. } => parent,
+        _ => fk.table,
+    }
+}
+
+fn sorted(columns: impl Iterator<Item = String>) -> Vec<String> {
+    let mut columns: Vec<String> = columns.collect();
+    columns.sort();
+    columns.dedup();
+    columns
+}
+
+/// Adds what the default policy and `--on-fk null` do to a row with `findings`, under keep-first: a row with a
+/// finding the fix acts on goes, unless every such finding is a missing parent whose columns can be NULL.
+fn record_fix(fixes: &mut Fixes, table: TableId, at: &Location, findings: &[Finding]) {
+    let acted: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.kind,
+                FindingKind::FkMissingParent | FindingKind::DuplicateKey | FindingKind::NotNull
+            )
+        })
+        .collect();
+    if acted.is_empty() {
+        return;
+    }
+    fixes.removed.push(at.clone());
+    let columns = sorted(acted.iter().flat_map(|f| f.columns.iter().cloned()));
+    if acted.iter().all(|f| f.kind == FindingKind::FkMissingParent)
+        && columns.iter().all(|c| schema::can_be_null(table, c))
+    {
+        fixes.nulled_on_fk_null.push(Nulled {
+            file: at.file.clone(),
+            line: at.line,
+            columns,
+        });
+    } else {
+        fixes.removed_on_fk_null.push(at.clone());
+    }
+}
+
+/// A cascade row's fate under `--on-fk null`: the root goes; a row whose parent goes loses its foreign key to NULL
+/// when it can, else goes too; a row whose parent stays stays.
+fn fate_on_fk_null(
+    rows: &BTreeMap<(u64, u64), (Location, Option<&'static Constraint>)>,
+    tree: u64,
+    table: u64,
+) -> Fate {
+    let Some((_, Some(fk))) = rows.get(&(tree, table)) else {
+        return Fate::Removed;
+    };
+    match fate_on_fk_null(rows, tree, parent_of(fk).stream()) {
+        Fate::Removed if fk.columns.iter().all(|c| schema::can_be_null(fk.table, c)) => {
+            Fate::Nulled
+        }
+        Fate::Removed => Fate::Removed,
+        Fate::Nulled | Fate::Kept => Fate::Kept,
     }
 }
 
@@ -929,6 +1128,18 @@ fn departments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             // An extra's FK columns are NULL unless planted with a value no parent has.
             w.extra(&row, &refs(Target::Missing, Target::Missing), found)?;
         }
+        // An odd tree's root is a department with no name.
+        for tree in w.trees_at(d, s.departments) {
+            if tree % 2 == 1 {
+                let row = Row::new(vec![
+                    ("DEPT_ID", int(s.cascade_dept_id(tree))),
+                    ("NAME", Value::Null),
+                    ("MANAGER_ID", Value::Null),
+                    ("COUNTRY_CODE", Value::Null),
+                ]);
+                w.cascade(tree, &row, &[], vec![Plant::not_null("NAME", None)])?;
+            }
+        }
     }
     Ok(())
 }
@@ -1056,8 +1267,46 @@ fn employees(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
         for plant in plants {
             employee_extra(w, s, e, plant, first.as_ref())?;
         }
+        for tree in w.trees_at(e, s.employees) {
+            cascade_employee(w, s, tree)?;
+        }
     }
     Ok(())
+}
+
+/// A cascade tree's employee: an even tree's root, with no email, or in an odd tree a child of its department.
+fn cascade_employee(w: &mut Writer<'_>, s: &Sizes, tree: u64) -> io::Result<()> {
+    let root = tree.is_multiple_of(2);
+    let row = Row::new(vec![
+        ("EMP_ID", int(s.cascade_emp_id(tree))),
+        ("FIRST_NAME", Value::text("Cascade")),
+        ("LAST_NAME", Value::text(format!("Row {tree}"))),
+        (
+            "EMAIL",
+            if root {
+                Value::Null
+            } else {
+                Value::text(format!("cascade{tree}@example.com"))
+            },
+        ),
+        (
+            "DEPT_ID",
+            if root {
+                Value::Null
+            } else {
+                int(s.cascade_dept_id(tree))
+            },
+        ),
+        ("MANAGER_ID", Value::Null),
+        ("HIRE_DATE", Value::Date(days_from_civil(2015, 1, 1))),
+        ("STATUS", Value::text("ACTIVE")),
+    ]);
+    if root {
+        w.cascade(tree, &row, &[], vec![Plant::not_null("EMAIL", None)])
+    } else {
+        let refs = [(&schema::EMPLOYEES_DEPT_FK, Target::Bad)];
+        w.cascade(tree, &row, &refs, Vec::new())
+    }
 }
 
 fn employee_extra(
@@ -1327,6 +1576,14 @@ fn assignments(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             );
             w.extra(&row, &target, found)?;
         }
+        for tree in w.trees_at(e, s.employees) {
+            let row = Row::new(vec![
+                ("EMP_ID", int(s.cascade_emp_id(tree))),
+                ("PROJECT_CODE", Value::text(project_code(0))),
+                ("ROLE", Value::text("DEV")),
+            ]);
+            w.cascade(tree, &row, &refs(Target::Bad, Target::Row(0)), Vec::new())?;
+        }
     }
     Ok(())
 }
@@ -1371,7 +1628,7 @@ fn timesheets(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 ),
                 (
                     "WORK_DATE",
-                    Value::Date(day0 + i64::try_from(ts % 9000).unwrap_or(0)),
+                    Value::Date(day0 + i64::try_from(ts % EXTRA_DAYS).unwrap_or(0)),
                 ),
                 ("HOURS", Value::Decimal(pick_str(&HOURS, ts).into())),
             ]);
@@ -1402,10 +1659,7 @@ fn timesheets(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                         project
                     })),
                 ),
-                (
-                    "WORK_DATE",
-                    Value::Date(day0 + 9000 + i64::try_from(k % 500).unwrap_or(0)),
-                ),
+                ("WORK_DATE", extra_work_date(k)),
                 (
                     "HOURS",
                     if plant == TimesheetPlant::NullHours {
@@ -1433,8 +1687,25 @@ fn timesheets(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             };
             w.extra(&row, &[(&schema::TIMESHEETS_ASSIGNMENT_FK, target)], found)?;
         }
+        for tree in w.trees_at(a, assignments) {
+            cascade_timesheet(w, s, tree)?;
+        }
     }
     Ok(())
+}
+
+/// A cascade tree's timesheet, a child of its assignment.
+fn cascade_timesheet(w: &mut Writer<'_>, s: &Sizes, tree: u64) -> io::Result<()> {
+    let k = w.next_extra();
+    let row = Row::new(vec![
+        ("TS_ID", int(s.extra_ts_id(k))),
+        ("EMP_ID", int(s.cascade_emp_id(tree))),
+        ("PROJECT_CODE", Value::text(project_code(0))),
+        ("WORK_DATE", extra_work_date(k)),
+        ("HOURS", Value::Decimal("8".into())),
+    ]);
+    let refs = [(&schema::TIMESHEETS_ASSIGNMENT_FK, Target::Bad)];
+    w.cascade(tree, &row, &refs, Vec::new())
 }
 
 fn legacy_notes(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
@@ -1507,6 +1778,20 @@ fn audit_log(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
                 Vec::new(),
             )?;
         }
+        for tree in w.trees_at(i, s.audit) {
+            let k = w.next_extra();
+            let row = Row::new(vec![
+                ("LOG_ID", log_id(s.extra_log_id(k))),
+                ("EMP_ID", int(s.cascade_emp_id(tree))),
+                (
+                    "LOGGED_AT",
+                    Value::Timestamp(days_from_civil(2015, 1, 1) * 86_400),
+                ),
+                ("DETAIL", Value::text("cascade")),
+            ]);
+            let refs = [(&schema::AUDITLOG_EMP_FK, Target::Bad)];
+            w.cascade(tree, &row, &refs, Vec::new())?;
+        }
     }
     Ok(())
 }
@@ -1514,6 +1799,23 @@ fn audit_log(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_timesheets_get_dates_of_their_own_up_to_oracles_last_day() {
+        let day = |k| match extra_work_date(k) {
+            Value::Date(day) => day,
+            other => panic!("{other:?}"),
+        };
+        let first = days_from_civil(2000, 1, 1) + i64::try_from(EXTRA_DAYS).unwrap();
+        assert_eq!(day(0), first);
+        // A million cascade trees apart, as with `--rows 1000000 --violations 1`.
+        assert_ne!(day(1), day(1_000_001));
+        assert_eq!(
+            day(EXTRA_DAY_SPAN - 1),
+            first + i64::try_from(EXTRA_DAY_SPAN).unwrap() - 1
+        );
+        assert!(day(EXTRA_DAY_SPAN - 1) <= days_from_civil(9999, 12, 31));
+    }
 
     #[test]
     fn extra_keys_stay_above_every_normal_key_at_any_size() {
@@ -1526,6 +1828,18 @@ mod tests {
             // Every extra fits NUMBER(9), even with an extra for every employee.
             assert!(s.extra_dept_id(s.employees) < 1_000_000_000, "{rows}");
             assert!(s.extra_emp_id(s.employees) < 1_000_000_000, "{rows}");
+            // Cascade keys come after every extra's, and fit with a tree for every employee.
+            let extras = |normal: u64| normal + EXTRA_KINDS - 1;
+            assert!(
+                s.cascade_dept_id(0) > s.extra_dept_id(extras(s.departments)),
+                "{rows}"
+            );
+            assert!(
+                s.cascade_emp_id(0) > s.extra_emp_id(extras(s.employees)),
+                "{rows}"
+            );
+            assert!(s.cascade_dept_id(s.employees + 2) < 1_000_000_000, "{rows}");
+            assert!(s.cascade_emp_id(s.employees + 2) < 1_000_000_000, "{rows}");
         }
         assert_eq!(
             missing_id(4)

@@ -1,16 +1,16 @@
 //! `fix` against the generator's exports and hand-written cases: the output has none of the violations it fixes, its
 //! bytes plus the removed ones restore the input exactly, and what it must not touch survives.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use sqlca::check::{self, Options};
-use sqlca::finding::FindingKind;
+use sqlca::finding::{FindingKind, Location};
 use sqlca::fix::{self, FixReport, Policy};
 use sqlca::input::{InputFile, OrderSource, Role};
 
-use crate::fixtures::{self, inputs};
+use crate::fixtures::{self, Nulled, inputs};
 
 const FIXED: [FindingKind; 3] = [
     FindingKind::FkMissingParent,
@@ -120,10 +120,23 @@ fn committed_exports_are_fixed_and_restored_by_their_rejects() {
                     "{at}: {kind:?}"
                 );
             }
-            // Load-order findings are valid rows in the end state: never removed.
+            // Load-order findings are valid rows in the end state: removed only as a cascade row, with its root.
+            let removed: BTreeSet<&Location> = manifest.fixes.removed.iter().collect();
+            let cascading = manifest
+                .findings
+                .iter()
+                .filter(|f| f.kind == FindingKind::FkLoadOrder && load_order)
+                .filter_map(|f| f.file.clone().zip(f.line))
+                .filter(|(file, line)| {
+                    removed.contains(&Location {
+                        file: file.clone(),
+                        line: *line,
+                    })
+                })
+                .count();
             assert_eq!(
                 count(&report.output, FindingKind::FkLoadOrder),
-                count(&report.input, FindingKind::FkLoadOrder),
+                count(&report.input, FindingKind::FkLoadOrder) - cascading,
                 "{at}"
             );
             assert!(
@@ -133,6 +146,81 @@ fn committed_exports_are_fixed_and_restored_by_their_rejects() {
             );
             assert_restores(&files, &report);
         }
+    }
+}
+
+/// Under the default policy and `--on-fk null`, `fix` removes exactly the rows the export's manifest lists, sets to
+/// NULL exactly the columns it lists, and leaves nothing it acts on, cascade rows included.
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "an export the test reads or fixes; a mismatch fails the test"
+)]
+fn assert_fixes_as_listed(root: &Path) {
+    let manifest = fixtures::manifest(root);
+    let files = inputs(root);
+    let order = fs::read_to_string(root.join("order.txt")).unwrap();
+    let relative: BTreeMap<String, &str> = files
+        .iter()
+        .zip(order.lines())
+        .map(|(file, path)| (check::display(&file.path), path))
+        .collect();
+    let listed = &manifest.fixes;
+    let policies = [
+        (Policy::default(), &listed.removed, &[][..]),
+        (
+            null_fk(),
+            &listed.removed_on_fk_null,
+            &listed.nulled_on_fk_null[..],
+        ),
+    ];
+    for load_order in [false, true] {
+        for (policy, removed, nulled) in policies {
+            let options = Options {
+                encoding: manifest.options.encoding,
+                load_order,
+                ..Options::default()
+            };
+            let (_dir, report) = run_with(&files, &options, policy, false);
+            let at = format!("{} {policy:?} load_order={load_order}", root.display());
+            let place = |file: &str| relative[file].to_owned();
+            let got: BTreeSet<Location> = report
+                .removed
+                .iter()
+                .filter(|r| r.nulled.is_empty())
+                .map(|r| Location {
+                    file: place(&r.file),
+                    line: r.line,
+                })
+                .collect();
+            assert_eq!(got, removed.iter().cloned().collect(), "{at}: removed");
+            let got: BTreeSet<Nulled> = report
+                .removed
+                .iter()
+                .filter(|r| !r.nulled.is_empty())
+                .map(|r| {
+                    let mut columns: Vec<String> =
+                        r.nulled.iter().map(|(c, _)| c.clone()).collect();
+                    columns.sort();
+                    Nulled {
+                        file: place(&r.file),
+                        line: r.line,
+                        columns,
+                    }
+                })
+                .collect();
+            assert_eq!(got, nulled.iter().cloned().collect(), "{at}: nulled");
+            for kind in FIXED {
+                assert_eq!(count(&report.output, kind), 0, "{at}: {kind:?} left");
+            }
+        }
+    }
+}
+
+#[test]
+fn committed_exports_lose_exactly_the_rows_their_manifests_list() {
+    for root in fixtures::generated() {
+        assert_fixes_as_listed(&root);
     }
 }
 
@@ -1566,7 +1654,10 @@ mod generated {
     use sqlca::finding::FindingKind;
     use sqlca::synth::{self, Layout, LineEnding, Noise, Placement};
 
-    use super::{FIXED, Policy, assert_restores, count, fix, inputs, keep_last, null_fk, run_with};
+    use super::{
+        FIXED, Policy, assert_fixes_as_listed, assert_restores, count, fix, inputs, keep_last,
+        null_fk, run_with,
+    };
 
     fn assert_fixed(options: &synth::Options) {
         assert_fixed_with(options, Policy::default(), false);
@@ -1714,6 +1805,31 @@ mod generated {
             shuffle_order: true,
             ..synth::Options::default()
         });
+    }
+
+    #[test]
+    fn cascades_go_with_their_root_in_every_layout_and_placement() {
+        for layout in [Layout::Single, Layout::Separate, Layout::Type] {
+            for constraints in [Placement::BeforeData, Placement::AfterData] {
+                for shuffle_order in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let root = dir.path().join("export");
+                    let options = synth::Options {
+                        rows: 40,
+                        layout,
+                        constraints,
+                        shuffle_order,
+                        // A plant at every row: the extras' keys must stay clear of the cascade rows'.
+                        violations_ppm: 1_000_000,
+                        cascades: true,
+                        ..synth::Options::default()
+                    };
+                    let manifest = synth::generate(&options, &root).unwrap();
+                    assert!(manifest.cascades.len() > 40, "{options:?}");
+                    assert_fixes_as_listed(&root);
+                }
+            }
+        }
     }
 }
 

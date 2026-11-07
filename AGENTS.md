@@ -27,7 +27,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect, and only what `sqlca fix` leaves in its output; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
-| `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/` (reused while their options match), times `sqlca check` (release) on both in both modes and `sqlca fix --out` on both (into a temporary folder in `gen-out/`), and fails unless the findings equal the manifest and fix removes exactly the rows the manifest implies, keeping every other row byte for byte and every other finding; prints wall time, MB/s, peak RSS (Linux only) and fix's time against the check's |
+| `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/`, and a smaller one with cascade rows (each reused while its options match), times `sqlca check` (release) on each in both modes and `sqlca fix --out` on each (into a temporary folder in `gen-out/`), and fails unless the findings equal the manifest and fix removes exactly the rows the manifest lists, keeping every other row byte for byte and every other finding; prints wall time, MB/s, peak RSS (Linux only) and fix's time against the check's |
 
 Run `make lint` and `make test` before calling a change done.
 
@@ -178,10 +178,11 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 `make oracle-check` (`scripts/oracle/check.sh`, about a minute) runs the ignored test
 `oracle_agrees_with_the_manifest_and_the_fix` against Oracle Free in Docker: image pinned by digest, no published
 port, a throwaway password. It loads generated exports and requires Oracle's rejections to match the manifest, by
-file and line where SQL\*Plus allows; a missing `COMMIT` (one export plants it with `omit_commit`) is no rejection,
+file and line where SQL\*Plus allows: its findings' rows, and its cascade rows, which have no finding but whose parent
+Oracle rejected; a missing `COMMIT` (one export plants it with `omit_commit`) is no rejection,
 since the load commits at its end. Then it fixes the same exports (default policy, with `--annotate`, and
-`--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires each output
-with its removed rows put back and any `COMMIT` it added taken out to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
+`--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires that under keep-first it removes and sets to NULL exactly the rows the
+manifest lists, that each output with its removed rows put back and any `COMMIT` it added taken out to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
 rejects no duplicate, NULL or missing-parent row other than a child the fix leaves before its parent, that its
 rejections match the fix's check of its output, and that it holds the output's rows less those it rejected. Run it
 after any change to the generator's schema, plants or Oracle syntax, or to what `fix` writes. A failure is a
