@@ -443,15 +443,7 @@ fn run_rounds(
         }
         let nulls = nulled_values(&removed, names);
         let report = check::run_without(files, options, &schema, &cuts, &nulls, observer)?;
-        let mut scans = BTreeMap::new();
-        for (index, lines) in named_rows(&report.findings, names, policy) {
-            let (Some(file), Some(file_cuts)) = (files.get(index), cuts.get(index)) else {
-                continue;
-            };
-            if file.role != Role::Reference {
-                scans.insert(index, scan(file, options, &lines, file_cuts)?);
-            }
-        }
+        let scans = scans(&report, files, options, names, policy, &cuts)?;
         let crowded: BTreeSet<Row> = scans
             .iter()
             .flat_map(|(index, scan)| scan.crowded.iter().map(move |line| (*index, *line)))
@@ -460,7 +452,7 @@ fn run_rounds(
             targets,
             left: skipped,
             waiting,
-        } = targets(&report.findings, files, names, policy, &crowded);
+        } = targets(&report, files, names, policy, &crowded);
         if rounds == policy.max_rounds && !targets.is_empty() {
             let left = past_limit(&report, policy, skipped);
             break (Some(report), left);
@@ -515,12 +507,18 @@ fn run_rounds(
         if !changed {
             break (Some(report), skipped);
         }
+        // Another round would find nothing new; the verify checks the output instead.
+        let done = settled && !confirm;
+        let skipped = if done {
+            not_on(skipped, &targets, names)
+        } else {
+            skipped
+        };
         if first_report.is_none() {
             first_report = Some(report);
         }
         rounds += 1;
-        // Another round would find nothing new; the verify checks the output instead.
-        if settled && !confirm {
+        if done {
             break (None, skipped);
         }
     };
@@ -532,6 +530,45 @@ fn run_rounds(
         left,
         defers_checks: schema.catalog().defers_checks(),
     })
+}
+
+/// By file position, the statements of the data files that hold the rows the findings `policy` acts on name.
+fn scans(
+    report: &check::Report,
+    files: &[InputFile],
+    options: &check::Options,
+    names: &[String],
+    policy: Policy,
+    cuts: &[Vec<Span>],
+) -> Result<BTreeMap<usize, Scan>, FixError> {
+    let mut scans = BTreeMap::new();
+    for (index, lines) in named_rows(&report.findings, names, policy) {
+        let (Some(file), Some(file_cuts)) = (files.get(index), cuts.get(index)) else {
+            continue;
+        };
+        if file.role != Role::Reference {
+            scans.insert(index, scan(file, options, &lines, file_cuts)?);
+        }
+    }
+    Ok(scans)
+}
+
+/// The findings left for review that aren't on the rows a settled round cuts. It set nothing to NULL, so its rows are
+/// gone, and what was left for review on them goes with them, as a further check would show.
+fn not_on(mut left: Vec<Left>, cut: &Targets, names: &[String]) -> Vec<Left> {
+    left.retain(|l| {
+        let row = l
+            .finding
+            .file
+            .as_deref()
+            .zip(l.finding.line)
+            .and_then(|(file, line)| Some((names.iter().position(|n| n == file)?, line)));
+        row.is_none_or(|(file, line)| {
+            !cut.get(&file)
+                .is_some_and(|lines| lines.contains_key(&line))
+        })
+    });
+    left
 }
 
 /// Records a row kept with values set to NULL, and whether that sets any value the changes so far didn't; a row
@@ -885,9 +922,6 @@ struct Decision<'a> {
     waiting: bool,
 }
 
-/// Whether the rows going can leave another row without its parent: a row goes from a table a foreign key points
-/// at, other than as a duplicate of each key pointed at, which a kept row still holds; and it holds a key some
-/// child row found, or its table has keys the check couldn't know or assumed.
 /// Whether a row going is the first row of a duplicated key. The key's next row then comes first, with duplicates no
 /// finding named, such as rows written before the constraint was enabled.
 fn takes_a_first_row(targets: &Targets, names: &[String], report: &check::Report) -> bool {
@@ -905,6 +939,9 @@ fn takes_a_first_row(targets: &Targets, names: &[String], report: &check::Report
         })
 }
 
+/// Whether the rows going can leave another row without its parent: a row goes from a table a foreign key points
+/// at, other than as a duplicate of each key pointed at, which a kept row still holds; and it holds a key some
+/// child row found, or its table has keys the check couldn't know or assumed.
 fn can_orphan(targets: &Targets, names: &[String], report: &check::Report) -> bool {
     targets.iter().any(|(&file, lines)| {
         lines.iter().any(|(&line, findings)| {
@@ -929,13 +966,85 @@ fn can_orphan(targets: &Targets, names: &[String], report: &check::Report) -> bo
     })
 }
 
+/// By file position and line, the rows given with their findings.
+fn by_row<'a>(rows: impl IntoIterator<Item = (Row, &'a Finding)>) -> Targets<'a> {
+    let mut targets: Targets = BTreeMap::new();
+    for ((index, line), finding) in rows {
+        targets
+            .entry(index)
+            .or_default()
+            .entry(line)
+            .or_default()
+            .push(finding);
+    }
+    targets
+}
+
+/// Whether the duplicates must wait for a later round while other rows go, since the row a duplicate decision keeps
+/// could still change: a row going can leave another without its parent; `--on-fk null` sets a foreign key to NULL,
+/// which can change the row's unique key too; or a row going is a duplicated key's first, so the key's next rows come
+/// up, with keys no finding named yet, such as rows before an `ENABLE NOVALIDATE` key. Keep-last removes its keys'
+/// first rows, so its duplicates always wait while other rows go. `going` is what goes once `hold_back` has kept back
+/// the duplicates whose kept row goes, so each duplicate going leaves a row holding its key.
+fn must_wait(
+    going: &[(Row, &Finding)],
+    report: &check::Report,
+    names: &[String],
+    policy: Policy,
+) -> bool {
+    let mut others = going
+        .iter()
+        .filter(|(_, f)| f.kind != FindingKind::DuplicateKey);
+    let Some(first) = others.next() else {
+        return false;
+    };
+    let nulls = policy.on_fk == OnFk::Null
+        && std::iter::once(first)
+            .chain(others)
+            .any(|(_, f)| f.kind == FindingKind::FkMissingParent);
+    let all = by_row(going.iter().copied());
+    nulls || takes_a_first_row(&all, names, report) || can_orphan(&all, names, report)
+}
+
+/// The rows going and how many of the findings and keep-last keys acting go, keeping back each duplicate whose first
+/// row goes, for another reason or as a duplicate of another key, and each keep-last key whose last row goes: once
+/// that row is gone, the duplicate may be the one to keep, or the row before the last.
+fn hold_back<'a>(
+    mut going: Vec<(Row, &'a Finding)>,
+    lasts: Vec<(Row, Vec<(Row, &'a Finding)>)>,
+    row_of: &dyn Fn(&str, u64) -> Option<Row>,
+) -> (Vec<(Row, &'a Finding)>, usize) {
+    let doomed: BTreeSet<Row> = going
+        .iter()
+        .map(|(row, _)| *row)
+        .chain(
+            lasts
+                .iter()
+                .flat_map(|(_, rows)| rows.iter().map(|(row, _)| *row)),
+        )
+        .collect();
+    going.retain(|(_, f)| {
+        let first = f.first.as_ref().and_then(|l| row_of(&l.file, l.line));
+        f.kind != FindingKind::DuplicateKey || first.is_none_or(|first| !doomed.contains(&first))
+    });
+    let mut taken = going.len();
+    for (last, rows) in lasts {
+        if !doomed.contains(&last) {
+            taken += 1;
+            going.extend(rows);
+        }
+    }
+    (going, taken)
+}
+
 fn targets<'a>(
-    findings: &'a [Finding],
+    report: &'a check::Report,
     files: &[InputFile],
     names: &[String],
     policy: Policy,
     crowded: &BTreeSet<Row>,
 ) -> Decision<'a> {
+    let findings = &report.findings;
     let row_of = |file: &str, line: u64| Some((names.iter().position(|n| n == file)?, line));
     let keep_last = policy.on_duplicate == OnDuplicate::KeepLast;
     let mut going: Vec<(Row, &Finding)> = Vec::new();
@@ -990,50 +1099,16 @@ fn targets<'a>(
         }
     }
     let acting = going.len() + lasts.len();
-    // Duplicates wait while anything else goes: the row they would keep may go itself, or lose its parent in a later
-    // round, and only the rounds after show which row is left to keep.
-    if going
-        .iter()
-        .any(|(_, f)| f.kind != FindingKind::DuplicateKey)
-    {
+    let (mut chosen, mut taken) = hold_back(going.clone(), lasts, &row_of);
+    if must_wait(&chosen, report, names, policy) {
         going.retain(|(_, f)| f.kind != FindingKind::DuplicateKey);
-        lasts.clear();
+        taken = going.len();
+        chosen = going;
     }
-    let doomed: BTreeSet<Row> = going
-        .iter()
-        .map(|(row, _)| *row)
-        .chain(
-            lasts
-                .iter()
-                .flat_map(|(_, rows)| rows.iter().map(|(row, _)| *row)),
-        )
-        .collect();
-    // A row can be in several keys. A duplicate whose first row goes this round, as a duplicate of another key, waits:
-    // once the first row is gone, it may be the one to keep.
-    going.retain(|(_, f)| {
-        let first = f.first.as_ref().and_then(|l| row_of(&l.file, l.line));
-        f.kind != FindingKind::DuplicateKey || first.is_none_or(|first| !doomed.contains(&first))
-    });
-    let mut taken = going.len();
-    // Likewise a key whose last row goes this round: once the last row is gone, the one before it is the one to keep.
-    for (last, rows) in lasts {
-        if !doomed.contains(&last) {
-            taken += 1;
-            going.extend(rows);
-        }
-    }
+    let going = chosen;
     let waiting = taken < acting;
-    let mut targets: Targets = BTreeMap::new();
-    for ((index, line), finding) in going {
-        targets
-            .entry(index)
-            .or_default()
-            .entry(line)
-            .or_default()
-            .push(finding);
-    }
     Decision {
-        targets,
+        targets: by_row(going),
         left,
         waiting,
     }

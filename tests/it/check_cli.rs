@@ -365,7 +365,7 @@ fn fix_writes_fixed_copies_and_a_report_folder() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
         stderr.contains(
-            "Fixed      22 rows in 2 rounds (missing parent 9, duplicate key 9, NULL in NOT NULL 4)"
+            "Fixed      22 rows in 1 round (missing parent 9, duplicate key 9, NULL in NOT NULL 4)"
         ),
         "{stderr}"
     );
