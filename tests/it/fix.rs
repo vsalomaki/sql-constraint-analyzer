@@ -659,6 +659,33 @@ fn keep_last_waits_while_the_last_row_goes_for_another_reason() {
 }
 
 #[test]
+fn keep_last_takes_the_rows_a_removed_first_row_hid() {
+    // The unique key is enabled after two rows of key 1, so only the third row's duplicate is a finding, naming the
+    // first row. Once that row goes, the second comes first, and the third is its duplicate.
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (ID NUMBER, V NUMBER);\n\
+             CREATE INDEX T_I ON T (ID);\n\
+             INSERT INTO T VALUES (1, 1);\nINSERT INTO T VALUES (1, 10);\n\
+             ALTER TABLE T ADD CONSTRAINT T_U UNIQUE (ID) USING INDEX T_I ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (1, 20);\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(3, 1), (4, 2)], "{:#?}", report.removed);
+    assert!(output(&report).ends_with("ENABLE NOVALIDATE;\nINSERT INTO T VALUES (1, 20);\n"));
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+#[test]
 fn keep_last_leaves_a_key_whose_rows_it_cant_all_reach() {
     let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY);\n";
     let (_dir, _, report) = fix_scripts(
