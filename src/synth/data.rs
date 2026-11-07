@@ -44,6 +44,14 @@ fn file_path(layout: Layout, schema: &str, section: Section, object: &str) -> St
     }
 }
 
+/// Part `part` of a data file: the file itself, then `<name>_2.sql`, `<name>_3.sql`, …
+fn part_path(path: &str, part: u64) -> String {
+    match path.rsplit_once('.') {
+        Some((stem, extension)) if part > 1 => format!("{stem}_{part}.{extension}"),
+        _ => path.to_owned(),
+    }
+}
+
 /// Writes the whole export; returns the files in load order and the findings they must produce.
 pub(crate) fn write_export(
     options: &Options,
@@ -244,7 +252,11 @@ struct Writer<'o> {
     empty_parents: Vec<(&'static Constraint, u64)>,
     loaded: Vec<TableId>,
     table: TableId,
+    /// The current table's data file, as the layout names it, and the part of it rows go to now.
+    base_path: String,
     data_path: String,
+    /// By data file as the layout names it: its current part, from 1, and the rows that part has.
+    parts: BTreeMap<String, (u64, u64)>,
     /// Decides the data; kept apart from `style_rng` so the noise options don't change the rows.
     rng: Rng,
     style_rng: Rng,
@@ -274,7 +286,9 @@ impl<'o> Writer<'o> {
             empty_parents: Vec::new(),
             loaded: Vec::new(),
             table: TableId::Countries,
+            base_path: String::new(),
             data_path: String::new(),
+            parts: BTreeMap::new(),
             rng: Rng::new(options.seed, 1),
             style_rng: Rng::new(options.seed, 2),
             last_index: 0,
@@ -345,12 +359,14 @@ impl<'o> Writer<'o> {
 
     fn begin_table(&mut self, table: TableId) -> io::Result<()> {
         self.table = table;
-        self.data_path = file_path(
+        self.base_path = file_path(
             self.options.layout,
             table.schema(),
             Section::Data,
             table.name(),
         );
+        let part = self.parts.get(&self.base_path).map_or(1, |(part, _)| *part);
+        self.data_path = part_path(&self.base_path, part);
         self.rng = Rng::new(self.options.seed, 100 + table.stream());
         self.style_rng = Rng::new(self.options.seed, 200 + table.stream());
         self.last_index = 0;
@@ -368,30 +384,59 @@ impl<'o> Writer<'o> {
 
     fn end_table(&mut self) -> io::Result<()> {
         if !self.omitted.contains(&self.table) {
-            self.close_group()?;
-            if !self.uncommitted.contains(&self.table) && !self.commit_rolls_back() {
-                let commit = self.render.commit(self.eol);
-                self.write_data(&commit.text, commit.statements)?;
-                self.open.remove(&self.data_path);
-            }
-            let footer = self.render.data_section(self.table, Edge::End, self.eol);
-            if !footer.text.is_empty() {
-                self.write_data(&footer.text, footer.statements)?;
-            }
+            self.end_part(true)?;
         }
         self.loaded.push(self.table);
         Ok(())
     }
 
-    /// Whether a commit after the current table's rows would roll back: a deferred foreign key, in place before the
-    /// data and checked at commit, of this table or one written before it, whose parent's rows aren't written yet.
-    fn commit_rolls_back(&self) -> bool {
+    /// Ends the current table's rows in the current file, all of them with `done`: the commit, unless there is to be
+    /// none, then the footer.
+    fn end_part(&mut self, done: bool) -> io::Result<()> {
+        self.close_group()?;
+        if !self.uncommitted.contains(&self.table) && !self.commit_rolls_back(done) {
+            let commit = self.render.commit(self.eol);
+            self.write_data(&commit.text, commit.statements)?;
+            self.open.remove(&self.data_path);
+        }
+        let footer = self.render.data_section(self.table, Edge::End, self.eol);
+        if !footer.text.is_empty() {
+            self.write_data(&footer.text, footer.statements)?;
+        }
+        Ok(())
+    }
+
+    /// Before a statement: once the current part has its rows, ends it and goes on in the next.
+    fn next_part_if_full(&mut self) -> io::Result<()> {
+        let Some(limit) = self.options.rows_per_file else {
+            return Ok(());
+        };
+        let (part, rows) = self.parts.get(&self.base_path).copied().unwrap_or((1, 0));
+        if rows < limit {
+            return Ok(());
+        }
+        self.end_part(false)?;
+        self.out.close(&self.data_path)?;
+        self.parts.insert(self.base_path.clone(), (part + 1, 0));
+        self.data_path = part_path(&self.base_path, part + 1);
+        let header = self.render.data_section(self.table, Edge::Start, self.eol);
+        if !header.text.is_empty() {
+            self.write_data(&header.text, header.statements)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a commit after the current table's rows, all of them with `done`, would roll back: a deferred foreign
+    /// key, in place before the data and checked at commit, of this table or one written before it, whose parent's
+    /// rows aren't all written yet.
+    fn commit_rolls_back(&self, done: bool) -> bool {
+        let written =
+            |parent: TableId| self.loaded.contains(&parent) || (done && parent == self.table);
         !self.after_data()
             && self.loaded.iter().chain([&self.table]).any(|&table| {
                 schema::constraints_of(table).any(|c| {
                     self.deferred(c)
-                        && matches!(c.kind, Kind::Foreign { parent, .. }
-                            if parent != self.table && !self.loaded.contains(&parent))
+                        && matches!(c.kind, Kind::Foreign { parent, .. } if !written(parent))
                 })
             })
     }
@@ -604,6 +649,10 @@ impl<'o> Writer<'o> {
             wrap,
             eol,
         };
+        if self.group_left == 0 {
+            self.next_part_if_full()?;
+        }
+        self.parts.entry(self.base_path.clone()).or_insert((1, 0)).1 += 1;
         let at = if groupable {
             if self.group_left == 0 {
                 self.group_left = 2 + self.style_rng.below(3);

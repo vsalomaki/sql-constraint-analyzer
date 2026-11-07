@@ -39,7 +39,8 @@ pub struct OutputFile {
 
 struct Open {
     info: OutputFile,
-    writer: BufWriter<File>,
+    /// `None` once closed.
+    writer: Option<BufWriter<File>>,
     /// The line the next character goes on.
     line: u64,
 }
@@ -77,13 +78,18 @@ impl Out {
             .files
             .get_mut(index)
             .ok_or_else(|| io::Error::other(format!("output file {path} lost its slot")))?;
+        let writer = file.writer.as_mut().ok_or_else(|| {
+            io::Error::other(format!(
+                "output file {path} was written after it was closed"
+            ))
+        })?;
         file.info.statements += statements;
         let at = Location {
             file: file.info.path.clone(),
             line: file.line,
         };
         match encoding {
-            Encoding::Utf8 => file.writer.write_all(text.as_bytes())?,
+            Encoding::Utf8 => writer.write_all(text.as_bytes())?,
             Encoding::Windows1252 => {
                 let (bytes, _, unmappable) = encoding_rs::WINDOWS_1252.encode(text);
                 if unmappable {
@@ -91,7 +97,7 @@ impl Out {
                         "{path}: text has a character Windows-1252 can't encode"
                     )));
                 }
-                file.writer.write_all(&bytes)?;
+                writer.write_all(&bytes)?;
             }
         }
         file.line += u64::try_from(text.bytes().filter(|&b| b == b'\n').count()).unwrap_or(0);
@@ -110,7 +116,7 @@ impl Out {
         };
         self.files.push(Open {
             info,
-            writer,
+            writer: Some(writer),
             line: 1,
         });
         let index = self.files.len() - 1;
@@ -118,12 +124,28 @@ impl Out {
         Ok(index)
     }
 
+    /// Flushes and closes `path`, which takes no more writes; an export with many parts would otherwise run out of
+    /// file handles.
+    pub(crate) fn close(&mut self, path: &str) -> io::Result<()> {
+        let writer = self
+            .by_path
+            .get(path)
+            .and_then(|&i| self.files.get_mut(i))
+            .and_then(|f| f.writer.take());
+        match writer {
+            Some(mut writer) => writer.flush(),
+            None => Ok(()),
+        }
+    }
+
     /// Flushes every file and returns them in the order they were first written: the load order.
     pub(crate) fn finish(self) -> io::Result<Vec<OutputFile>> {
         self.files
             .into_iter()
-            .map(|mut f| {
-                f.writer.flush()?;
+            .map(|f| {
+                if let Some(mut writer) = f.writer {
+                    writer.flush()?;
+                }
                 Ok(f.info)
             })
             .collect()
@@ -148,6 +170,17 @@ mod tests {
                 statements: 3,
             }]
         );
+    }
+
+    #[test]
+    fn a_closed_file_is_on_disk_and_takes_no_more_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Out::new(dir.path(), Encoding::Utf8);
+        out.write("x.sql", "one\n", 1).unwrap();
+        out.close("x.sql").unwrap();
+        assert_eq!(fs::read(dir.path().join("x.sql")).unwrap(), b"one\n");
+        assert!(out.write("x.sql", "two\n", 1).is_err());
+        assert_eq!(out.finish().unwrap().len(), 1);
     }
 
     #[test]

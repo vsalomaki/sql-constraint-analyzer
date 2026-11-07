@@ -863,6 +863,8 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         line_ending: LineEnding::Crlf,
         encoding: Encoding::Windows1252,
         omit_commit: vec!["APP.TIMESHEETS".to_owned()],
+        // Parts end inside the employees, before every manager the departments' deferred key points at is written.
+        rows_per_file: Some(40),
         ..base.clone()
     };
     let wrapped = Options {
@@ -874,6 +876,8 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         seed: 4,
         constraints: Placement::AfterData,
         deferred_violations: true,
+        layout: Layout::Type,
+        rows_per_file: Some(150),
         ..base.clone()
     };
     // The departments come before their managers with other tables between, and children before their parents: no

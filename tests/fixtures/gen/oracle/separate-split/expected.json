@@ -1,0 +1,539 @@
+{
+  "generator": "sqlca-gen 0.2.1",
+  "options": {
+    "dialect": "oracle",
+    "seed": 1,
+    "rows": 20,
+    "layout": "separate",
+    "constraints": "before-data",
+    "shuffle-order": false,
+    "violations-ppm": 1000,
+    "deferred-violations": true,
+    "noise": {
+      "rem-header": true,
+      "set-define-off": true,
+      "comments": false,
+      "storage-clauses": true,
+      "plsql-trigger": false,
+      "quoted-numbers": true,
+      "numeric-forms": false,
+      "multiline-strings": false,
+      "q-quote": false,
+      "embedded-delimiters": false,
+      "nextval": false,
+      "insert-all": false,
+      "mixed-case": false,
+      "no-column-list": false,
+      "wrapped-statements": false
+    },
+    "line-ending": "lf",
+    "encoding": "utf-8",
+    "omit-data": [],
+    "omit-commit": [
+      "APP.EMPLOYEES"
+    ],
+    "rows-per-file": 30
+  },
+  "files": [
+    {
+      "path": "ref/tables/COUNTRIES.sql",
+      "statements": 2
+    },
+    {
+      "path": "ref/data/COUNTRIES.sql",
+      "statements": 13
+    },
+    {
+      "path": "app/tables/DEPARTMENTS.sql",
+      "statements": 3
+    },
+    {
+      "path": "app/tables/EMPLOYEES.sql",
+      "statements": 5
+    },
+    {
+      "path": "app/tables/PROJECTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/tables/ASSIGNMENTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/tables/TIMESHEETS.sql",
+      "statements": 4
+    },
+    {
+      "path": "app/tables/LEGACY_NOTES.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/tables/AuditLog.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/DEPARTMENTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/EMPLOYEES.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/PROJECTS.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/ref_constraints/ASSIGNMENTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/TIMESHEETS.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/ref_constraints/LEGACY_NOTES.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/ref_constraints/AuditLog.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/data/DEPARTMENTS.sql",
+      "statements": 12
+    },
+    {
+      "path": "app/data/EMPLOYEES.sql",
+      "statements": 32
+    },
+    {
+      "path": "app/data/EMPLOYEES_2.sql",
+      "statements": 3
+    },
+    {
+      "path": "app/data/PROJECTS.sql",
+      "statements": 11
+    },
+    {
+      "path": "app/data/ASSIGNMENTS.sql",
+      "statements": 33
+    },
+    {
+      "path": "app/data/ASSIGNMENTS_2.sql",
+      "statements": 17
+    },
+    {
+      "path": "app/data/TIMESHEETS.sql",
+      "statements": 33
+    },
+    {
+      "path": "app/data/TIMESHEETS_2.sql",
+      "statements": 33
+    },
+    {
+      "path": "app/data/TIMESHEETS_3.sql",
+      "statements": 33
+    },
+    {
+      "path": "app/data/TIMESHEETS_4.sql",
+      "statements": 18
+    },
+    {
+      "path": "app/data/LEGACY_NOTES.sql",
+      "statements": 6
+    },
+    {
+      "path": "app/data/AuditLog.sql",
+      "statements": 7
+    }
+  ],
+  "findings": [
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_COUNTRY_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "COUNTRY_CODE"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 4,
+      "key": [
+        "XX"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_NAME_UK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "NAME"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 6,
+      "key": [
+        "Myynti & markkinointi 1"
+      ],
+      "first": {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 5
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 8,
+      "key": [
+        "30"
+      ],
+      "first": {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 7
+      }
+    },
+    {
+      "kind": "not_null",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 10
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_MANAGER_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 12,
+      "key": [
+        "-5"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 5,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 8,
+      "key": [
+        "-2"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_PK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 11,
+      "key": [
+        "1005"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 10
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 14,
+      "key": [
+        "user7@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 13
+      }
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 17
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 19
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 20,
+      "key": [
+        "1011"
+      ]
+    },
+    {
+      "kind": "unknown_column",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL_ADDR"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 23
+    },
+    {
+      "kind": "value_count_mismatch",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 26
+    },
+    {
+      "kind": "unknown_table",
+      "table": "APP.EMPLOYEES_ARCHIVE",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 29
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 32,
+      "key": [
+        "1019"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 5,
+      "key": [
+        "Lakkautettu 1"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_PK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 7,
+      "key": [
+        "P00002"
+      ],
+      "first": {
+        "file": "app/data/PROJECTS.sql",
+        "line": 6
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_EXTREF_UK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "EXTERNAL_REF"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 9,
+      "key": [
+        "EXT-3"
+      ],
+      "first": {
+        "file": "app/data/PROJECTS.sql",
+        "line": 8
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_ROLE_UK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "ROLE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 13,
+      "key": [
+        "1004",
+        null
+      ],
+      "first": {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 12
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_PK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 22,
+      "key": [
+        "1008",
+        "P00003"
+      ],
+      "first": {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 20
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 31,
+      "key": [
+        "-3"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS_2.sql",
+      "line": 10,
+      "key": [
+        "NOPE4"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.TIMESHEETS_ASSIGNMENT_FK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/TIMESHEETS.sql",
+      "line": 31,
+      "key": [
+        "1005",
+        "P00003"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "HOURS"
+      ],
+      "file": "app/data/TIMESHEETS_2.sql",
+      "line": 27
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.TIMESHEETS_PK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "TS_ID"
+      ],
+      "file": "app/data/TIMESHEETS_3.sql",
+      "line": 25,
+      "key": [
+        "80"
+      ],
+      "first": {
+        "file": "app/data/TIMESHEETS_3.sql",
+        "line": 24
+      }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.AUDITLOG_EMP_FK",
+      "table": "APP.\"AuditLog\"",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/AuditLog.sql",
+      "line": 5,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "uncommitted",
+      "table": "APP.DEPARTMENTS",
+      "columns": [],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 3,
+      "count": 10
+    },
+    {
+      "kind": "uncommitted",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 3,
+      "count": 30
+    },
+    {
+      "kind": "uncommitted",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/data/EMPLOYEES_2.sql",
+      "line": 3,
+      "count": 1
+    }
+  ]
+}
