@@ -2,7 +2,7 @@
 //! resolve once every row is in. Keys are compared by a 128-bit hash of their canonical values.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use xxhash_rust::xxh3::Xxh3;
@@ -89,13 +89,14 @@ impl Hasher for Fx {
     }
 }
 
-/// Where a key was first seen, and whether its value rests on an assumption. Kept to 16 bytes, as the key maps
-/// hold one per key.
+/// Where a key was first seen, whether its value rests on an assumption, and whether a child row's foreign key found
+/// it. Kept to 16 bytes, as the key maps hold one per key.
 #[derive(Debug, Clone, Copy)]
 struct First {
     line: u64,
     file: u32,
     assumed: bool,
+    referenced: bool,
 }
 
 impl First {
@@ -104,8 +105,20 @@ impl First {
             line: at.line,
             file: u32::try_from(at.file).unwrap_or(u32::MAX),
             assumed,
+            referenced: false,
         }
     }
+}
+
+/// What a check found out about the rows `fix` may cut, beside its findings.
+#[derive(Debug, Default)]
+pub(super) struct Holders {
+    /// Rows with a finding, or a duplicated key's first row, that hold a key some child row found, by file and
+    /// line: cutting one can leave a child without its parent.
+    pub rows: BTreeSet<(String, u64)>,
+    /// Tables with a key value the check couldn't know or assumed: cutting a row there can uncover a missing parent
+    /// that no child found.
+    pub uncertain: BTreeSet<String>,
 }
 
 /// A foreign key value with no parent row yet.
@@ -501,10 +514,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let hash = hash(parts.iter().map(|(p, _)| p));
-            let found = self
-                .keys
-                .get(&(parent_id, parent_key))
-                .is_some_and(|keys| keys.contains_key(&hash));
+            let found = self.find_parent((parent_id, parent_key), hash);
             if !found {
                 self.pending.push(Pending {
                     table: id,
@@ -522,14 +532,27 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolves what waited for the end of the input, and returns the findings and warnings.
-    pub(super) fn finish(mut self) -> (Vec<Finding>, Vec<Warning>) {
+    /// Whether the parent key map holds `hash`, marking the key as found by a child.
+    fn find_parent(&mut self, parent: (TableId, usize), hash: u128) -> bool {
+        match self
+            .keys
+            .get_mut(&parent)
+            .and_then(|keys| keys.get_mut(&hash))
+        {
+            Some(first) => {
+                first.referenced = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Resolves what waited for the end of the input, and returns the findings and warnings, and which rows with a
+    /// finding hold a key a child found.
+    pub(super) fn finish(mut self) -> (Vec<Finding>, Vec<Warning>, Holders) {
         let mut empty: HashMap<(TableId, usize), u64> = HashMap::new();
         for pending in std::mem::take(&mut self.pending) {
-            let found = self
-                .keys
-                .get(&pending.parent)
-                .is_some_and(|keys| keys.contains_key(&pending.hash));
+            let found = self.find_parent(pending.parent, pending.hash);
             if found && !pending.load_order {
                 continue;
             }
@@ -575,7 +598,48 @@ impl<'a> Checker<'a> {
             self.findings.push(finding);
         }
         let warnings = self.warnings();
-        (self.findings, warnings)
+        let holders = self.holders();
+        (self.findings, warnings, holders)
+    }
+
+    /// The rows with a finding, and duplicated keys' first rows, that hold a key a child found; one pass over the
+    /// key maps, bounded by the findings.
+    fn holders(&self) -> Holders {
+        let index_of = |name: &str| self.files.iter().position(|f| f == name);
+        let mut candidates: HashSet<(usize, u64)> = HashSet::new();
+        for finding in &self.findings {
+            if let (Some(file), Some(line)) =
+                (finding.file.as_deref().and_then(index_of), finding.line)
+            {
+                candidates.insert((file, line));
+            }
+            if let Some(first) = &finding.first
+                && let Some(file) = index_of(&first.file)
+            {
+                candidates.insert((file, first.line));
+            }
+        }
+        let mut rows = BTreeSet::new();
+        if !candidates.is_empty() {
+            for first in self.keys.values().flat_map(FxMap::values) {
+                let at = (
+                    usize::try_from(first.file).unwrap_or(usize::MAX),
+                    first.line,
+                );
+                if first.referenced && candidates.contains(&at) {
+                    rows.insert((self.file(at.0), at.1));
+                }
+            }
+        }
+        let uncertain = self
+            .doubt
+            .iter()
+            .filter(|(_, doubt)| doubt.unknown || doubt.assumed)
+            .filter_map(|((table, _), _)| {
+                Some(self.catalog.display(&self.catalog.table(*table)?.name))
+            })
+            .collect();
+        Holders { rows, uncertain }
     }
 
     fn foreign_key(
@@ -673,4 +737,12 @@ fn hash<'p>(parts: impl IntoIterator<Item = &'p Canonical<'p>>) -> u128 {
         }
     }
     hasher.digest128()
+}
+
+#[cfg(test)]
+mod size {
+    #[test]
+    fn a_key_maps_entry_stays_16_bytes() {
+        assert_eq!(std::mem::size_of::<super::First>(), 16);
+    }
 }

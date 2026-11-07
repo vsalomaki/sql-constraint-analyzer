@@ -113,6 +113,12 @@ pub struct Report {
     pub schema: SchemaCounts,
     /// The parent keys enabled foreign keys point at, by table and columns as findings name them.
     pub referenced: BTreeSet<(String, Vec<String>)>,
+    /// Rows with a finding, or a duplicated key's first row, that hold a key some child row found, by file and line:
+    /// cutting one can leave a child without its parent.
+    pub referenced_rows: BTreeSet<(String, u64)>,
+    /// Tables with a key value the check couldn't know or assumed: cutting a row there can uncover a missing parent
+    /// that no child found.
+    pub uncertain_tables: BTreeSet<String>,
 }
 
 /// What the schema pass found, for the run's summary.
@@ -408,7 +414,9 @@ pub fn run_without(
         }
     }
     observer.resolve();
-    let (mut findings, warnings) = checker.finish();
+    let (mut findings, warnings, holders) = checker.finish();
+    report.referenced_rows = holders.rows;
+    report.uncertain_tables = holders.uncertain;
     findings.extend(uncommitted);
     sort_by_place(&mut findings, &names);
     report.findings = findings;
