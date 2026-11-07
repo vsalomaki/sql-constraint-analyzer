@@ -179,7 +179,8 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 `oracle_agrees_with_the_manifest_and_the_fix` against Oracle Free in Docker: image pinned by digest, no published
 port, a throwaway password. It loads generated exports and requires Oracle's rejections to match the manifest, by
 file and line where SQL\*Plus allows: its findings' rows, and its cascade rows, which have no finding but whose parent
-Oracle rejected; a missing `COMMIT` (one export plants it with `omit_commit`) is no rejection,
+Oracle rejected; but not a duplicate whose key's earlier rows Oracle all rejected for another reason, since a
+rejected row never holds its key. A missing `COMMIT` (one export plants it with `omit_commit`) is no rejection,
 since the load commits at its end. Then it fixes the same exports (default policy, with `--annotate`, and
 `--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires that under keep-first it removes and sets to NULL exactly the rows the
 manifest lists, that each output with its removed rows put back and any `COMMIT` it added taken out to be its input byte for byte, loads it into fresh schemas, and requires that Oracle

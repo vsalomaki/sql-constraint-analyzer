@@ -1822,6 +1822,7 @@ mod generated {
                         // A plant at every row: the extras' keys must stay clear of the cascade rows'.
                         violations_ppm: 1_000_000,
                         cascades: true,
+                        manager_chain: 3,
                         ..synth::Options::default()
                     };
                     let manifest = synth::generate(&options, &root).unwrap();
@@ -1830,6 +1831,51 @@ mod generated {
                 }
             }
         }
+    }
+
+    /// A manager chain loses a row per round: in an odd tree the department goes first, then its employee, then each
+    /// employee of the chain. Without a chain the deepest row is the timesheet, four rounds down. The duplicates go in
+    /// a round after, since they wait while anything else goes.
+    #[test]
+    fn a_manager_chain_goes_one_round_per_employee() {
+        for chain in [0, 1, 5, synth::MAX_MANAGER_CHAIN] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("export");
+            let options = synth::Options {
+                rows: 20,
+                cascades: true,
+                manager_chain: chain,
+                ..synth::Options::default()
+            };
+            synth::generate(&options, &root).unwrap();
+            let (_dir, report) = run_with(
+                &inputs(&root),
+                &Options::default(),
+                Policy::default(),
+                false,
+            );
+            let deepest = usize::try_from(chain).unwrap() + 2;
+            assert_eq!(report.rounds, deepest.max(4) + 1, "chain {chain}");
+            // Nothing past the round limit: only the COMMIT the departments' deferred key keeps out is left.
+            assert!(
+                report
+                    .left
+                    .iter()
+                    .all(|l| l.finding.kind == FindingKind::Uncommitted),
+                "chain {chain}: {:?}",
+                report.left
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let options = synth::Options {
+            cascades: true,
+            manager_chain: synth::MAX_MANAGER_CHAIN + 1,
+            ..synth::Options::default()
+        };
+        assert!(matches!(
+            synth::generate(&options, &dir.path().join("export")),
+            Err(synth::Error::ChainTooLong(21))
+        ));
     }
 }
 

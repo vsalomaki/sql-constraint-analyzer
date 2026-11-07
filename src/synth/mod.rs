@@ -5,9 +5,11 @@
 //! bad one. The database rejects a bad row and then its children, while the analyzer judges each row on its own, so
 //! the two agree on the findings by construction.
 //!
-//! With `cascades`, trees of rows hang from bad rows: a row with NULL in a NOT NULL column, its children, and theirs.
-//! The analyzer finds nothing in the children, since their parent is in the export, but the database rejects them
-//! and `fix` removes them with their root. The manifest lists them, and the rows `fix` removes or sets to NULL under
+//! With `cascades`, trees of rows hang from bad rows: a row with NULL in a NOT NULL column, its children, and theirs,
+//! down a manager chain of `manager_chain` employees. The analyzer finds nothing in the children, since their parent
+//! is in the export, but the database rejects them and `fix` removes them with their root, a level per round. Bad
+//! rows also get duplicates: the database rejects the bad row and accepts the next row of its key, which `fix` keeps
+//! once the bad row is gone. The manifest lists the cascade rows, and the rows `fix` removes or sets to NULL under
 //! `--on-duplicate keep-first`.
 
 mod data;
@@ -188,6 +190,17 @@ pub struct Options {
     /// Hang rows from bad rows: children the database rejects with their parent, and `fix` removes with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cascades: bool,
+    /// With `cascades`, the employees each tree's employee manages in a chain, each the manager of the next.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub manager_chain: u64,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Default for Options {
@@ -208,11 +221,16 @@ impl Default for Options {
             omit_commit: Vec::new(),
             rows_per_file: None,
             cascades: false,
+            manager_chain: 0,
         }
     }
 }
 
 pub const MIN_ROWS: u64 = 10;
+
+/// The longest manager chain: `fix` removes one of its rows per round, and stops after `--max-rounds`, 30 unless
+/// given.
+pub const MAX_MANAGER_CHAIN: u64 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -273,6 +291,8 @@ pub enum Error {
     SplitSingleFile,
     #[error("--cascades needs every table's data, so not --omit-data")]
     CascadesWithoutData,
+    #[error("--manager-chain must be at most {MAX_MANAGER_CHAIN}, got {0}")]
+    ChainTooLong(u64),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -295,6 +315,9 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     // A cascade row whose parent table is left out would have no finding the fix acts on, and stay.
     if options.cascades && !options.omit_data.is_empty() {
         return Err(Error::CascadesWithoutData);
+    }
+    if options.manager_chain > MAX_MANAGER_CHAIN {
+        return Err(Error::ChainTooLong(options.manager_chain));
     }
     let render = options.dialect.render(options.noise);
     let switches = render.unsupported_noise();

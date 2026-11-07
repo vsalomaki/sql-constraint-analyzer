@@ -24,19 +24,22 @@ OUT=
 trap 'rm -rf "$TMP" "$OUT"' EXIT
 
 # The export for `rows`, `layout` and `cascades` (true or false), generated unless gen-out already holds one with
-# those options and a manifest that lists what the fix removes.
+# those options and a manifest that lists what the fix removes. A cascade run has a manager chain of CHAIN.
+CHAIN=3
 export_for() {
-    local dir=$1 rows=$2 layout=$3 cascades=$4
+    local dir=$1 rows=$2 layout=$3 cascades=$4 chain=0
+    [[ $cascades == true ]] && chain=$CHAIN
     if [[ -f $dir/expected.json ]] && jq -e --argjson rows "$rows" --arg layout "$layout" \
-        --argjson cascades "$cascades" \
+        --argjson cascades "$cascades" --argjson chain "$chain" \
         '.options.rows == $rows and .options.layout == $layout and .options["omit-commit"] == []
-            and (.options.cascades // false) == $cascades and has("fixes")' \
+            and (.options.cascades // false) == $cascades and (.options["manager-chain"] // 0) == $chain
+            and has("fixes")' \
         "$dir/expected.json" > /dev/null; then
         return
     fi
     rm -rf "$dir"
     local flags=()
-    [[ $cascades == true ]] && flags+=(--cascades)
+    [[ $cascades == true ]] && flags+=(--cascades --manager-chain "$CHAIN")
     "$BIN/sqlca-gen" --out "$dir" --rows "$rows" --layout "$layout" "${flags[@]}" >&2
 }
 

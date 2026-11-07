@@ -305,7 +305,8 @@ fn check_load_order(oracle: &Oracle, options: &Options, run: &str, exact: bool) 
     let (_dir, export, manifest) = generate(options);
     let spool = oracle.load(&export, options.encoding, run);
     let observed = observed_load_order(&spool, &line_index(&export, &manifest), run, exact);
-    let expected = expected_load_order(&manifest.findings, &manifest.cascades, exact);
+    let files = load_order(&manifest);
+    let expected = expected_load_order(&manifest.findings, &manifest.cascades, &files, exact);
     assert_rejections(
         &observed,
         &expected,
@@ -377,14 +378,81 @@ fn observed_load_order(
     }))
 }
 
-/// The findings' rows, and the cascade rows, rejected for their foreign key once their parent is.
+fn load_order(manifest: &Manifest) -> Vec<String> {
+    manifest.files.iter().map(|f| f.path.clone()).collect()
+}
+
+fn location(finding: &Finding) -> Option<Location> {
+    Some(Location {
+        file: finding.file.clone()?,
+        line: finding.line?,
+    })
+}
+
+/// The rows of each duplicated key, its first row among them, by constraint and key value.
+fn holders(findings: &[Finding]) -> BTreeMap<(String, Vec<Option<String>>), BTreeSet<Location>> {
+    let mut keys: BTreeMap<_, BTreeSet<Location>> = BTreeMap::new();
+    for finding in findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DuplicateKey)
+    {
+        let (Some(constraint), Some(row), Some(first)) = (
+            finding.constraint.clone(),
+            location(finding),
+            finding.first.clone(),
+        ) else {
+            continue;
+        };
+        keys.entry((constraint, finding.key.clone()))
+            .or_default()
+            .extend([first, row]);
+    }
+    keys
+}
+
+/// The duplicates Oracle accepts, by constraint and row: a row it rejects at its insert for another reason, or as a
+/// cascade row, never holds its key, so the key's first row in load order that Oracle accepts holds it instead.
+fn accepted_duplicates(
+    findings: &[Finding],
+    cascades: &[Cascade],
+    files: &[String],
+) -> BTreeSet<(String, Location)> {
+    let rejected: BTreeSet<Location> = findings
+        .iter()
+        .filter(|f| f.kind != FindingKind::DuplicateKey && expected_row(f).is_some())
+        .filter_map(location)
+        .chain(cascades.iter().map(|c| Location {
+            file: c.file.clone(),
+            line: c.line,
+        }))
+        .collect();
+    let load_order = |row: &Location| (files.iter().position(|f| *f == row.file), row.line);
+    holders(findings)
+        .into_iter()
+        .filter_map(|((constraint, _), rows)| {
+            let mut rows: Vec<Location> = rows.into_iter().collect();
+            rows.sort_by_key(load_order);
+            let holder = rows.into_iter().find(|row| !rejected.contains(row))?;
+            Some((constraint, holder))
+        })
+        .collect()
+}
+
+/// The findings' rows, and the cascade rows, rejected for their foreign key once their parent is; but not a duplicate
+/// Oracle accepts. `files` are in load order.
 fn expected_load_order(
     findings: &[Finding],
     cascades: &[Cascade],
+    files: &[String],
     exact: bool,
 ) -> BTreeMap<Signature, usize> {
+    let accepted = accepted_duplicates(findings, cascades, files);
     let mut rows: Vec<Signature> = findings
         .iter()
+        .filter(|f| {
+            let holds = f.constraint.clone().zip(location(f));
+            f.kind != FindingKind::DuplicateKey || holds.is_none_or(|key| !accepted.contains(&key))
+        })
         .filter_map(|f| {
             let (what, detail) = expected_row(f)?;
             let location = (
@@ -481,37 +549,23 @@ fn observed_after_data(
     .sorted()
 }
 
-/// A cascade row loads, since no foreign key is in place yet; its key fails once added when its parent is a row
-/// rejected at insert, one with NULL in a NOT NULL column.
+/// Oracle rejects at insert a row with NULL in a NOT NULL column or a structure error; every other row loads, since
+/// no key is in place yet. A key then fails when two of a key value's rows loaded, and a foreign key when a row's
+/// parent is missing, a cascade row's included when its parent was rejected at insert.
 fn expected_after_data(findings: &[Finding], cascades: &[Cascade]) -> AfterData {
     let mut rows = Vec::new();
+    let mut rejected = BTreeSet::new();
     let mut want = AfterData::default();
-    let rejected: BTreeSet<Location> = findings
-        .iter()
-        .filter(|f| f.kind == FindingKind::NotNull)
-        .filter_map(|f| {
-            Some(Location {
-                file: f.file.clone()?,
-                line: f.line?,
-            })
-        })
-        .collect();
-    want.fks.extend(
-        cascades
-            .iter()
-            .filter(|c| rejected.contains(&c.parent))
-            .map(|c| c.constraint.clone()),
-    );
     for finding in findings {
         match (finding.kind, &finding.constraint) {
-            (FindingKind::DuplicateKey | FindingKind::NotNull, Some(c)) => {
-                want.keys.push(c.clone());
-            }
+            (FindingKind::NotNull, Some(c)) => want.keys.push(c.clone()),
+            (FindingKind::DuplicateKey, Some(_)) => {}
             (FindingKind::FkMissingParent, Some(c)) => want.fks.push(c.clone()),
             _ => {
                 let Some((what, detail)) = expected_row(finding) else {
                     continue;
                 };
+                rejected.extend(location(finding));
                 let location = Some((
                     finding.file.clone().unwrap_or_default(),
                     finding.line.unwrap_or_default(),
@@ -524,6 +578,17 @@ fn expected_after_data(findings: &[Finding], cascades: &[Cascade]) -> AfterData 
             }
         }
     }
+    for ((constraint, _), rows) in holders(findings) {
+        if rows.iter().filter(|row| !rejected.contains(row)).count() > 1 {
+            want.keys.push(constraint);
+        }
+    }
+    want.fks.extend(
+        cascades
+            .iter()
+            .filter(|c| rejected.contains(&c.parent))
+            .map(|c| c.constraint.clone()),
+    );
     for fk in REF_TABLES
         .iter()
         .chain(APP_TABLES.iter())
@@ -845,19 +910,23 @@ fn check_fixed(
         observed.rows.values().sum::<usize>()
     } else {
         let observed = observed_load_order(&spool, &index, run, exact);
-        let load_order: Vec<Finding> = left
+        let files = load_order(&manifest);
+        let before_parents: Vec<Finding> = left
             .iter()
             .filter(|f| f.kind == FindingKind::FkLoadOrder)
             .cloned()
             .collect();
-        let acted = acted_on(&observed, &expected_load_order(&load_order, &[], exact));
+        let acted = acted_on(
+            &observed,
+            &expected_load_order(&before_parents, &[], &files, exact),
+        );
         assert!(
             acted.is_empty(),
             "{run}: Oracle rejects fixed rows {acted:?}"
         );
         assert_rejections(
             &observed,
-            &expected_load_order(&left, &[], exact),
+            &expected_load_order(&left, &[], &files, exact),
             &format!(
                 "{run}: Oracle's rejections (left) differ from the fix's check of its output (right)"
             ),
@@ -900,6 +969,7 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         // Parts end inside the employees, before every manager the departments' deferred key points at is written.
         rows_per_file: Some(40),
         cascades: true,
+        manager_chain: 3,
         ..base.clone()
     };
     let wrapped = Options {
@@ -914,6 +984,7 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         layout: Layout::Type,
         rows_per_file: Some(150),
         cascades: true,
+        manager_chain: 3,
         ..base.clone()
     };
     // The departments come before their managers with other tables between, and children before their parents: no
@@ -923,6 +994,7 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         layout: Layout::Single,
         shuffle_order: true,
         cascades: true,
+        manager_chain: 3,
         ..base.clone()
     };
     // With `exact` off, only kinds and counts are compared.
@@ -993,4 +1065,69 @@ fn spool_errors_catch_sql_plus_errors_and_skip_details() {
         Some(("duplicate", "APP.T_PK".to_owned()))
     );
     assert_eq!(row_signature(&found[1]), None, "an SP2 error fails the run");
+}
+
+/// A finding on `line` of `f.sql`, a duplicate of `first` when there is one.
+fn found(kind: FindingKind, constraint: Option<&str>, line: u64, first: Option<u64>) -> Finding {
+    Finding {
+        kind,
+        constraint: constraint.map(str::to_owned),
+        table: "APP.T".to_owned(),
+        columns: vec!["A".to_owned()],
+        file: Some("f.sql".to_owned()),
+        line: Some(line),
+        key: vec![Some("1".to_owned())],
+        first: first.map(|line| Location {
+            file: "f.sql".to_owned(),
+            line,
+        }),
+        count: None,
+        assumed: false,
+    }
+}
+
+/// A key's rows on lines 1 to 3, line 1 rejected for NULL in another column: Oracle takes line 2 for the key and
+/// rejects line 3 as its duplicate. After the data, line 1 is rejected at insert, and the key fails on 2 and 3; with
+/// line 3 gone too, it holds.
+#[test]
+fn a_duplicate_of_a_row_rejected_at_insert_holds_its_key() {
+    let null = found(FindingKind::NotNull, None, 1, None);
+    let second = found(FindingKind::DuplicateKey, Some("APP.T_UK"), 2, Some(1));
+    let third = found(FindingKind::DuplicateKey, Some("APP.T_UK"), 3, Some(1));
+    let files = ["f.sql".to_owned()];
+    let signature = |line, what: &'static str, detail: &str| Signature {
+        location: Some(("f.sql".to_owned(), line)),
+        what,
+        detail: detail.to_owned(),
+    };
+    let findings = [null.clone(), second.clone(), third.clone()];
+    assert_eq!(
+        expected_load_order(&findings, &[], &files, true),
+        counts([
+            signature(1, "not null", "APP.T.A"),
+            signature(3, "duplicate", "APP.T_UK"),
+        ])
+    );
+    let cascade = Cascade {
+        file: "f.sql".to_owned(),
+        line: 1,
+        constraint: "APP.T_FK".to_owned(),
+        parent: Location {
+            file: "f.sql".to_owned(),
+            line: 9,
+        },
+    };
+    assert_eq!(
+        expected_load_order(std::slice::from_ref(&second), &[cascade], &files, true),
+        counts([signature(1, "fk", "APP.T_FK")]),
+        "a cascade row never holds its key either"
+    );
+    assert_eq!(
+        expected_load_order(std::slice::from_ref(&second), &[], &files, true),
+        counts([signature(2, "duplicate", "APP.T_UK")]),
+        "a first row Oracle accepts holds its key"
+    );
+    assert_eq!(expected_after_data(&findings, &[]).keys, ["APP.T_UK"]);
+    let after = expected_after_data(&[null, second], &[]);
+    assert!(after.keys.is_empty(), "{after:?}");
 }
