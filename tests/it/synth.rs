@@ -259,6 +259,62 @@ fn omitted_data_becomes_one_summary_finding_per_foreign_key() {
         || f.kind == FindingKind::ParentTableEmpty));
 }
 
+#[test]
+fn data_files_go_on_in_numbered_parts_each_ending_with_its_commit() {
+    for layout in [Layout::Separate, Layout::Type] {
+        let (dir, manifest) = generate(&Options {
+            layout,
+            rows_per_file: Some(10),
+            omit_commit: vec!["APP.EMPLOYEES".into()],
+            ..small()
+        });
+        let parts: Vec<&str> = manifest
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .filter(|p| p.contains("data") && p.contains('_'))
+            .collect();
+        assert!(!parts.is_empty(), "{layout:?}: {:?}", manifest.files);
+        for file in &manifest.files {
+            let text = fs::read_to_string(root(&dir).join(&file.path)).unwrap();
+            let rows = text.lines().filter(|l| inserted_table(l).is_some()).count();
+            assert!(rows <= 10, "{layout:?} {}: {rows} rows", file.path);
+            // A part without its commit has rows the manifest says nothing commits after.
+            let uncommitted = manifest.findings.iter().any(|f| {
+                f.kind == FindingKind::Uncommitted && f.file.as_deref() == Some(file.path.as_str())
+            });
+            if rows > 0 && !file.path.starts_with("ref/") {
+                assert!(
+                    text.contains("COMMIT;") || uncommitted,
+                    "{layout:?} {}",
+                    file.path
+                );
+            }
+        }
+        // In its own files, each part of the uncommitted table has rows nothing commits after; in a shared file, the
+        // next table's commit takes those of the last part.
+        let uncommitted: Vec<&Finding> = manifest
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::Uncommitted && f.table == "APP.EMPLOYEES")
+            .collect();
+        let parts = if layout == Layout::Separate { 2 } else { 1 };
+        assert_eq!(uncommitted.len(), parts, "{layout:?}: {uncommitted:?}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        synth::generate(
+            &Options {
+                layout: Layout::Single,
+                rows_per_file: Some(25),
+                ..small()
+            },
+            &dir.path().join("export")
+        ),
+        Err(synth::Error::SplitSingleFile)
+    ));
+}
+
 /// The table an `INSERT INTO` line names, unquoted and upper-cased.
 fn inserted_table(line: &str) -> Option<String> {
     let upper = line.to_uppercase();
@@ -307,6 +363,44 @@ fn no_commit_comes_between_a_deferred_child_and_its_parent() {
         }
     }
     assert!(between > 0, "some seed loads the departments first");
+}
+
+#[test]
+fn no_part_boundary_commits_before_the_parents_of_a_deferred_child() {
+    for layout in [Layout::Separate, Layout::Type] {
+        for rows_per_file in [1, 3] {
+            let (dir, manifest) = generate(&Options {
+                layout,
+                rows_per_file: Some(rows_per_file),
+                deferred_violations: false,
+                ..small()
+            });
+            let lines: Vec<String> = manifest
+                .files
+                .iter()
+                .filter(|f| f.path.starts_with("app/"))
+                .flat_map(|f| {
+                    let text = fs::read_to_string(root(&dir).join(&f.path)).unwrap();
+                    text.lines().map(str::to_owned).collect::<Vec<_>>()
+                })
+                .collect();
+            let table = |l: &String| inserted_table(l);
+            let department = lines
+                .iter()
+                .position(|l| table(l).as_deref() == Some("APP.DEPARTMENTS"))
+                .unwrap();
+            let last_employee = lines
+                .iter()
+                .rposition(|l| table(l).as_deref() == Some("APP.EMPLOYEES"))
+                .unwrap();
+            assert!(
+                !lines[department..last_employee]
+                    .iter()
+                    .any(|l| l.trim().eq_ignore_ascii_case("COMMIT;")),
+                "{layout:?}, {rows_per_file} rows per file: a COMMIT before the parents of the departments"
+            );
+        }
+    }
 }
 
 #[test]

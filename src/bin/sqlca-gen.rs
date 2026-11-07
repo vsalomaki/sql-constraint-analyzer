@@ -51,6 +51,11 @@ struct Cli {
     /// nothing commits after are a finding; the reference schema's files are reference files, which need none.
     #[arg(long)]
     omit_commit: Vec<String>,
+
+    /// Rows per data file: once a data file has N rows, its rows go on in `<name>_2.sql`, `<name>_3.sql`, …, each
+    /// part ending with the COMMIT a table's rows end with. Not with `--layout single`.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    rows_per_file: Option<u64>,
 }
 
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -97,6 +102,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         encoding: cli.encoding,
         omit_data: cli.omit_data,
         omit_commit: cli.omit_commit,
+        rows_per_file: cli.rows_per_file,
     };
     let manifest = synth::generate(&options, &cli.out)
         .with_context(|| format!("writing {}", cli.out.display()))?;

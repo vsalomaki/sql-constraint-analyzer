@@ -177,6 +177,9 @@ pub struct Options {
     /// Tables whose rows get no commit after them.
     #[serde(default)]
     pub omit_commit: Vec<String>,
+    /// The most rows a data file holds before the rows go on in `<name>_2.sql`, `<name>_3.sql`, …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_per_file: Option<u64>,
 }
 
 impl Default for Options {
@@ -195,6 +198,7 @@ impl Default for Options {
             encoding: Encoding::default(),
             omit_data: Vec::new(),
             omit_commit: Vec::new(),
+            rows_per_file: None,
         }
     }
 }
@@ -223,6 +227,8 @@ pub enum Error {
         dialect: DialectId,
         switches: Vec<&'static str>,
     },
+    #[error("--rows-per-file needs a layout with separate data files, not one file per schema")]
+    SplitSingleFile,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -237,6 +243,10 @@ pub const ORDER_FILE: &str = "order.txt";
 pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     if options.rows < MIN_ROWS {
         return Err(Error::TooFewRows(options.rows));
+    }
+    // A schema's one file holds the DDL after its data too, which would then run before the later parts.
+    if options.layout == Layout::Single && options.rows_per_file.is_some() {
+        return Err(Error::SplitSingleFile);
     }
     let render = options.dialect.render(options.noise);
     let switches = render.unsupported_noise();
