@@ -1833,6 +1833,35 @@ mod generated {
         }
     }
 
+    /// Keep-last removes the first project of the name the key between rows judges, the only row its finding names;
+    /// the second, which the key never checked, is then the third's first and goes in a later round. (Not the next:
+    /// the other keys' first rows go too, and duplicates wait while their children go.)
+    #[test]
+    fn keep_last_takes_the_project_the_key_between_rows_hid() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("export");
+        let options = synth::Options {
+            rows: 20,
+            cascades: true,
+            ..synth::Options::default()
+        };
+        synth::generate(&options, &root).unwrap();
+        let (_dir, report) = run_with(&inputs(&root), &Options::default(), keep_last(), false);
+        let mut twins: Vec<(u64, usize)> = report
+            .removed
+            .iter()
+            .filter(|r| String::from_utf8_lossy(&r.text).contains("'Twin project'"))
+            .map(|r| (r.line, r.round))
+            .collect();
+        twins.sort_unstable();
+        let [(first, round), (second, next)] = twins[..] else {
+            panic!("{twins:?}");
+        };
+        assert!(first < second, "{twins:?}");
+        assert!(next > round, "{twins:?}");
+        assert_eq!(count(&report.output, FindingKind::DuplicateKey), 0);
+    }
+
     /// A manager chain loses a row per round: in an odd tree the department goes first, then its employee, then each
     /// employee of the chain. Without a chain the deepest row is the timesheet, four rounds down. The duplicates go in
     /// a round after, since they wait while anything else goes.

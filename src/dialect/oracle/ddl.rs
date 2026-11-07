@@ -1793,6 +1793,20 @@ mod fixtures {
             .collect()
     }
 
+    /// The generator's constraints of `id` that `export` has: the key between rows only with cascades, and the SQLcl
+    /// export, which has no manifest, was made without them.
+    fn generated(id: TableId, export: &Path) -> Vec<&'static schema::Constraint> {
+        let cascades = std::fs::read_to_string(export.join("expected.json")).is_ok_and(|json| {
+            serde_json::from_str::<Manifest>(&json)
+                .unwrap()
+                .options
+                .cascades
+        });
+        schema::constraints_of(id)
+            .filter(|c| cascades || c.form != schema::Form::BetweenRows)
+            .collect()
+    }
+
     /// Compares the catalog with the generator's schema, table by table.
     fn assert_matches_generator(catalog: &Catalog, export: &Path) {
         let at = export.display();
@@ -1875,7 +1889,8 @@ mod fixtures {
                 .map(|c| c.name.clone().unwrap_or_default())
                 .collect();
             keys.sort();
-            let mut expected: Vec<String> = schema::constraints_of(id)
+            let mut expected: Vec<String> = generated(id, export)
+                .iter()
                 .map(|c| c.name.to_owned())
                 .collect();
             if id == EMPLOYEES_EMAIL_UIX.table {
@@ -1884,7 +1899,7 @@ mod fixtures {
             expected.sort();
             assert_eq!(keys, expected, "{at}: {} keys", id.name());
 
-            assert_constraints(catalog, t, id, &at.to_string());
+            assert_constraints(catalog, t, &generated(id, export), &at.to_string());
         }
         assert_email_index(catalog, &at.to_string());
     }
@@ -1905,8 +1920,13 @@ mod fixtures {
         };
         assert_eq!(names(t, columns), EMPLOYEES_EMAIL_UIX.columns, "{at}");
     }
-    fn assert_constraints(catalog: &Catalog, t: &Table, id: TableId, at: &str) {
-        for generated in schema::constraints_of(id) {
+    fn assert_constraints(
+        catalog: &Catalog,
+        t: &Table,
+        constraints: &[&'static schema::Constraint],
+        at: &str,
+    ) {
+        for &generated in constraints {
             let c = t
                 .constraints
                 .iter()

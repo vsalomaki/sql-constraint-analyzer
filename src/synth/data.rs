@@ -327,6 +327,9 @@ struct Writer<'o> {
     next_tree: u64,
     cascade_rows: CascadeRows,
     fixes: Fixes,
+    /// The key enabled between the projects' rows still has to be written: its implicit commit would have rolled
+    /// back rows a deferred foreign key still waits on.
+    key_pending: bool,
 }
 
 impl<'o> Writer<'o> {
@@ -362,6 +365,7 @@ impl<'o> Writer<'o> {
             next_tree: 0,
             cascade_rows: BTreeMap::new(),
             fixes: Fixes::default(),
+            key_pending: false,
         }
     }
 
@@ -369,6 +373,7 @@ impl<'o> Writer<'o> {
         DdlStyle {
             eol: self.eol,
             keys_in_table: self.options.constraints == Placement::BeforeData,
+            key_between_rows: self.options.cascades,
         }
     }
 
@@ -453,6 +458,10 @@ impl<'o> Writer<'o> {
 
     fn end_table(&mut self) -> io::Result<()> {
         if !self.omitted.contains(&self.table) {
+            if self.key_pending && !self.commit_rolls_back(true) {
+                self.key_pending = false;
+                self.key_between_rows()?;
+            }
             self.end_part(true)?;
         }
         self.loaded.push(self.table);
@@ -514,6 +523,16 @@ impl<'o> Writer<'o> {
     fn deferred(&self, fk: &Constraint) -> bool {
         self.rules.deferrable_foreign_keys
             && matches!(fk.kind, Kind::Foreign { deferred: true, .. })
+    }
+
+    /// Enables the projects' key between rows, in the current data file. DDL commits the rows before it.
+    fn key_between_rows(&mut self) -> io::Result<()> {
+        self.close_group()?;
+        let item = DdlItem::KeyBetweenRows(schema::PROJECTS_NAME_UK.table);
+        let sql = self.render.ddl(item, &self.style());
+        self.write_data(&format!("{}{}", sql.text, self.eol), sql.statements)?;
+        self.open.remove(&self.data_path);
+        Ok(())
     }
 
     fn write_data(&mut self, text: &str, statements: u64) -> io::Result<Location> {
@@ -1553,8 +1572,47 @@ fn projects(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
             };
             w.extra(&row, &[(&schema::PROJECTS_DEPT_FK, Target::Missing)], found)?;
         }
+        if p == s.projects / 2 && w.options.cascades {
+            named_before_the_key(w)?;
+        }
     }
     Ok(())
+}
+
+/// Two projects with one name, then the key on the name enabled without checking the rows already there, then a third
+/// project with that name: only the third is a duplicate, of the first. Once `--on-duplicate keep-last` removes the
+/// first, the second is the third's first. After the data, or where the key has to wait for a deferred foreign key's
+/// parents, the key judges none of them.
+fn named_before_the_key(w: &mut Writer<'_>) -> io::Result<()> {
+    let row = |k: u64| {
+        Row::new(vec![
+            ("PROJECT_CODE", Value::text(format!("X{k:05}"))),
+            ("NAME", Value::text("Twin project")),
+            ("DEPT_NAME", Value::Null),
+            ("EXTERNAL_REF", Value::Null),
+        ])
+    };
+    let k = w.next_extra();
+    let first = w.extra(&row(k), &[], Vec::new())?;
+    let k = w.next_extra();
+    w.extra(&row(k), &[], Vec::new())?;
+    let judged = !w.after_data() && !w.commit_rolls_back(false);
+    if judged {
+        w.key_between_rows()?;
+    } else if !w.after_data() {
+        w.key_pending = true;
+    }
+    let plants = if judged {
+        vec![Plant::duplicate(
+            schema::PROJECTS_NAME_UK.qualified(w.rules),
+            &["NAME"],
+            first.as_ref(),
+        )]
+    } else {
+        Vec::new()
+    };
+    let k = w.next_extra();
+    w.extra(&row(k), &[], plants).map(drop)
 }
 
 #[derive(Clone, Copy, PartialEq)]

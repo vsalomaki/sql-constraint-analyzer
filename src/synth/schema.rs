@@ -256,6 +256,9 @@ pub(crate) enum Form {
     OutOfLine,
     /// `ALTER TABLE … ADD CONSTRAINT`.
     Alter,
+    /// `ALTER TABLE … ADD CONSTRAINT … ENABLE NOVALIDATE` between the table's rows, over a non-unique index the table
+    /// DDL creates; written only with `cascades`.
+    BetweenRows,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -401,6 +404,16 @@ pub(crate) const PROJECTS_EXTREF_UK: Constraint = key(
     &["EXTERNAL_REF"],
     Form::OutOfLine,
 );
+pub(crate) const PROJECTS_NAME_UK: Constraint = Constraint {
+    state: State::NotValidated,
+    ..key(
+        "PROJECTS_NAME_UK",
+        TableId::Projects,
+        Kind::Unique,
+        &["NAME"],
+        Form::BetweenRows,
+    )
+};
 pub(crate) const PROJECTS_DEPT_FK: Constraint = Constraint {
     kind: Kind::Foreign {
         parent: TableId::Departments,
@@ -498,7 +511,7 @@ pub(crate) const AUDITLOG_EMP_FK: Constraint = fk(
     TableId::Employees,
 );
 
-pub(crate) const CONSTRAINTS: [Constraint; 22] = [
+pub(crate) const CONSTRAINTS: [Constraint; 23] = [
     COUNTRIES_PK,
     DEPARTMENTS_PK,
     DEPARTMENTS_NAME_UK,
@@ -509,6 +522,7 @@ pub(crate) const CONSTRAINTS: [Constraint; 22] = [
     EMPLOYEES_MANAGER_FK,
     PROJECTS_PK,
     PROJECTS_EXTREF_UK,
+    PROJECTS_NAME_UK,
     PROJECTS_DEPT_FK,
     ASSIGNMENTS_PK,
     ASSIGNMENTS_ROLE_UK,
@@ -536,23 +550,32 @@ pub(crate) fn can_be_null(table: TableId, column: &str) -> bool {
         && !constraints_of(table).any(|c| c.kind == Kind::Primary && c.columns.contains(&column))
 }
 
+/// An index the DDL creates on its own.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct UniqueIndex {
+pub(crate) struct Index {
     pub(crate) name: &'static str,
     pub(crate) table: TableId,
     pub(crate) columns: &'static [&'static str],
 }
 
-impl UniqueIndex {
+impl Index {
     pub(crate) fn qualified(&self, rules: &Rules) -> String {
         rules.qualified(self.table.schema(), self.name)
     }
 }
 
-pub(crate) const EMPLOYEES_EMAIL_UIX: UniqueIndex = UniqueIndex {
+/// Unique.
+pub(crate) const EMPLOYEES_EMAIL_UIX: Index = Index {
     name: "EMPLOYEES_EMAIL_UIX",
     table: TableId::Employees,
     columns: &["EMAIL"],
+};
+
+/// Not unique, so that `PROJECTS_NAME_UK` can be enabled over rows that already have duplicates.
+pub(crate) const PROJECTS_NAME_IX: Index = Index {
+    name: "PROJECTS_NAME_IX",
+    table: TableId::Projects,
+    columns: &["NAME"],
 };
 
 pub(crate) const AUDIT_SEQ: &str = "AUDIT_SEQ";

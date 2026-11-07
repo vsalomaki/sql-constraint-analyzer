@@ -11,6 +11,8 @@ pub(crate) struct DdlStyle<'a> {
     pub(crate) eol: &'a str,
     /// Primary and unique keys go into the table DDL; otherwise they are added after the data.
     pub(crate) keys_in_table: bool,
+    /// The export has the key enabled between a table's rows, and the index it needs.
+    pub(crate) key_between_rows: bool,
 }
 
 /// Text a dialect wrote, and how many statements (SQL, PL/SQL blocks and script commands) are in it.
@@ -26,6 +28,8 @@ pub(crate) enum DdlItem {
     /// The keys and unique index of a table whose keys come after the data.
     LateKeys(TableId),
     ForeignKeys(TableId),
+    /// The key enabled between a table's rows, written into its data when constraints come before the data.
+    KeyBetweenRows(TableId),
     Sequence,
     Trigger,
 }
