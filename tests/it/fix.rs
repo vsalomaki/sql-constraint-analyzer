@@ -1031,14 +1031,146 @@ fn a_duplicate_of_a_removed_row_is_kept() {
     assert!(report.output.findings.is_empty());
 }
 
+/// Nothing going can change which row of the key stays: the NULL row is no key's first and no row's parent. So the
+/// duplicate goes in the same round, and the fix needs no second check.
 #[test]
-fn a_duplicate_held_back_goes_in_a_later_round_even_from_a_table_no_key_points_at() {
+fn a_duplicate_goes_with_the_other_rows_when_no_row_going_can_change_its_key() {
     let (_dir, _, report) = fix_sql(
         "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
          INSERT INTO T VALUES (1, 5);\nINSERT INTO T VALUES (1, 6);\nINSERT INTO T VALUES (2, NULL);\n",
     );
     let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
-    assert_eq!(removed, [(3, 2), (4, 1)]);
+    assert_eq!(removed, [(3, 1), (4, 1)]);
+    assert_eq!(report.rounds, 1);
+    assert!(report.output.findings.is_empty());
+}
+
+/// The parent going for its NULL takes its child, the first row of `U`, a round later; the duplicate waits for that,
+/// and is then the row of `U` to keep.
+#[test]
+fn a_duplicate_waits_while_a_row_going_can_take_its_first_row_with_it() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, U VARCHAR2(9) UNIQUE);\n\
+         INSERT INTO P VALUES (1, NULL);\nINSERT INTO P VALUES (2, 5);\n\
+         INSERT INTO C VALUES (1, 1, 'x');\nINSERT INTO C VALUES (2, 2, 'x');\n",
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(3, 1), (5, 2)]);
+    assert!(output(&report).ends_with("INSERT INTO C VALUES (2, 2, 'x');\n"));
+    assert!(report.output.findings.is_empty());
+}
+
+/// Under keep-last, both rows of parent 1 go for their NULL, and the first is also the duplicate keep-last would
+/// remove; that must not hide that no row of key 1 stays. Child 2 then loses its parent, so the duplicates of `U`
+/// wait, and child 1 is the one to keep.
+#[test]
+fn keep_last_duplicates_wait_while_every_row_of_a_parent_key_goes() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE P (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+             CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, U NUMBER UNIQUE);\n\
+             INSERT INTO P VALUES (1, NULL);\nINSERT INTO P VALUES (1, NULL);\nINSERT INTO P VALUES (2, 5);\n\
+             INSERT INTO C VALUES (1, 2, 9);\nINSERT INTO C VALUES (2, 1, 9);\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [3, 4, 7]);
+    assert!(output(&report).contains("INSERT INTO C VALUES (1, 2, 9);"));
+    assert!(report.output.findings.is_empty());
+}
+
+/// Under keep-last, the row with the NULL is the first of `A`, whose key is enabled after the row of `A` 1 and `B` 9
+/// that only shows once the first goes. That row then goes as `A`'s duplicate, so the duplicates of `B` wait for it,
+/// and the other row of `B` 9 stays.
+#[test]
+fn keep_last_duplicates_wait_while_a_first_row_goes_for_another_reason() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (A NUMBER, B NUMBER UNIQUE, V NUMBER NOT NULL);\nCREATE INDEX T_I ON T (A);\n\
+             INSERT INTO T VALUES (2, 9, 1);\nINSERT INTO T VALUES (1, 7, NULL);\nINSERT INTO T VALUES (1, 9, 1);\n\
+             ALTER TABLE T ADD CONSTRAINT T_A UNIQUE (A) USING INDEX T_I ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (1, 8, 1);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [4, 5]);
+    assert!(output(&report).contains("INSERT INTO T VALUES (2, 9, 1);"));
+    assert!(report.output.findings.is_empty());
+}
+
+/// Under keep-last, removing a key's first row as a duplicate can bring up a row the key between rows hid, the
+/// first of another key, while a child of a removed row still waits to go: the duplicates wait while any other row
+/// goes, so the row of `A` 0 and `B` 0 stays.
+#[test]
+fn keep_last_duplicates_wait_while_any_other_row_goes() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (A NUMBER, B NUMBER UNIQUE, P NUMBER, V NUMBER NOT NULL);\nCREATE INDEX T_I ON T (A);\n\
+             INSERT INTO T VALUES (1, 1, NULL, 3);\nINSERT INTO T VALUES (0, 3, NULL, 2);\n\
+             INSERT INTO T VALUES (0, 0, 3, 2);\nINSERT INTO T VALUES (2, 1, 3, 0);\n\
+             ALTER TABLE T ADD CONSTRAINT T_A UNIQUE (A) USING INDEX T_I ENABLE NOVALIDATE;\n\
+             ALTER TABLE T ADD CONSTRAINT T_F FOREIGN KEY (P) REFERENCES T (A);\n\
+             INSERT INTO T VALUES (0, NULL, 1, 3);\nINSERT INTO T VALUES (1, 1, 0, NULL);\n\
+             INSERT INTO T VALUES (3, 3, NULL, 0);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    assert!(output(&report).contains("INSERT INTO T VALUES (0, 0, 3, 2);"));
+    assert!(report.output.findings.is_empty());
+}
+
+/// The row with the NULL is also a duplicate whose key rests on a date written as text, left for review; once the
+/// row goes, nothing of it is left for review, whether the fix ends early or checks once more on a dry run.
+#[test]
+fn a_removed_row_leaves_nothing_for_review() {
+    let sql = "CREATE TABLE T (ID NUMBER PRIMARY KEY, D DATE UNIQUE, V NUMBER NOT NULL);\n\
+               INSERT INTO T VALUES (1, DATE '2024-01-02', 1);\nINSERT INTO T VALUES (2, '2024-01-02', NULL);\n\
+               INSERT INTO T VALUES (1, DATE '2024-01-03', 1);\nCOMMIT;\n";
+    let (_dir, _, report) = fix_sql(sql);
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [3, 4]);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    let (dir, files) = write_scripts(&[("t.sql", sql)]);
+    let dry = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &fix::Target {
+            dry_run: true,
+            ..fix::Target::out(dir.path().join("out"))
+        },
+    )
+    .unwrap();
+    assert!(dry.left.is_empty(), "{:?}", dry.left);
+}
+
+/// Under `--on-fk null` the duplicate's own foreign key goes to NULL, and with it the column its unique key shares, so
+/// it is no duplicate any more: it waits for that, and stays.
+#[test]
+fn a_duplicate_waits_while_a_foreign_key_set_to_null_can_change_its_key() {
+    let (_dir, _, report) = fix_null(
+        "CREATE TABLE P (A NUMBER, B NUMBER, PRIMARY KEY (A, B));\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, A NUMBER UNIQUE, B NUMBER, FOREIGN KEY (A, B) REFERENCES P);\n\
+         INSERT INTO P VALUES (1, 1);\nINSERT INTO C VALUES (1, 1, 1);\nINSERT INTO C VALUES (2, 1, 9);\n",
+    );
+    let changed: Vec<(u64, bool)> = report
+        .removed
+        .iter()
+        .map(|r| (r.line, r.nulled.is_empty()))
+        .collect();
+    assert_eq!(changed, [(5, false)], "row 2 is kept with NULL in A and B");
     assert!(report.output.findings.is_empty());
 }
 
@@ -1720,12 +1852,11 @@ mod generated {
                 .filter(|f| f.kind == FindingKind::FkLoadOrder)
                 .filter(|f| !removed.contains(&(f.file.clone().unwrap(), f.line.unwrap())))
                 .count();
-            // A planted duplicate is a later row with children of its own nowhere, so under keep-first the export
-            // orphans nothing: one round for missing parents and NULLs, one for the duplicates waiting on them.
-            // Keep-last removes the first row, whose other keys can be parents.
+            // A planted bad row is no key's first and no row's parent, so under keep-first the duplicates go with it
+            // in one round. Keep-last removes the first row, whose other keys can be parents.
             if policy.on_duplicate == fix::OnDuplicate::KeepFirst && policy.on_fk == fix::OnFk::Drop
             {
-                assert_eq!(report.rounds, 2, "{at}: generated exports orphan nothing");
+                assert_eq!(report.rounds, 1, "{at}: generated exports orphan nothing");
             }
             assert_eq!(
                 count(&report.output, FindingKind::FkLoadOrder),
@@ -1864,7 +1995,7 @@ mod generated {
 
     /// A manager chain loses a row per round: in an odd tree the department goes first, then its employee, then each
     /// employee of the chain. Without a chain the deepest row is the timesheet, four rounds down. The duplicates go in
-    /// a round after, since they wait while anything else goes.
+    /// the last of these rounds, once nothing going can orphan a row or is a duplicated key's first.
     #[test]
     fn a_manager_chain_goes_one_round_per_employee() {
         for chain in [0, 1, 5, synth::MAX_MANAGER_CHAIN] {
@@ -1884,7 +2015,7 @@ mod generated {
                 false,
             );
             let deepest = usize::try_from(chain).unwrap() + 2;
-            assert_eq!(report.rounds, deepest.max(4) + 1, "chain {chain}");
+            assert_eq!(report.rounds, deepest.max(4), "chain {chain}");
             // Nothing past the round limit: only the COMMIT the departments' deferred key keeps out is left.
             assert!(
                 report
