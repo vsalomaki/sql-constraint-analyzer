@@ -4,7 +4,7 @@
 constraints, foreign keys above all, and writes fixed copies.
 
 > **Status:** early development. `sqlca check`, `sqlca inputs` and `sqlca fix` (`--out DIR` or `--in-place`, with
-> `--dry-run`, `--on-duplicate keep-last`, `--on-fk null`, `--fix-assumed` and `--annotate`) work.
+> `--dry-run`, `--on-duplicate keep-last`, `--on-fk null`, `--fix-assumed`, `--annotate` and `--max-rounds`) work.
 
 ## What it does
 

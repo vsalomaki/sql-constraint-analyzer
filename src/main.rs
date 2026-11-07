@@ -300,6 +300,11 @@ struct FixArgs {
     #[arg(long)]
     fix_assumed: bool,
 
+    /// Stop after N rounds that remove rows. Each round takes one more level of a foreign-key chain; what a further
+    /// round would remove is left in place and listed for review.
+    #[arg(long, value_name = "N", default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..))]
+    max_rounds: u16,
+
     /// Leave a one-line comment where each row or statement was removed, saying why and pointing to rejects.sql.
     #[arg(long)]
     annotate: bool,
@@ -513,6 +518,7 @@ fn fix(args: &FixArgs, out: &mut dyn Write, err: &mut dyn Write) -> anyhow::Resu
         on_duplicate: args.on_duplicate,
         on_not_null: args.on_not_null,
         fix_assumed: args.fix_assumed,
+        max_rounds: usize::from(args.max_rounds),
     };
     let mut progress = progress::Progress::new(display(check.progress, verbosity), false, err);
     let result = fix::fix_with(&resolved.files, &options, policy, &target, &mut progress);

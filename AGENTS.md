@@ -104,10 +104,12 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - **Output is the input's bytes** with only the affected statements cut or their values replaced. An `INSERT ALL`
   loses only the bad `INTO` clause, and goes whole when no row is left. Unchanged files are hard-linked or copied.
 - **Rounds:** a removed row's key never enters the parent map, so its children fail in the same round. Rounds
-  repeat until one removes nothing. A parent table whose rows the fix removed is not "empty": its children are
+  repeat until one removes nothing, or until `--max-rounds` (default 30) rounds have removed rows; what a further
+  round would act on is then left for review. A parent table whose rows the fix removed is not "empty": its children are
   missing parents, not one summary finding.
 - **Verify:** after writing, `fix` checks its own output with the same inputs and options. That check gives the
-  run's findings and exit code, and a fixed kind left in the output is a bug.
+  run's findings and exit code, and a fixed kind left in the output, other than what the fix left for review, is a
+  bug.
 - **Nothing is lost:** each removed or changed statement goes to `rejects.sql` in its original form. In-place
   writes go through a temporary file and a rename, and a run that fails before writing writes nothing.
   `--in-place --no-backup --no-report` is refused.
