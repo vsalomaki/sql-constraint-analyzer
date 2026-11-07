@@ -76,6 +76,31 @@ impl<'a> Cursor<'a> {
         Ok(cursor)
     }
 
+    /// A cursor over the piece's tokens from `start` on, where an earlier token ends. The lexer keeps no state
+    /// between tokens, so these are the tokens lexing the whole piece gives there.
+    pub(crate) fn from_offset(
+        piece: &'a Piece,
+        encoding: Encoding,
+        start: usize,
+    ) -> Result<Self, ParseError> {
+        let mut cursor = Self {
+            piece,
+            encoding,
+            tokens: Vec::new(),
+            pos: 0,
+            counted: Cell::new((0, piece.line)),
+        };
+        let rest = piece.text.get(start..).unwrap_or_default();
+        let mut tokens =
+            lex::lex(rest).map_err(|e| cursor.error_at(start + e.offset, e.message.to_owned()))?;
+        for token in &mut tokens {
+            token.start += start;
+            token.end += start;
+        }
+        cursor.tokens = tokens;
+        Ok(cursor)
+    }
+
     pub(crate) fn pos(&self) -> usize {
         self.pos
     }

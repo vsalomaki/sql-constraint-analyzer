@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use super::RULES;
 use super::cursor::{Cursor, first_word_is};
-use super::lex::{Token, TokenKind};
+use super::lex::{Token, TokenKind, is_word_byte, same_ignoring_case};
 use crate::source::{Encoding, Piece};
 use crate::statement::{Expr, Ident, InsertRow, Name, ParseError, Skip, Statement, Value};
 
@@ -21,14 +21,100 @@ pub fn parse_insert(
     piece: &Piece,
     encoding: Encoding,
 ) -> Result<Option<Statement<'_>>, ParseError> {
+    parse_insert_with(piece, encoding, None)
+}
+
+/// The start of the last single-row insert read from a file, up to the end of its table name or column list, and
+/// what it names. The rows of one table repeat it byte for byte, so a row that starts with it, then blanks and
+/// `VALUES`, has only its values read: with `VALUES` next, nothing else (an alias, a column list) follows the
+/// prefix. Only a statement that read without error is kept.
+#[derive(Debug, Default)]
+pub struct Memo {
+    target: Option<Target>,
+}
+
+#[derive(Debug)]
+struct Target {
+    prefix: Vec<u8>,
+    table: Name<'static>,
+    columns: Option<Vec<Ident<'static>>>,
+}
+
+impl Memo {
+    /// Where the rest of `text` starts, when it starts with the kept prefix, then blanks and `VALUES`.
+    fn hit(&self, text: &[u8]) -> Option<usize> {
+        let prefix = &self.target.as_ref()?.prefix;
+        let rest = text.strip_prefix(prefix.as_slice())?;
+        let next = rest.trim_ascii_start();
+        let values = next
+            .get(..6)
+            .is_some_and(|word| same_ignoring_case(word, b"VALUES"))
+            && !next.get(6).is_some_and(|&b| is_word_byte(b));
+        (next.len() < rest.len() && values).then_some(prefix.len())
+    }
+}
+
+/// `parse_insert`, keeping in `memo`, when there is one, what a file's next row may start with.
+pub fn parse_insert_with<'a>(
+    piece: &'a Piece,
+    encoding: Encoding,
+    memo: Option<&'a mut Memo>,
+) -> Result<Option<Statement<'a>>, ParseError> {
     if !first_word_is(&piece.text, "INSERT") {
         return Ok(None);
     }
-    let mut parser = Parser {
-        piece,
-        c: Cursor::new(piece, encoding)?,
+    let Some(memo) = memo else {
+        return Parser::new(piece, encoding)?.insert().map(Some);
     };
-    parser.insert().map(Some)
+    if let Some(rest) = memo.hit(&piece.text) {
+        let memo: &'a Memo = memo;
+        return match &memo.target {
+            Some(target) => {
+                let mut parser = Parser {
+                    piece,
+                    c: Cursor::from_offset(piece, encoding, rest)?,
+                    target_end: None,
+                };
+                let columns = target
+                    .columns
+                    .as_ref()
+                    .map(|columns| columns.iter().map(borrowed_ident).collect());
+                parser.row(borrowed_name(&target.table), columns).map(Some)
+            }
+            None => Parser::new(piece, encoding)?.insert().map(Some),
+        };
+    }
+    let mut parser = Parser::new(piece, encoding)?;
+    let statement = parser.insert()?;
+    if let (Some(end), Statement::Insert(rows)) = (parser.target_end, &statement)
+        && let [row] = rows.as_slice()
+        && let Some(prefix) = piece.text.get(..end)
+        && piece.text.get(end).is_some_and(u8::is_ascii_whitespace)
+    {
+        memo.target = Some(Target {
+            prefix: prefix.to_vec(),
+            table: row.table.clone().into_owned(),
+            columns: row
+                .columns
+                .as_ref()
+                .map(|columns| columns.iter().cloned().map(Ident::into_owned).collect()),
+        });
+    }
+    Ok(Some(statement))
+}
+
+fn borrowed_ident<'a>(ident: &'a Ident<'static>) -> Ident<'a> {
+    Ident {
+        value: Cow::Borrowed(&ident.value),
+        quoted: ident.quoted,
+    }
+}
+
+fn borrowed_name<'a>(name: &'a Name<'static>) -> Name<'a> {
+    Name {
+        schema: name.schema.as_ref().map(borrowed_ident),
+        name: borrowed_ident(&name.name),
+    }
 }
 
 fn not_followed(what: &str) -> Statement<'static> {
@@ -38,9 +124,19 @@ fn not_followed(what: &str) -> Statement<'static> {
 struct Parser<'a> {
     piece: &'a Piece,
     c: Cursor<'a>,
+    /// Where a single-row insert's table name or column list ends in the piece.
+    target_end: Option<usize>,
 }
 
 impl<'a> Parser<'a> {
+    fn new(piece: &'a Piece, encoding: Encoding) -> Result<Self, ParseError> {
+        Ok(Self {
+            piece,
+            c: Cursor::new(piece, encoding)?,
+            target_end: None,
+        })
+    }
+
     fn insert(&mut self) -> Result<Statement<'a>, ParseError> {
         self.c.expect_word("INSERT")?;
         if self.c.eat_word("INTO") {
@@ -59,6 +155,21 @@ impl<'a> Parser<'a> {
             return Ok(not_followed("INSERT INTO a subquery"));
         }
         let (table, columns) = self.target()?;
+        self.target_end = self
+            .c
+            .pos()
+            .checked_sub(1)
+            .and_then(|last| self.c.token(last))
+            .map(|token| token.end);
+        self.row(table, columns)
+    }
+
+    /// The rest of a single-row insert after its table name or column list.
+    fn row(
+        &mut self,
+        table: Name<'a>,
+        columns: Option<Vec<Ident<'a>>>,
+    ) -> Result<Statement<'a>, ParseError> {
         if !self.c.eat_word("VALUES") {
             return if self.at_query(0) {
                 Ok(not_followed("INSERT … SELECT"))
@@ -858,9 +969,37 @@ mod tests {
 mod properties {
     use proptest::prelude::*;
 
-    use super::parse_insert;
+    use super::{Memo, parse_insert, parse_insert_with};
     use crate::source::{Encoding, Piece, PieceKind, Span};
     use crate::statement::Statement;
+
+    /// A single-row insert put together from parts that a repeated start can share or just miss: the same table in
+    /// other cases and quotes, another column list or none, an alias, blanks, comments and line ends before
+    /// `VALUES`, and endings that aren't an insert or don't read.
+    fn insert_row() -> impl Strategy<Value = String> {
+        let pick = |parts: &[&'static str]| prop::sample::select(parts.to_vec());
+        (
+            pick(&["INSERT INTO", "insert into", "Insert  into"]),
+            pick(&[" T", " APP.T", " \"APP\".\"T\"", " T2", " t", " APP .T"]),
+            pick(&["", " KUT$"]),
+            pick(&[
+                "",
+                " (A,B)",
+                " (B,A)",
+                "(A, B)",
+                " (A)",
+                " (\"A\",B)",
+                " (A,A)",
+                " (A,B",
+            ]),
+            pick(&[" ", "  ", "\n", " /*c*/ ", "", "\t"]),
+            pick(&["VALUES", "values", "VALUESX", "SELECT 1 FROM DUAL", "VALUE"]),
+            pick(&[" (1,2)", " (1)", "(1,2,3)", " ('a;b',2)", " (1,", ""]),
+        )
+            .prop_map(|(head, table, alias, columns, gap, values, list)| {
+                format!("{head}{table}{alias}{columns}{gap}{values}{list}")
+            })
+    }
 
     /// Insert-shaped text: the grammar's words and punctuation in any order, and any byte now and then.
     fn statement() -> impl Strategy<Value = Vec<u8>> {
@@ -905,6 +1044,20 @@ mod properties {
                 }
                 Ok(_) => {}
                 Err(error) => prop_assert!(start <= error.offset && error.offset < end && error.line >= 3),
+            }
+        }
+
+        #[test]
+        fn a_repeated_start_reads_as_reading_every_row_whole(rows in prop::collection::vec(insert_row(), 1..12)) {
+            let mut memo = Memo::default();
+            let mut start = 0;
+            for text in rows {
+                let end = start + u64::try_from(text.len()).unwrap();
+                let piece = Piece { kind: PieceKind::Sql, span: Span { start, end }, line: 1, text: text.into_bytes() };
+                let whole = format!("{:?}", parse_insert(&piece, Encoding::Utf8));
+                let remembered = format!("{:?}", parse_insert_with(&piece, Encoding::Utf8, Some(&mut memo)));
+                prop_assert_eq!(remembered, whole, "{}", String::from_utf8_lossy(&piece.text));
+                start = end + 1;
             }
         }
     }
