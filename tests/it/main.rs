@@ -6,6 +6,7 @@ mod fixtures;
 mod inputs;
 mod insert;
 mod pipeline;
+mod samples;
 mod schemas;
 mod split;
 mod sqlcl;

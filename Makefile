@@ -1,4 +1,4 @@
-.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop sqlcl-fixtures perf
+.PHONY: lint fmt test check-all install-hooks fixtures oracle-check oracle-stop sqlcl-fixtures sample-fixtures perf
 
 GEN = cargo run -q -F gen --bin sqlca-gen -- --dialect oracle
 FIXTURES = tests/fixtures/gen/oracle
@@ -14,6 +14,10 @@ oracle-stop:
 ## Rewrites tests/fixtures/sqlcl/: a generated export loaded into Oracle Free and exported again with SQLcl.
 sqlcl-fixtures:
 	scripts/oracle/sqlcl-fixtures.sh
+
+## Rewrites tests/fixtures/samples/oracle/: Oracle's HR and CO sample schemas, with the PL/SQL around their INSERTs stripped.
+sample-fixtures:
+	scripts/oracle/sample-fixtures.sh
 
 ## Regenerates the committed generator fixtures; review the diff before committing it.
 fixtures:
