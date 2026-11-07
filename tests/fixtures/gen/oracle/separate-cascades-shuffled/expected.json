@@ -52,7 +52,7 @@
     },
     {
       "path": "app/tables/PROJECTS.sql",
-      "statements": 2
+      "statements": 3
     },
     {
       "path": "app/tables/ASSIGNMENTS.sql",
@@ -116,7 +116,7 @@
     },
     {
       "path": "app/data/PROJECTS.sql",
-      "statements": 11
+      "statements": 15
     },
     {
       "path": "app/data/AuditLog.sql",
@@ -2019,29 +2019,16 @@
       }
     },
     {
-      "kind": "fk_load_order",
-      "constraint": "APP.PROJECTS_DEPT_FK",
-      "table": "APP.PROJECTS",
-      "columns": [
-        "DEPT_NAME"
-      ],
-      "file": "app/data/PROJECTS.sql",
-      "line": 8,
-      "key": [
-        "Logistiikka 3"
-      ]
-    },
-    {
       "kind": "duplicate_key",
-      "constraint": "APP.PROJECTS_EXTREF_UK",
+      "constraint": "APP.PROJECTS_NAME_UK",
       "table": "APP.PROJECTS",
       "columns": [
-        "EXTERNAL_REF"
+        "NAME"
       ],
       "file": "app/data/PROJECTS.sql",
-      "line": 9,
+      "line": 13,
       "key": [
-        "EXT-3"
+        "Twin project"
       ],
       "first": {
         "file": "app/data/PROJECTS.sql",
@@ -2056,7 +2043,37 @@
         "DEPT_NAME"
       ],
       "file": "app/data/PROJECTS.sql",
-      "line": 10,
+      "line": 14,
+      "key": [
+        "Logistiikka 3"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_EXTREF_UK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "EXTERNAL_REF"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 15,
+      "key": [
+        "EXT-3"
+      ],
+      "first": {
+        "file": "app/data/PROJECTS.sql",
+        "line": 14
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 16,
       "key": [
         "Tuotekehitys 4"
       ]
@@ -2365,7 +2382,11 @@
       },
       {
         "file": "app/data/PROJECTS.sql",
-        "line": 9
+        "line": 13
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 15
       },
       {
         "file": "app/data/AuditLog.sql",
@@ -2527,7 +2548,11 @@
       },
       {
         "file": "app/data/PROJECTS.sql",
-        "line": 9
+        "line": 13
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 15
       },
       {
         "file": "app/data/DEPARTMENTS.sql",

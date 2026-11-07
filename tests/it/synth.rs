@@ -668,6 +668,70 @@ fn duplicates_of_bad_rows_are_kept_once_the_bad_row_goes() {
     assert_eq!(thirds, trees);
 }
 
+/// With cascades, the projects' name key is enabled between their rows, after two projects with one name: only the
+/// third project with it is a duplicate, of the first. Where the key's commit would roll back rows a deferred foreign
+/// key waits on, it comes later, after all three, and after the data it judges none of them.
+#[test]
+fn a_key_enabled_between_rows_judges_only_the_rows_after_it() {
+    let mut seen = BTreeSet::new();
+    for seed in 1..=12 {
+        for (shuffle_order, constraints) in [
+            (false, Placement::BeforeData),
+            (true, Placement::BeforeData),
+            (false, Placement::AfterData),
+        ] {
+            let options = Options {
+                seed,
+                cascades: true,
+                shuffle_order,
+                constraints,
+                layout: Layout::Single,
+                ..small()
+            };
+            let (dir, manifest) = generate(&options);
+            let text = String::from_utf8(tree(&root(&dir))["app/export.sql"].clone()).unwrap();
+            let line_of = |needle: &str| {
+                text.lines()
+                    .position(|l| l.contains(needle))
+                    .map(|i| u64::try_from(i).unwrap() + 1)
+                    .unwrap()
+            };
+            let twins: Vec<u64> = text
+                .lines()
+                .zip(1..)
+                .filter(|(l, _)| l.contains("'Twin project'"))
+                .map(|(_, n)| n)
+                .collect();
+            let key = line_of("ADD CONSTRAINT \"PROJECTS_NAME_UK\"");
+            let found: Vec<&Finding> = manifest
+                .findings
+                .iter()
+                .filter(|f| f.constraint.as_deref() == Some("APP.PROJECTS_NAME_UK"))
+                .collect();
+            let at = format!("{options:?}");
+            assert_eq!(twins.len(), 3, "{at}");
+            match found[..] {
+                [duplicate] => {
+                    assert!(twins[1] < key && key < twins[2], "{at}");
+                    assert_eq!(duplicate.line, Some(twins[2]), "{at}");
+                    assert_eq!(duplicate.first.as_ref().unwrap().line, twins[0], "{at}");
+                    seen.insert("between");
+                }
+                [] => {
+                    assert!(key > twins[2], "{at}");
+                    seen.insert(if constraints == Placement::AfterData {
+                        "after the data"
+                    } else {
+                        "waited"
+                    });
+                }
+                _ => panic!("{at}: {found:?}"),
+            }
+        }
+    }
+    assert_eq!(seen.len(), 3, "{seen:?}");
+}
+
 /// The committed fixtures (`tests/fixtures/gen/<dialect>/<variant>`) are what the generator writes today; `make
 /// fixtures` refreshes them on purpose.
 #[test]

@@ -411,7 +411,9 @@ fn holders(findings: &[Finding]) -> BTreeMap<(String, Vec<Option<String>>), BTre
 }
 
 /// The duplicates Oracle accepts, by constraint and row: a row it rejects at its insert for another reason, or as a
-/// cascade row, never holds its key, so the key's first row in load order that Oracle accepts holds it instead.
+/// cascade row, never holds its key, so the key's first row in load order that Oracle accepts holds it instead. It
+/// knows only the rows findings name, so a bad first row must not share its key with rows that precede a key enabled
+/// between rows, which hold the key with no finding.
 fn accepted_duplicates(
     findings: &[Finding],
     cascades: &[Cascade],

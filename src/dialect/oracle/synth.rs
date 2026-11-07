@@ -12,7 +12,7 @@ use crate::synth::render::{Batch, DdlItem, DdlStyle, Edge, Insert, Sql};
 use crate::synth::rng::Rng;
 use crate::synth::schema::{
     APP_SCHEMA, AUDIT_SEQ, AUDIT_TRIGGER, Constraint, DefaultValue, EMPLOYEES_EMAIL_UIX, Form,
-    Kind, NotNull, State, TableId, Ty, constraints_of,
+    Kind, NotNull, PROJECTS_NAME_IX, State, TableId, Ty, constraints_of,
 };
 use crate::synth::value::Value;
 use crate::synth::{self, Noise};
@@ -62,9 +62,16 @@ impl synth::Render for Render {
         let (text, statements) = match item {
             DdlItem::CreateTable(table) => (
                 writer.create_table(table),
-                create_table_statements(table, style.keys_in_table),
+                create_table_statements(table, style),
             ),
-            DdlItem::LateKeys(table) => (writer.late_keys(table), key_statements(table, |_| true)),
+            DdlItem::LateKeys(table) => (
+                writer.late_keys(table),
+                key_statements(table, |c| writer.late(c)),
+            ),
+            DdlItem::KeyBetweenRows(table) => (
+                writer.keys(table, |c| c.form == Form::BetweenRows),
+                key_statements(table, |c| c.form == Form::BetweenRows),
+            ),
             DdlItem::ForeignKeys(table) => (
                 writer.foreign_keys(table),
                 count(constraints_of(table).filter(|c| c.is_foreign())),
@@ -189,21 +196,22 @@ fn count<T>(items: impl Iterator<Item = T>) -> u64 {
     u64::try_from(items.count()).unwrap_or(u64::MAX)
 }
 
-/// Statements in a `CREATE TABLE` item: the table, each `MODIFY … NOT NULL` and `ADD` column, and, when keys are in
-/// the table DDL, its `ALTER TABLE … ADD CONSTRAINT` keys and unique index.
-fn create_table_statements(table: TableId, keys_in_table: bool) -> u64 {
+/// Statements in a `CREATE TABLE` item: the table, each `MODIFY … NOT NULL` and `ADD` column, the index a key between
+/// the rows needs, and, when keys are in the table DDL, its `ALTER TABLE … ADD CONSTRAINT` keys and unique index.
+fn create_table_statements(table: TableId, style: &DdlStyle<'_>) -> u64 {
     let columns = table.columns();
     let separate = count(
         columns
             .iter()
             .filter(|c| c.not_null == NotNull::AfterTable || c.added_later),
     );
-    let keys = if keys_in_table {
+    let index = u64::from(style.key_between_rows && table == PROJECTS_NAME_IX.table);
+    let keys = if style.keys_in_table {
         key_statements(table, |c| c.form == Form::Alter)
     } else {
         0
     };
-    1 + separate + keys
+    1 + separate + index + keys
 }
 
 /// `ALTER TABLE … ADD` statements for the keys `which` selects, plus the unique index.
@@ -267,6 +275,18 @@ impl DdlWriter<'_> {
         } else {
             "UNIQUE"
         };
+        if c.form == Form::BetweenRows {
+            let index = format!(
+                "{}.{}",
+                q(PROJECTS_NAME_IX.table.schema()),
+                q(PROJECTS_NAME_IX.name)
+            );
+            return format!(
+                "CONSTRAINT {} {kind} ({}) USING INDEX {index} ENABLE NOVALIDATE",
+                q(c.name),
+                col_list(c.columns)
+            );
+        }
         if self.noise.storage_clauses {
             format!(
                 "CONSTRAINT {} {kind} ({}){eol}  {USING_INDEX}{eol}  TABLESPACE \"USERS\"  ENABLE",
@@ -355,10 +375,26 @@ impl DdlWriter<'_> {
                 );
             }
         }
+        if self.style.key_between_rows && table == PROJECTS_NAME_IX.table {
+            let ix = PROJECTS_NAME_IX;
+            put!(
+                out,
+                "{eol}  CREATE INDEX {}.{} ON {} ({}) ;{eol}",
+                q(ix.table.schema()),
+                q(ix.name),
+                qt(table),
+                col_list(ix.columns)
+            );
+        }
         if self.style.keys_in_table {
             out.push_str(&self.keys(table, |c| c.form == Form::Alter));
         }
         out
+    }
+
+    /// Whether a key comes with the keys after the data: every key the export has.
+    fn late(&self, c: &Constraint) -> bool {
+        c.form != Form::BetweenRows || self.style.key_between_rows
     }
 
     /// Primary and unique keys declared by `ALTER TABLE`, plus the unique index, for those `which` selects.
@@ -397,7 +433,7 @@ impl DdlWriter<'_> {
 
     /// Keys that the table DDL didn't declare: all of them when they come after the data.
     fn late_keys(&self, table: TableId) -> String {
-        self.keys(table, |_| true)
+        self.keys(table, |c| self.late(c))
     }
 
     fn foreign_keys(&self, table: TableId) -> String {
@@ -521,6 +557,7 @@ mod tests {
         let style = DdlStyle {
             eol: "\n",
             keys_in_table,
+            key_between_rows: false,
         };
         Render::new(Noise::default()).ddl(item, &style).text
     }

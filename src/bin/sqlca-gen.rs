@@ -58,8 +58,9 @@ struct Cli {
     rows_per_file: Option<u64>,
 
     /// Hang rows from bad rows: children, and theirs, that the database rejects once their parent is rejected,
-    /// though they have no finding of their own, and duplicates of bad rows, which the database accepts. The manifest
-    /// lists them. Not with `--omit-data`.
+    /// though they have no finding of their own, and duplicates of bad rows, which the database accepts. Also enables
+    /// a unique key between the projects' rows with ENABLE NOVALIDATE. The manifest lists them. Not with
+    /// `--omit-data`.
     #[arg(long)]
     cascades: bool,
 

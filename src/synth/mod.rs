@@ -9,8 +9,9 @@
 //! down a manager chain of `manager_chain` employees. The analyzer finds nothing in the children, since their parent
 //! is in the export, but the database rejects them and `fix` removes them with their root, a level per round. Bad
 //! rows also get duplicates: the database rejects the bad row and accepts the next row of its key, which `fix` keeps
-//! once the bad row is gone. The manifest lists the cascade rows, and the rows `fix` removes or sets to NULL under
-//! `--on-duplicate keep-first`.
+//! once the bad row is gone. And a unique key is enabled between the projects' rows without checking the rows already
+//! there, after two with one name, so only a third with it is a duplicate. The manifest lists the cascade rows, and the
+//! rows `fix` removes or sets to NULL under `--on-duplicate keep-first`.
 
 mod data;
 mod out;
@@ -187,7 +188,8 @@ pub struct Options {
     /// The most rows a data file holds before the rows go on in `<name>_2.sql`, `<name>_3.sql`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_per_file: Option<u64>,
-    /// Hang rows from bad rows: children the database rejects with their parent, and `fix` removes with it.
+    /// Hang rows from bad rows: children the database rejects with their parent, and `fix` removes with it. Also
+    /// enables a key between the projects' rows.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cascades: bool,
     /// With `cascades`, the employees each tree's employee manages in a chain, each the manager of the next.
