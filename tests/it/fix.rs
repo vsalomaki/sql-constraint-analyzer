@@ -1819,3 +1819,85 @@ fn a_dry_run_tells_the_commit_it_would_add_as_settled() {
     assert_eq!(fs::read_to_string(dir.path().join("t.sql")).unwrap(), sql);
     assert!(!dir.path().join("out").exists());
 }
+
+/// The stages a fix runs, as its observer hears them.
+#[derive(Default)]
+struct Stages(Vec<String>);
+
+impl check::Observer for Stages {
+    fn stage(&mut self, stage: &str) {
+        self.0.push(stage.to_owned());
+    }
+}
+
+/// Fixes one script into a new folder, and returns the stages it ran with the report.
+#[expect(clippy::unwrap_used, reason = "a fix that fails fails the test")]
+fn fix_stages(sql: &str) -> (Vec<String>, FixReport) {
+    let (dir, files) = write_scripts(&[("t.sql", sql)]);
+    let mut stages = Stages::default();
+    let report = fix::fix_with(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &fix::Target::out(dir.path().join("out")),
+        &mut stages,
+    )
+    .unwrap();
+    (stages.0, report)
+}
+
+const PARENT_WITH_NOT_NULL: &str = "CREATE TABLE P (ID NUMBER PRIMARY KEY, N NUMBER NOT NULL);\n\
+    CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n";
+
+#[test]
+fn a_removed_row_no_child_points_at_needs_no_second_round() {
+    let (stages, report) = fix_stages(&format!(
+        "{PARENT_WITH_NOT_NULL}INSERT INTO P VALUES (1, 1);\nINSERT INTO P VALUES (2, NULL);\nINSERT INTO C VALUES (1, 1);\n"
+    ));
+    assert_eq!(stages, ["check 1", "write", "verify"]);
+    assert_eq!(report.removed.len(), 1, "{:#?}", report.removed);
+}
+
+#[test]
+fn a_removed_row_a_child_points_at_takes_the_child_in_the_next_round() {
+    let (stages, report) = fix_stages(&format!(
+        "{PARENT_WITH_NOT_NULL}INSERT INTO P VALUES (1, 1);\nINSERT INTO P VALUES (2, NULL);\nINSERT INTO C VALUES (1, 2);\n"
+    ));
+    assert!(stages.contains(&"check 2".to_owned()), "{stages:?}");
+    assert_eq!(report.removed.len(), 2, "{:#?}", report.removed);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:#?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn a_child_written_before_its_parent_still_takes_the_next_round() {
+    // The child's lookup waits for the end of the input, where it finds the parent that then goes.
+    let (stages, report) = fix_stages(&format!(
+        "{PARENT_WITH_NOT_NULL}INSERT INTO C VALUES (1, 2);\nINSERT INTO P VALUES (1, 1);\nINSERT INTO P VALUES (2, NULL);\n"
+    ));
+    assert!(stages.contains(&"check 2".to_owned()), "{stages:?}");
+    assert_eq!(report.removed.len(), 2, "{:#?}", report.removed);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:#?}",
+        report.output.findings
+    );
+}
+
+#[test]
+fn removing_a_parent_whose_key_the_check_cant_know_takes_the_next_round() {
+    // While P holds a key the check can't know, C's missing parent is unverifiable; without that row it is missing.
+    let (stages, report) = fix_stages(&format!(
+        "{PARENT_WITH_NOT_NULL}INSERT INTO P VALUES (1, 1);\nINSERT INTO P VALUES (S.NEXTVAL, NULL);\nINSERT INTO C VALUES (1, 5);\n"
+    ));
+    assert!(stages.contains(&"check 2".to_owned()), "{stages:?}");
+    assert_eq!(report.removed.len(), 2, "{:#?}", report.removed);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:#?}",
+        report.output.findings
+    );
+}

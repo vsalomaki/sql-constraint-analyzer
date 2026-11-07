@@ -447,7 +447,7 @@ fn run_rounds(
             waiting,
         } = targets(&report.findings, files, names, policy, &crowded);
         // A value set to NULL can make a unique key a duplicate, or take a key children point at.
-        let mut settled = !waiting && !can_orphan(&targets, &report.referenced);
+        let mut settled = !waiting && !can_orphan(&targets, names, &report);
         let mut changed = false;
         for (index, lines) in &targets {
             let (Some(file), Some(file_cuts), Some(scanned)) =
@@ -847,20 +847,29 @@ struct Decision<'a> {
 }
 
 /// Whether the rows going can leave another row without its parent: a row goes from a table a foreign key points
-/// at, other than as a duplicate of each key pointed at, which a kept row still holds.
-fn can_orphan(targets: &Targets, referenced: &BTreeSet<(String, Vec<String>)>) -> bool {
-    targets.values().flat_map(BTreeMap::values).any(|findings| {
-        let Some(table) = findings.first().map(|f| &f.table) else {
-            return false;
-        };
-        referenced
-            .iter()
-            .filter(|(parent, _)| parent == table)
-            .any(|(_, columns)| {
-                !findings
-                    .iter()
-                    .any(|f| f.kind == FindingKind::DuplicateKey && f.columns == *columns)
-            })
+/// at, other than as a duplicate of each key pointed at, which a kept row still holds; and it holds a key some
+/// child row found, or its table has keys the check couldn't know or assumed.
+fn can_orphan(targets: &Targets, names: &[String], report: &check::Report) -> bool {
+    targets.iter().any(|(&file, lines)| {
+        lines.iter().any(|(&line, findings)| {
+            let Some(table) = findings.first().map(|f| &f.table) else {
+                return false;
+            };
+            let pointed_at = report
+                .referenced
+                .iter()
+                .filter(|(parent, _)| parent == table)
+                .any(|(_, columns)| {
+                    !findings
+                        .iter()
+                        .any(|f| f.kind == FindingKind::DuplicateKey && f.columns == *columns)
+                });
+            let found = report.uncertain_tables.contains(table)
+                || names
+                    .get(file)
+                    .is_some_and(|name| report.referenced_rows.contains(&(name.clone(), line)));
+            pointed_at && found
+        })
     })
 }
 
