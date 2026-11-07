@@ -456,6 +456,8 @@ impl Open {
             line: Some(line),
             key: Vec::new(),
             first: None,
+            unchecked: Vec::new(),
+            unchecked_more: false,
             count: Some(self.rows),
             assumed: false,
         })

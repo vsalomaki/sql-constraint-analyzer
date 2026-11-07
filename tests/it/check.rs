@@ -38,8 +38,8 @@ fn check(root: &Path, encoding: Encoding, load_order: bool) -> (Report, BTreeSet
         .cloned()
         .map(|mut f| {
             f.file = f.file.as_deref().map(relative);
-            if let Some(first) = &mut f.first {
-                first.file = relative(&first.file);
+            for earlier in f.first.iter_mut().chain(&mut f.unchecked) {
+                earlier.file = relative(&earlier.file);
             }
             f
         })

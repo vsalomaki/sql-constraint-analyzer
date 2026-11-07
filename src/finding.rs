@@ -50,6 +50,14 @@ pub struct Finding {
     /// For a duplicate, the row that inserted the key first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first: Option<Location>,
+    /// For the first duplicate a key judges of a key value, the value's rows after the first that the key never
+    /// checked: written before it was enabled without validating the rows already there. They hold the key too, so the
+    /// database checks this row and later ones against them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchecked: Vec<Location>,
+    /// For a duplicate, whether more such rows hold the key than the check keeps, so `unchecked` doesn't list them all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchecked_more: bool,
     /// For a summary finding, the number of rows it stands for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u64>,
@@ -74,6 +82,8 @@ mod tests {
             line: Some(3),
             key: vec![],
             first: None,
+            unchecked: Vec::new(),
+            unchecked_more: false,
             count: None,
             assumed: false,
         };
