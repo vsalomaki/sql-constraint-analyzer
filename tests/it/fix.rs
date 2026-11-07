@@ -1156,6 +1156,61 @@ fn a_removed_row_leaves_nothing_for_review() {
     assert!(dry.left.is_empty(), "{:?}", dry.left);
 }
 
+/// Only duplicates go: parent 2 for its name, and child 2 for `U`, which would keep child 1. But child 1's parent is
+/// parent 2, so the duplicates of `U` wait; child 1 goes with its parent, and child 2 is the one to keep.
+#[test]
+fn duplicates_wait_while_a_duplicate_going_takes_the_parent_of_the_row_they_keep() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, NAME VARCHAR2(9) UNIQUE);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, U VARCHAR2(9) UNIQUE);\n\
+         INSERT INTO P VALUES (1, 'a');\nINSERT INTO P VALUES (2, 'a');\n\
+         INSERT INTO C VALUES (1, 2, 'x');\nINSERT INTO C VALUES (2, 1, 'x');\nCOMMIT;\n",
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [4, 5]);
+    assert!(output(&report).contains("INSERT INTO C VALUES (2, 1, 'x');"));
+    assert!(report.output.findings.is_empty());
+}
+
+/// As above, with a grandchild under child 2, whose row also goes as `C`'s duplicate on `U`, and could orphan the
+/// grandchild: child 2 must not go before child 1, whose parent goes first. Then child 2 is `U`'s row, and the
+/// grandchild keeps its parent.
+#[test]
+fn a_duplicate_that_can_orphan_waits_while_its_kept_row_can_lose_its_parent() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, NAME VARCHAR2(9) UNIQUE);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, U VARCHAR2(9) UNIQUE);\n\
+         CREATE TABLE G (ID NUMBER PRIMARY KEY, C_ID NUMBER REFERENCES C);\n\
+         INSERT INTO P VALUES (1, 'a');\nINSERT INTO P VALUES (2, 'a');\n\
+         INSERT INTO C VALUES (1, 2, 'x');\nINSERT INTO C VALUES (2, 1, 'x');\nINSERT INTO G VALUES (1, 2);\nCOMMIT;\n",
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [5, 6]);
+    let out = output(&report);
+    assert!(out.contains("INSERT INTO C VALUES (2, 1, 'x');"), "{out}");
+    assert!(out.contains("INSERT INTO G VALUES (1, 2);"), "{out}");
+    assert!(report.output.findings.is_empty());
+}
+
+/// Parent 2 goes for its name, which takes child 1, and then grandchild 1, a round later each. Grandchild 1 is also
+/// the first row of `U` in `G`, so the duplicate of `U` waits, though `G` points at `C`, not at `P`: then it is the
+/// row to keep.
+#[test]
+fn a_duplicate_waits_while_its_kept_row_can_lose_a_grandparent() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, NAME VARCHAR2(9) UNIQUE);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+         CREATE TABLE G (ID NUMBER PRIMARY KEY, C_ID NUMBER REFERENCES C, U VARCHAR2(9) UNIQUE);\n\
+         INSERT INTO P VALUES (1, 'a');\nINSERT INTO P VALUES (2, 'a');\n\
+         INSERT INTO C VALUES (1, 2);\nINSERT INTO C VALUES (2, 1);\n\
+         INSERT INTO G VALUES (1, 1, 'x');\nINSERT INTO G VALUES (2, 2, 'x');\nCOMMIT;\n",
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [5, 6, 8]);
+    assert!(output(&report).contains("INSERT INTO G VALUES (2, 2, 'x');"));
+    assert!(report.output.findings.is_empty());
+}
+
 /// Under `--on-fk null` the duplicate's own foreign key goes to NULL, and with it the column its unique key shares, so
 /// it is no duplicate any more: it waits for that, and stays.
 #[test]
