@@ -466,7 +466,9 @@ fn run_rounds(
             break (Some(report), left);
         }
         // A value set to NULL can make a unique key a duplicate, or take a key children point at.
-        let mut settled = !waiting && !can_orphan(&targets, names, &report);
+        let mut settled = !waiting
+            && !can_orphan(&targets, names, &report)
+            && !takes_a_first_row(&targets, names, &report);
         let mut changed = false;
         for (index, lines) in &targets {
             let (Some(file), Some(file_cuts), Some(scanned)) =
@@ -886,6 +888,23 @@ struct Decision<'a> {
 /// Whether the rows going can leave another row without its parent: a row goes from a table a foreign key points
 /// at, other than as a duplicate of each key pointed at, which a kept row still holds; and it holds a key some
 /// child row found, or its table has keys the check couldn't know or assumed.
+/// Whether a row going is the first row of a duplicated key. The key's next row then comes first, with duplicates no
+/// finding named, such as rows written before the constraint was enabled.
+fn takes_a_first_row(targets: &Targets, names: &[String], report: &check::Report) -> bool {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DuplicateKey)
+        .filter_map(|f| f.first.as_ref())
+        .any(|first| {
+            names
+                .iter()
+                .position(|n| *n == first.file)
+                .and_then(|file| targets.get(&file))
+                .is_some_and(|lines| lines.contains_key(&first.line))
+        })
+}
+
 fn can_orphan(targets: &Targets, names: &[String], report: &check::Report) -> bool {
     targets.iter().any(|(&file, lines)| {
         lines.iter().any(|(&line, findings)| {
