@@ -1172,6 +1172,180 @@ fn duplicates_wait_while_a_duplicate_going_takes_the_parent_of_the_row_they_keep
     assert!(report.output.findings.is_empty());
 }
 
+/// The report says when a key kept another row than its policy's, because that row went for another reason: here
+/// `U`'s first row, child 1, lost its parent, so child 2 stays. In the text report, the JSON and the summary.
+#[test]
+fn the_report_tells_a_key_that_kept_another_row_than_its_first() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY, NAME VARCHAR2(9) UNIQUE);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P, U VARCHAR2(9) UNIQUE);\n\
+         INSERT INTO P VALUES (1, 'a');\nINSERT INTO P VALUES (2, 'a');\n\
+         INSERT INTO C VALUES (1, 2, 'x');\nINSERT INTO C VALUES (2, 1, 'x');\nCOMMIT;\n",
+    );
+    let kept: Vec<(u64, Option<u64>, bool)> = report
+        .kept
+        .iter()
+        .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line), k.first))
+        .collect();
+    assert_eq!(kept, [(5, Some(6), true)]);
+    assert_eq!(
+        report.kept[0].why,
+        ["missing parent for a foreign key of C"]
+    );
+    let mut text = Vec::new();
+    fix::write_report(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains("Kept another row (duplicates are decided among the rows that stay):\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(":6; its first row, ")
+            && text.contains(":5, went (missing parent for a foreign key of C)"),
+        "{text}"
+    );
+    assert!(fix::summary(&report).contains("; 1 key kept another row"));
+    let mut json = Vec::new();
+    fix::write_json_report(&report, &mut json).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(json["kept_another_row"][0]["policy"], "first");
+    assert_eq!(json["kept_another_row"][0]["kept"]["line"], 6);
+}
+
+/// Under keep-last the last row of a key goes for its NULL, so the one before it stays; when every row of a key goes,
+/// the report says that none stays.
+#[test]
+fn the_report_tells_a_key_that_kept_another_row_than_its_last_or_none() {
+    let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n";
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            &format!(
+                "{ddl}INSERT INTO T VALUES (1, 5);\nINSERT INTO T VALUES (1, NULL);\nCOMMIT;\n"
+            ),
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let kept: Vec<(u64, Option<u64>, bool)> = report
+        .kept
+        .iter()
+        .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line), k.first))
+        .collect();
+    assert_eq!(kept, [(3, Some(2), false)]);
+    let (_dir, _, report) = fix_sql(&format!(
+        "{ddl}INSERT INTO T VALUES (1, NULL);\nINSERT INTO T VALUES (1, NULL);\nCOMMIT;\n"
+    ));
+    assert_eq!(report.kept.len(), 1);
+    assert_eq!(report.kept[0].kept, None);
+    let mut text = Vec::new();
+    fix::write_report(&report, &mut text).unwrap();
+    assert!(
+        String::from_utf8(text)
+            .unwrap()
+            .contains(": no row of it that a check found stays; its first row, ")
+    );
+}
+
+/// Both rows of a key in one `INSERT ALL` go, so the statement goes whole: the report says no row of the key stays,
+/// though the removal names only the statement's first line.
+#[test]
+fn the_report_tells_a_key_whose_rows_all_went_with_their_insert_all() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\
+         INSERT ALL\n  INTO T VALUES (1, NULL)\n  INTO T VALUES (1, NULL)\nSELECT * FROM dual;\nCOMMIT;\n",
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [2]);
+    let kept: Vec<(u64, Option<u64>)> = report
+        .kept
+        .iter()
+        .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line)))
+        .collect();
+    assert_eq!(kept, [(3, None)]);
+}
+
+/// The key on `ID` is enabled after two rows, so the input's duplicate names only the first, which goes for its NULL,
+/// and the row after the key. A later round finds the second row, which the key never checked: that row stays, and
+/// the report names it.
+#[test]
+fn the_report_names_a_kept_row_a_later_round_found() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE T (ID NUMBER, V NUMBER NOT NULL);\nCREATE INDEX T_I ON T (ID);\n\
+         INSERT INTO T VALUES (1, NULL);\nINSERT INTO T VALUES (1, 5);\n\
+         ALTER TABLE T ADD CONSTRAINT T_U UNIQUE (ID) USING INDEX T_I ENABLE NOVALIDATE;\n\
+         INSERT INTO T VALUES (1, 6);\nCOMMIT;\n",
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [3, 6]);
+    let kept: Vec<(u64, Option<u64>)> = report
+        .kept
+        .iter()
+        .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line)))
+        .collect();
+    assert_eq!(kept, [(3, Some(4))]);
+}
+
+/// As above, with the row after the key also NULL: the row before it, which the key never checked, stays, though no
+/// duplicate names it. The report says only that no row a check found stays.
+#[test]
+fn the_report_claims_no_more_than_the_checks_found() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE T (ID NUMBER, V NUMBER NOT NULL);\nCREATE INDEX T_I ON T (ID);\n\
+         INSERT INTO T VALUES (1, NULL);\nINSERT INTO T VALUES (1, 5);\n\
+         ALTER TABLE T ADD CONSTRAINT T_U UNIQUE (ID) USING INDEX T_I ENABLE NOVALIDATE;\n\
+         INSERT INTO T VALUES (1, NULL);\nCOMMIT;\n",
+    );
+    assert!(output(&report).contains("INSERT INTO T VALUES (1, 5);"));
+    let mut text = Vec::new();
+    fix::write_report(&report, &mut text).unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains("no row of it that a check found stays"),
+        "{text}"
+    );
+}
+
+/// Under `--on-fk null`, a row kept with its foreign key set to NULL loses the unique key that shares those columns:
+/// the report names the row that still holds the key, not that one.
+#[test]
+fn the_report_names_no_row_whose_key_went_to_null() {
+    let (_dir, _, report) = fix_null(
+        "CREATE TABLE P (A NUMBER, B NUMBER, PRIMARY KEY (A, B));\n\
+         CREATE TABLE T (A NUMBER, B NUMBER, U NUMBER, V NUMBER NOT NULL, UNIQUE (A, U), FOREIGN KEY (A, B) REFERENCES P);\n\
+         INSERT INTO P VALUES (1, 1);\nINSERT INTO T VALUES (1, 1, 7, NULL);\nINSERT INTO T VALUES (1, 2, 7, 5);\n\
+         INSERT INTO T VALUES (1, 1, 7, 6);\nCOMMIT;\n",
+    );
+    let kept: Vec<(u64, Option<u64>)> = report
+        .kept
+        .iter()
+        .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line)))
+        .collect();
+    assert_eq!(kept, [(4, Some(6))], "{:#?}", report.removed);
+}
+
+/// Under SQLcl a statement can end on the line where the next begins. The removed row of `ID` 9 ends on the line of
+/// the first row of `ID` 1, which stays: the report names no key as having kept another row.
+#[test]
+fn a_removal_ending_on_a_kept_rows_line_does_not_take_it() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\nINSERT INTO T VALUES (9,\n\
+             NULL); INSERT INTO T VALUES (1, 5);\nINSERT INTO T VALUES (1, 6);\nCOMMIT;\n",
+        )],
+        &Options {
+            runner: sqlca::dialect::Runner::Sqlcl,
+            ..Options::default()
+        },
+        Policy::default(),
+        false,
+    );
+    assert_eq!(report.removed.len(), 2, "{:#?}", report.removed);
+    assert!(report.kept.is_empty(), "{:?}", report.kept);
+}
+
 /// As above, with a grandchild under child 2, whose row also goes as `C`'s duplicate on `U`, and could orphan the
 /// grandchild: child 2 must not go before child 1, whose parent goes first. Then child 2 is `U`'s row, and the
 /// grandchild keeps its parent.

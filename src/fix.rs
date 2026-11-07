@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::catalog::{Catalog, Kind, Table};
 use crate::check::{self, Report};
 use crate::dialect::Pass;
-use crate::finding::{Finding, FindingKind};
+use crate::finding::{Finding, FindingKind, Location};
 use crate::input::{self, InputError, InputFile, Role};
 use crate::source::Span;
 use crate::statement::{InsertRow, Statement};
@@ -112,6 +112,8 @@ pub struct Removal {
     pub span: Span,
     /// Whether the cut is one row of a multi-row statement rather than a whole statement.
     pub clause: bool,
+    /// The lines of the rows it took or changed: a whole statement's rows, the ones earlier rounds took included.
+    pub rows: Vec<u64>,
     pub reasons: Vec<Reason>,
     pub round: usize,
     pub text: Vec<u8>,
@@ -194,11 +196,31 @@ pub struct FixReport {
     /// Fixable findings the fix left in place: assumed values, rows it couldn't tell apart, and rows past the round
     /// limit.
     pub left: Vec<Left>,
+    /// Duplicated keys whose row the policy keeps went for another reason, with the row kept instead.
+    pub kept: Vec<Kept>,
     /// Where each input went, by input position.
     pub files: Vec<Output>,
     /// The report folder, unless there is none.
     pub report: Option<PathBuf>,
     pub target: Target,
+}
+
+/// A duplicated key whose row the policy keeps, its first or its last, went for another reason, or lost the key to a
+/// value set to NULL. Duplicates are decided
+/// among the rows that stay, so another row of the key is kept instead, or none when every row went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Kept {
+    /// The key and its value, as the input's duplicate names them.
+    pub key: String,
+    /// The row the policy keeps.
+    pub policy: Location,
+    /// Whether that is the key's first row (keep-first) or its last (keep-last).
+    pub first: bool,
+    /// The row kept instead; `None` when no row of the key a check found stays. A row before a key enabled without
+    /// validation that no duplicate named may still stay.
+    pub kept: Option<Location>,
+    /// Why the policy's row went.
+    pub why: Vec<String>,
 }
 
 /// One input's output.
@@ -274,6 +296,7 @@ pub fn fix_with(
     };
     let folder = report_folder(target, out.as_deref(), &paths)?;
     let names: Vec<String> = files.iter().map(|f| check::display(&f.path)).collect();
+    let order = names.clone();
 
     let Plan {
         input,
@@ -281,6 +304,7 @@ pub fn fix_with(
         rounds,
         mut removed,
         mut left,
+        holders,
         defers_checks,
     } = run_rounds(files, options, policy, &names, target.dry_run, observer)?;
     let committed = if defers_checks {
@@ -323,6 +347,7 @@ pub fn fix_with(
         return Err(FixError::BackupExists(taken.clone()));
     }
     describe_removals(&mut removed, files, target.annotate)?;
+    let kept = kept_another_row(&input, &holders, &removed, &left, &order, policy);
     // Without a last round, the verify supplies it; the last round reads the input without the commits added.
     let mut output = last.unwrap_or_default();
     output.findings.retain(|f| {
@@ -336,6 +361,7 @@ pub fn fix_with(
         removed,
         committed,
         left,
+        kept,
         files: Vec::new(),
         report: folder,
         target: target.clone(),
@@ -418,8 +444,44 @@ struct Plan {
     rounds: usize,
     removed: Vec<Removal>,
     left: Vec<Left>,
+    /// Every round's duplicates' rows, by key: rows before a key enabled without validation show only once the rows
+    /// before them go.
+    holders: Holders,
     /// Whether an enabled constraint is checked only at commit.
     defers_checks: bool,
+}
+
+/// A duplicated key: its table, constraint, columns and value.
+type KeyId = (String, Option<String>, Vec<String>, Vec<Option<String>>);
+
+type Holders = BTreeMap<KeyId, BTreeSet<Location>>;
+
+fn key_of(finding: &Finding) -> KeyId {
+    (
+        finding.table.clone(),
+        finding.constraint.clone(),
+        finding.columns.clone(),
+        finding.key.clone(),
+    )
+}
+
+/// Adds the rows a round's duplicates name to `holders`.
+fn note_holders(holders: &mut Holders, report: &check::Report) {
+    for finding in report
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DuplicateKey)
+    {
+        let own = finding
+            .file
+            .clone()
+            .zip(finding.line)
+            .map(|(file, line)| Location { file, line });
+        holders
+            .entry(key_of(finding))
+            .or_default()
+            .extend(own.into_iter().chain(finding.first.clone()));
+    }
 }
 
 /// Checks the input, removes what the findings call for, and checks again without it, until a round removes nothing.
@@ -434,6 +496,7 @@ fn run_rounds(
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
     let mut removed = Vec::new();
     let mut first_report = None;
+    let mut holders = Holders::new();
     let mut rounds = 0;
     observer.stage("check 1");
     let schema = check::schema(files, options, observer)?;
@@ -443,6 +506,7 @@ fn run_rounds(
         }
         let nulls = nulled_values(&removed, names);
         let report = check::run_without(files, options, &schema, &cuts, &nulls, observer)?;
+        note_holders(&mut holders, &report);
         let scans = scans(&report, files, options, names, policy, &cuts)?;
         let crowded: BTreeSet<Row> = scans
             .iter()
@@ -480,28 +544,7 @@ fn run_rounds(
                 changed = true;
                 let span = extend_to_line_end(&file.path, cut.span)?;
                 insert_cut(file_cuts, span);
-                // A statement going whole takes the rows an earlier round cut from it, reasons and all.
-                let mut reasons = Vec::new();
-                removed.retain(|r: &Removal| {
-                    let inside =
-                        r.file == name && span.start <= r.span.start && r.span.end <= span.end;
-                    if inside {
-                        reasons.extend(r.reasons.iter().cloned());
-                    }
-                    !inside
-                });
-                reasons.extend(cut.reasons);
-                removed.push(Removal {
-                    file: name,
-                    line: 0,
-                    span,
-                    clause: cut.clause,
-                    reasons,
-                    round: rounds + 1,
-                    text: Vec::new(),
-                    replacement: Vec::new(),
-                    nulled: Vec::new(),
-                });
+                cut_out(&mut removed, name, span, cut, rounds + 1);
             }
         }
         if !changed {
@@ -528,6 +571,7 @@ fn run_rounds(
         rounds,
         removed,
         left,
+        holders,
         defers_checks: schema.catalog().defers_checks(),
     })
 }
@@ -571,6 +615,35 @@ fn not_on(mut left: Vec<Left>, cut: &Targets, names: &[String]) -> Vec<Left> {
     left
 }
 
+/// Records a cut. A statement going whole takes the rows an earlier round cut from it, reasons and all.
+fn cut_out(removed: &mut Vec<Removal>, name: String, span: Span, cut: Cut, round: usize) {
+    let mut reasons = Vec::new();
+    let mut rows = cut.rows;
+    removed.retain(|r: &Removal| {
+        let inside = r.file == name && span.start <= r.span.start && r.span.end <= span.end;
+        if inside {
+            reasons.extend(r.reasons.iter().cloned());
+            rows.extend(&r.rows);
+        }
+        !inside
+    });
+    reasons.extend(cut.reasons);
+    rows.sort_unstable();
+    rows.dedup();
+    removed.push(Removal {
+        file: name,
+        line: 0,
+        span,
+        clause: cut.clause,
+        rows,
+        reasons,
+        round,
+        text: Vec::new(),
+        replacement: Vec::new(),
+        nulled: Vec::new(),
+    });
+}
+
 /// Records a row kept with values set to NULL, and whether that sets any value the changes so far didn't; a row
 /// changed in an earlier round, for another foreign key, takes the new values into the same change.
 fn change(removed: &mut Vec<Removal>, file: String, cut: Cut, round: usize) -> bool {
@@ -593,6 +666,7 @@ fn change(removed: &mut Vec<Removal>, file: String, cut: Cut, round: usize) -> b
         line: 0,
         span: cut.span,
         clause: cut.clause,
+        rows: cut.rows,
         reasons: cut.reasons,
         round,
         text: Vec::new(),
@@ -1228,6 +1302,8 @@ fn all_but_last<'a>(
 struct Cut {
     span: Span,
     clause: bool,
+    /// The lines of the rows it takes or changes.
+    rows: Vec<u64>,
     reasons: Vec<Reason>,
     /// Each column set to NULL, with its value's place; empty for a cut.
     nulled: Vec<(String, Span)>,
@@ -1308,6 +1384,7 @@ fn locate(
             cuts.push(Cut {
                 span: *statement,
                 clause: false,
+                rows: rows.iter().map(|r| r.line).collect(),
                 reasons: actions.into_iter().flat_map(|a| a.reasons).collect(),
                 nulled: Vec::new(),
             });
@@ -1347,6 +1424,7 @@ fn action(
     Cut {
         span: row.span,
         clause: row.span != statement,
+        rows: vec![row.line],
         reasons,
         nulled,
     }
@@ -1789,7 +1867,8 @@ fn set_to_null(removal: &Removal) -> Option<String> {
     Some(format!("{} set to NULL", columns.join(", ")))
 }
 
-/// `Fixed      12 rows in 2 rounds (missing parent 9, duplicate key 2, NULL in NOT NULL 1); 1 left for review`.
+/// `Fixed      12 rows in 2 rounds (missing parent 9, duplicate key 2, NULL in NOT NULL 1); 1 key kept another row; 1
+/// left for review`.
 pub fn summary(report: &FixReport) -> String {
     let mut counts: BTreeMap<FindingKind, usize> = BTreeMap::new();
     for reason in report.removed.iter().flat_map(|r| &r.reasons) {
@@ -1816,6 +1895,11 @@ pub fn summary(report: &FixReport) -> String {
     } else {
         format!("; {} left for review", report.left.len())
     };
+    let kept = match report.kept.len() {
+        0 => String::new(),
+        1 => "; 1 key kept another row".to_owned(),
+        n => format!("; {n} keys kept another row"),
+    };
     let rounds = if report.rounds == 1 {
         "round"
     } else {
@@ -1831,9 +1915,129 @@ pub fn summary(report: &FixReport) -> String {
         return format!("{fixed} {committed}{left}");
     }
     format!(
-        "{fixed} {} rows in {} {rounds}{kinds}{changed}{committed}{left}",
+        "{fixed} {} rows in {} {rounds}{kinds}{changed}{committed}{kept}{left}",
         report.removed.len(),
         report.rounds
+    )
+}
+
+/// The duplicated keys of the input whose row the policy keeps went for another reason, other than keys left for
+/// review. The policy's row is the input's; the rows the key keeps instead may be ones later rounds found, in
+/// `holders`. `names` are the inputs in run order.
+fn kept_another_row(
+    input: &check::Report,
+    holders: &Holders,
+    removed: &[Removal],
+    left: &[Left],
+    names: &[String],
+    policy: Policy,
+) -> Vec<Kept> {
+    if policy.on_duplicate == OnDuplicate::Keep {
+        return Vec::new();
+    }
+    let changes: BTreeMap<(&str, u64), &Removal> = removed
+        .iter()
+        .flat_map(|r| r.rows.iter().map(move |line| ((r.file.as_str(), *line), r)))
+        .collect();
+    // A row leaves a key when it goes, or when a value of the key is set to NULL.
+    let left_key = |at: &Location, columns: &[String]| {
+        changes
+            .get(&(at.file.as_str(), at.line))
+            .copied()
+            .filter(|r| {
+                r.nulled.is_empty() || r.nulled.iter().any(|(column, _)| columns.contains(column))
+            })
+    };
+    let reviewed: BTreeSet<KeyId> = left
+        .iter()
+        .filter(|l| l.finding.kind == FindingKind::DuplicateKey)
+        .map(|l| key_of(&l.finding))
+        .collect();
+    let order = |at: &Location| (names.iter().position(|n| *n == at.file), at.line);
+    // By key, in the input's order: a duplicate naming it, and the rows the input's duplicates name.
+    let mut keys: Vec<(KeyId, &Finding, Vec<Location>)> = Vec::new();
+    let mut index: BTreeMap<KeyId, usize> = BTreeMap::new();
+    for finding in input
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DuplicateKey)
+    {
+        let key = key_of(finding);
+        let at = if let Some(&at) = index.get(&key) {
+            at
+        } else {
+            index.insert(key.clone(), keys.len());
+            keys.push((key, finding, Vec::new()));
+            keys.len() - 1
+        };
+        if let Some((_, _, rows)) = keys.get_mut(at) {
+            rows.extend(finding.first.clone());
+            rows.extend(
+                finding
+                    .file
+                    .clone()
+                    .zip(finding.line)
+                    .map(|(file, line)| Location { file, line }),
+            );
+        }
+    }
+    let first = policy.on_duplicate == OnDuplicate::KeepFirst;
+    let mut kept = Vec::new();
+    for (key, finding, mut rows) in keys {
+        if reviewed.contains(&key) {
+            continue;
+        }
+        rows.sort_by_key(|at| order(at));
+        let policy_row = if first { rows.first() } else { rows.last() };
+        let Some(policy_row) = policy_row else {
+            continue;
+        };
+        let Some(went) = left_key(policy_row, &key.2) else {
+            continue;
+        };
+        let mut all: Vec<&Location> = holders.get(&key).into_iter().flatten().collect();
+        all.sort_by_key(|at| order(at));
+        let mut staying = all.into_iter().filter(|at| left_key(at, &key.2).is_none());
+        let instead = if first {
+            staying.next()
+        } else {
+            staying.next_back()
+        };
+        let mut why: Vec<String> = Vec::new();
+        for reason in &went.reasons {
+            if !why.contains(&reason.brief) {
+                why.push(reason.brief.clone());
+            }
+        }
+        kept.push(Kept {
+            key: crate::report::describe(&Finding {
+                file: None,
+                line: None,
+                first: None,
+                ..finding.clone()
+            }),
+            policy: policy_row.clone(),
+            first,
+            kept: instead.cloned(),
+            why,
+        });
+    }
+    kept
+}
+
+/// `duplicate key of T_U: ID='1': kept t.sql:6; its first row, t.sql:4, went (NULL in T.V)`.
+fn kept_text(kept: &Kept) -> String {
+    let which = if kept.first { "first" } else { "last" };
+    let at = |l: &Location| format!("{}:{}", l.file, l.line);
+    let instead = kept.kept.as_ref().map_or_else(
+        || "no row of it that a check found stays".to_owned(),
+        |l| format!("kept {}", at(l)),
+    );
+    format!(
+        "{}: {instead}; its {which} row, {}, went ({})",
+        kept.key,
+        at(&kept.policy),
+        kept.why.join(", ")
     )
 }
 
@@ -1904,6 +2108,16 @@ pub fn write_report(report: &FixReport, out: &mut dyn Write) -> io::Result<()> {
             }
         }
     }
+    if !report.kept.is_empty() {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "Kept another row (duplicates are decided among the rows that stay):"
+        )?;
+        for kept in &report.kept {
+            writeln!(out, "  {}", kept_text(kept))?;
+        }
+    }
     if !report.left.is_empty() {
         writeln!(out)?;
         writeln!(out, "Left for review:")?;
@@ -1939,8 +2153,20 @@ struct JsonReport<'a> {
     files: Vec<JsonFile<'a>>,
     removed: Vec<JsonRemoval<'a>>,
     committed: Vec<JsonCommit<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    kept_another_row: Vec<JsonKept<'a>>,
     left: Vec<JsonLeft<'a>>,
     output: JsonOutput<'a>,
+}
+#[derive(serde::Serialize)]
+struct JsonKept<'a> {
+    key: &'a str,
+    /// `first` or `last`: the row the policy keeps.
+    policy: &'static str,
+    policy_row: &'a Location,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kept: Option<&'a Location>,
+    why: &'a [String],
 }
 #[derive(serde::Serialize)]
 struct JsonCommit<'a> {
@@ -2037,6 +2263,17 @@ pub fn write_json_report(report: &FixReport, out: &mut dyn Write) -> io::Result<
             .map(|c| JsonCommit {
                 file: &c.file,
                 finding: &c.finding,
+            })
+            .collect(),
+        kept_another_row: report
+            .kept
+            .iter()
+            .map(|k| JsonKept {
+                key: &k.key,
+                policy: if k.first { "first" } else { "last" },
+                policy_row: &k.policy,
+                kept: k.kept.as_ref(),
+                why: &k.why,
             })
             .collect(),
         left: report

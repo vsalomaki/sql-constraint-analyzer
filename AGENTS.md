@@ -100,6 +100,8 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - **Duplicates are decided among the rows that stay:** keep-first keeps the first row of a key that the other
   fixes leave, keep-last the last. A duplicate waits for a later round while a row going this round could still take
   that row, itself or its parent. `fix` follows these rules; it doesn't search for the output that keeps the most rows.
+  When a key's first (or last) row goes for another reason, the summary counts the key, and the reports name the row
+  kept instead, or that none stays.
 - **Never acted on:**
   - structure errors, unverifiable keys and disabled constraints;
   - load-order findings, since the row is valid in the end state; `fix` never reorders statements;
