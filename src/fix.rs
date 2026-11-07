@@ -477,10 +477,11 @@ fn note_holders(holders: &mut Holders, report: &check::Report) {
             .clone()
             .zip(finding.line)
             .map(|(file, line)| Location { file, line });
-        holders
-            .entry(key_of(finding))
-            .or_default()
-            .extend(own.into_iter().chain(finding.first.clone()));
+        holders.entry(key_of(finding)).or_default().extend(
+            own.into_iter()
+                .chain(finding.first.clone())
+                .chain(finding.unchecked.iter().cloned()),
+        );
     }
 }
 
@@ -1154,8 +1155,19 @@ fn hold_back<'a>(
         f.kind != FindingKind::DuplicateKey || first.is_none_or(|first| !doomed.contains(&first))
     });
     let mut taken = going.len();
-    for (last, rows) in lasts {
-        if !doomed.contains(&last) {
+    let free: Vec<_> = lasts
+        .into_iter()
+        .filter(|(last, _)| !doomed.contains(last))
+        .collect();
+    // A keep-last key's rows its key never checked go a round at a time, once each comes first: a key whose last row
+    // is one of them waits for it.
+    let later: BTreeSet<Row> = free
+        .iter()
+        .flat_map(|(_, rows)| rows.iter().flat_map(|(_, f)| &f.unchecked))
+        .filter_map(|l| row_of(&l.file, l.line))
+        .collect();
+    for (last, rows) in free {
+        if !later.contains(&last) {
             taken += 1;
             going.extend(rows);
         }
@@ -1260,6 +1272,11 @@ fn all_but_last<'a>(
 ) -> Result<(Row, Vec<(Row, &'a Finding)>), &'static str> {
     if !policy.fix_assumed && group.iter().any(|f| f.assumed) {
         return Err("another row of its key rests on a date written as text");
+    }
+    if group.iter().any(|f| f.unchecked_more) {
+        return Err(
+            "more rows that its key never checked hold the key than the fix keeps track of",
+        );
     }
     let mut rows: Vec<(Row, &Finding)> = Vec::new();
     for finding in group {

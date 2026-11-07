@@ -389,7 +389,8 @@ fn location(finding: &Finding) -> Option<Location> {
     })
 }
 
-/// The rows of each duplicated key, its first row among them, by constraint and key value.
+/// The rows of each duplicated key, its first row and the rows the key never checked among them, by constraint and
+/// key value.
 fn holders(findings: &[Finding]) -> BTreeMap<(String, Vec<Option<String>>), BTreeSet<Location>> {
     let mut keys: BTreeMap<_, BTreeSet<Location>> = BTreeMap::new();
     for finding in findings
@@ -405,15 +406,17 @@ fn holders(findings: &[Finding]) -> BTreeMap<(String, Vec<Option<String>>), BTre
         };
         keys.entry((constraint, finding.key.clone()))
             .or_default()
-            .extend([first, row]);
+            .extend(
+                [first, row]
+                    .into_iter()
+                    .chain(finding.unchecked.iter().cloned()),
+            );
     }
     keys
 }
 
 /// The duplicates Oracle accepts, by constraint and row: a row it rejects at its insert for another reason, or as a
-/// cascade row, never holds its key, so the key's first row in load order that Oracle accepts holds it instead. It
-/// knows only the rows findings name, so a bad first row must not share its key with rows that precede a key enabled
-/// between rows, which hold the key with no finding.
+/// cascade row, never holds its key, so the key's first row in load order that Oracle accepts holds it instead.
 fn accepted_duplicates(
     findings: &[Finding],
     cascades: &[Cascade],
@@ -1083,6 +1086,8 @@ fn found(kind: FindingKind, constraint: Option<&str>, line: u64, first: Option<u
             file: "f.sql".to_owned(),
             line,
         }),
+        unchecked: Vec::new(),
+        unchecked_more: false,
         count: None,
         assumed: false,
     }

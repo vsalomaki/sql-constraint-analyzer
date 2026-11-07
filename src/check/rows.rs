@@ -89,15 +89,20 @@ impl Hasher for Fx {
     }
 }
 
-/// Where a key was first seen, whether its value rests on an assumption, and whether a child row's foreign key found
-/// it. Kept to 16 bytes, as the key maps hold one per key.
+/// Where a key was first seen, whether its value rests on an assumption, whether a child row's foreign key found it,
+/// and whether more rows hold it unchecked than the check keeps. Kept to 16 bytes, as the key maps hold one per key.
 #[derive(Debug, Clone, Copy)]
 struct First {
     line: u64,
     file: u32,
     assumed: bool,
     referenced: bool,
+    unchecked_more: bool,
 }
+
+/// The most rows a key value keeps that its key holds without having checked them, and the most in all.
+const UNCHECKED_PER_VALUE: usize = 64;
+const UNCHECKED_ROWS: usize = 1_000_000;
 
 impl First {
     fn new(at: At, assumed: bool) -> Self {
@@ -106,6 +111,7 @@ impl First {
             file: u32::try_from(at.file).unwrap_or(u32::MAX),
             assumed,
             referenced: false,
+            unchecked_more: false,
         }
     }
 }
@@ -158,6 +164,12 @@ pub(super) struct Checker<'a> {
     /// File names by position, as findings show them.
     files: &'a [String],
     keys: FxMap<(TableId, usize), KeyMap>,
+    /// By key and key value: the rows after the first that the key holds without having checked them, since they came
+    /// before it was enabled without validating, until a duplicate it judges takes them. At most
+    /// `UNCHECKED_PER_VALUE` a value and `UNCHECKED_ROWS` in all; `unchecked_rows` counts every one kept, here or in a
+    /// finding.
+    unchecked: FxMap<(TableId, usize, u128), Vec<At>>,
+    unchecked_rows: usize,
     /// What makes a key map less than certain, by key; lookups against it inherit the doubt.
     doubt: FxMap<(TableId, usize), Doubt>,
     rows: FxMap<TableId, u64>,
@@ -186,6 +198,8 @@ impl<'a> Checker<'a> {
             load_order,
             files,
             keys: FxMap::default(),
+            unchecked: FxMap::default(),
+            unchecked_rows: 0,
             doubt: FxMap::default(),
             rows: FxMap::default(),
             removed: FxSet::default(),
@@ -229,6 +243,8 @@ impl<'a> Checker<'a> {
             line: None,
             key: Vec::new(),
             first: None,
+            unchecked: Vec::new(),
+            unchecked_more: false,
             count: None,
             assumed: false,
         }
@@ -419,16 +435,36 @@ impl<'a> Checker<'a> {
             if assumed {
                 self.doubt.entry((id, position)).or_default().assumed = true;
             }
+            let judged = Self::applies(constraint, at);
             let first = match self.keys.entry((id, position)).or_default().entry(hash) {
-                Entry::Occupied(first) => *first.get(),
+                Entry::Occupied(mut first) => {
+                    // A row before the key was enabled without validation holds it, and the database checks a
+                    // later row against it too.
+                    if !reference && !judged && constraint.state.enabled {
+                        let rows = self.unchecked.entry((id, position, hash)).or_default();
+                        if rows.len() < UNCHECKED_PER_VALUE && self.unchecked_rows < UNCHECKED_ROWS
+                        {
+                            rows.push(at);
+                            self.unchecked_rows += 1;
+                        } else {
+                            first.get_mut().unchecked_more = true;
+                        }
+                    }
+                    *first.get()
+                }
                 Entry::Vacant(slot) => {
                     slot.insert(First::new(at, assumed));
                     continue;
                 }
             };
-            if reference || !Self::applies(constraint, at) {
+            if reference || !judged {
                 continue;
             }
+            // The first duplicate the key judges takes them, so each is named once.
+            let unchecked = self
+                .unchecked
+                .remove(&(id, position, hash))
+                .unwrap_or_default();
             let mut finding = self.finding(FindingKind::DuplicateKey, table, constraint, columns);
             finding.file = Some(self.file(at.file));
             finding.line = Some(row.line);
@@ -438,6 +474,14 @@ impl<'a> Checker<'a> {
                 line: first.line,
             });
             finding.assumed = assumed || first.assumed;
+            finding.unchecked = unchecked
+                .iter()
+                .map(|at| Location {
+                    file: self.file(at.file),
+                    line: at.line,
+                })
+                .collect();
+            finding.unchecked_more = first.unchecked_more;
             self.findings.push(finding);
         }
     }

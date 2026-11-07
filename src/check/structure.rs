@@ -127,6 +127,8 @@ impl StructureError {
             line: Some(row.line),
             key: Vec::new(),
             first: None,
+            unchecked: Vec::new(),
+            unchecked_more: false,
             count: None,
             assumed: false,
         }

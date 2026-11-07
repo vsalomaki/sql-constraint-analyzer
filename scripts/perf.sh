@@ -25,7 +25,7 @@ trap 'rm -rf "$TMP" "$OUT"' EXIT
 
 # The export for `rows`, `layout` and `cascades` (true or false), generated unless gen-out already holds one with
 # those options and a manifest that lists what the fix removes. A cascade run has a manager chain of CHAIN and the
-# projects' key enabled between their rows, which its findings show.
+# projects' key enabled between their rows, whose duplicate names the row the key never checked.
 CHAIN=3
 export_for() {
     local dir=$1 rows=$2 layout=$3 cascades=$4 chain=0
@@ -34,7 +34,7 @@ export_for() {
         --argjson cascades "$cascades" --argjson chain "$chain" \
         '.options.rows == $rows and .options.layout == $layout and .options["omit-commit"] == []
             and (.options.cascades // false) == $cascades and (.options["manager-chain"] // 0) == $chain
-            and has("fixes") and (($cascades | not) or any(.findings[]; .constraint == "APP.PROJECTS_NAME_UK"))' \
+            and has("fixes") and (($cascades | not) or any(.findings[]; has("unchecked")))' \
         "$dir/expected.json" > /dev/null; then
         return
     fi

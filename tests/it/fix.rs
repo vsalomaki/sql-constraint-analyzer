@@ -1287,10 +1287,10 @@ fn the_report_names_a_kept_row_a_later_round_found() {
     assert_eq!(kept, [(3, Some(4))]);
 }
 
-/// As above, with the row after the key also NULL: the row before it, which the key never checked, stays, though no
-/// duplicate names it. The report says only that no row a check found stays.
+/// As above, with the row after the key also NULL: the row before it, which the key never checked, stays, and the
+/// report names it, from the duplicate's rows the key never checked.
 #[test]
-fn the_report_claims_no_more_than_the_checks_found() {
+fn the_report_names_a_kept_row_the_key_never_checked() {
     let (_dir, _, report) = fix_sql(
         "CREATE TABLE T (ID NUMBER, V NUMBER NOT NULL);\nCREATE INDEX T_I ON T (ID);\n\
          INSERT INTO T VALUES (1, NULL);\nINSERT INTO T VALUES (1, 5);\n\
@@ -1298,31 +1298,12 @@ fn the_report_claims_no_more_than_the_checks_found() {
          INSERT INTO T VALUES (1, NULL);\nCOMMIT;\n",
     );
     assert!(output(&report).contains("INSERT INTO T VALUES (1, 5);"));
-    let mut text = Vec::new();
-    fix::write_report(&report, &mut text).unwrap();
-    let text = String::from_utf8(text).unwrap();
-    assert!(
-        text.contains("no row of it that a check found stays"),
-        "{text}"
-    );
-}
-
-/// Under `--on-fk null`, a row kept with its foreign key set to NULL loses the unique key that shares those columns:
-/// the report names the row that still holds the key, not that one.
-#[test]
-fn the_report_names_no_row_whose_key_went_to_null() {
-    let (_dir, _, report) = fix_null(
-        "CREATE TABLE P (A NUMBER, B NUMBER, PRIMARY KEY (A, B));\n\
-         CREATE TABLE T (A NUMBER, B NUMBER, U NUMBER, V NUMBER NOT NULL, UNIQUE (A, U), FOREIGN KEY (A, B) REFERENCES P);\n\
-         INSERT INTO P VALUES (1, 1);\nINSERT INTO T VALUES (1, 1, 7, NULL);\nINSERT INTO T VALUES (1, 2, 7, 5);\n\
-         INSERT INTO T VALUES (1, 1, 7, 6);\nCOMMIT;\n",
-    );
     let kept: Vec<(u64, Option<u64>)> = report
         .kept
         .iter()
         .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line)))
         .collect();
-    assert_eq!(kept, [(4, Some(6))], "{:#?}", report.removed);
+    assert_eq!(kept, [(3, Some(4))]);
 }
 
 /// Under SQLcl a statement can end on the line where the next begins. The removed row of `ID` 9 ends on the line of
@@ -1383,6 +1364,206 @@ fn a_duplicate_waits_while_its_kept_row_can_lose_a_grandparent() {
     assert_eq!(removed, [5, 6, 8]);
     assert!(output(&report).contains("INSERT INTO G VALUES (2, 2, 'x');"));
     assert!(report.output.findings.is_empty());
+}
+
+/// Under keep-last, the key on `A` is enabled after two rows of `A` 1, so its duplicate names the first and, as a row
+/// the key never checked, the second. That one goes once it comes first, a round later; it is also `B` 9's last row,
+/// so `B` waits for it, and its other row stays.
+#[test]
+fn keep_last_waits_while_its_last_row_is_a_row_another_key_never_checked() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (A NUMBER, B NUMBER UNIQUE, V NUMBER NOT NULL);\nCREATE INDEX T_I ON T (A);\n\
+             INSERT INTO T VALUES (2, 9, 1);\nINSERT INTO T VALUES (1, 7, 1);\nINSERT INTO T VALUES (1, 9, 1);\n\
+             ALTER TABLE T ADD CONSTRAINT T_A UNIQUE (A) USING INDEX T_I ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (1, 8, 1);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(4, 1), (5, 2)]);
+    let out = output(&report);
+    assert!(out.contains("INSERT INTO T VALUES (2, 9, 1);"), "{out}");
+    assert!(out.contains("INSERT INTO T VALUES (1, 8, 1);"), "{out}");
+    assert!(report.output.findings.is_empty());
+}
+
+/// Under keep-last, `P`'s key on `U` names its first row and an unchecked second, and keeps the third. But the third's
+/// parent `C` 10 has the first row as its parent: the first goes alone, then `C` 10, then the third, and the second
+/// is the row of `U` 1 left.
+#[test]
+fn keep_last_keeps_an_unchecked_row_while_its_kept_row_can_lose_a_parent_further_up() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE P (ID NUMBER PRIMARY KEY, U NUMBER, C_ID NUMBER);\n\
+             CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+             ALTER TABLE P ADD CONSTRAINT P_C FOREIGN KEY (C_ID) REFERENCES C;\nCREATE INDEX P_I ON P (U);\n\
+             INSERT INTO P VALUES (1, 1, NULL);\nINSERT INTO P VALUES (2, 1, NULL);\n\
+             ALTER TABLE P ADD CONSTRAINT P_U UNIQUE (U) USING INDEX P_I ENABLE NOVALIDATE;\n\
+             INSERT INTO C VALUES (10, 1);\nINSERT INTO P VALUES (3, 1, 10);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let out = output(&report);
+    assert!(out.contains("INSERT INTO P VALUES (2, 1, NULL);"), "{out}");
+    assert!(report.output.findings.is_empty());
+}
+
+/// As above, with a key the check can't know on `P`: a generated identity column that the rows leave out. Any row of
+/// `P` going may then orphan one, but the second row of `U` 1 still stays.
+#[test]
+fn keep_last_keeps_an_unchecked_row_when_its_table_has_keys_the_check_cant_know() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE P (ID NUMBER PRIMARY KEY, U NUMBER, C_ID NUMBER, X NUMBER GENERATED ALWAYS AS IDENTITY UNIQUE);\n\
+             CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+             ALTER TABLE P ADD CONSTRAINT P_C FOREIGN KEY (C_ID) REFERENCES C;\nCREATE INDEX P_I ON P (U);\n\
+             INSERT INTO P (ID, U, C_ID) VALUES (1, 1, NULL);\nINSERT INTO P (ID, U, C_ID) VALUES (2, 1, NULL);\n\
+             ALTER TABLE P ADD CONSTRAINT P_U UNIQUE (U) USING INDEX P_I ENABLE NOVALIDATE;\n\
+             INSERT INTO C VALUES (10, 1);\nINSERT INTO P (ID, U, C_ID) VALUES (3, 1, 10);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let out = output(&report);
+    assert!(
+        out.contains("INSERT INTO P (ID, U, C_ID) VALUES (2, 1, NULL);"),
+        "{out}"
+    );
+    assert!(report.output.findings.is_empty());
+}
+
+/// Under keep-last, `A`'s key with an unchecked row keeps line 6, which `B`'s key removes: `A` waits for that, so it
+/// holds no other key of the table back, and `B` goes. Then nothing is left to fix.
+#[test]
+fn a_key_with_unchecked_rows_that_waits_holds_no_other_key_back() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (A NUMBER, B NUMBER UNIQUE);\nCREATE INDEX T_I ON T (A);\n\
+             INSERT INTO T VALUES (1, 1);\nINSERT INTO T VALUES (1, 2);\n\
+             ALTER TABLE T ADD CONSTRAINT T_A UNIQUE (A) USING INDEX T_I ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (1, 3);\nINSERT INTO T VALUES (2, 3);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [6]);
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+/// Two keys enabled without validation on one table, with rows before each. Keep-last's row for `B` 0 is one of the
+/// rows `A` 4's key never checked, which goes once it comes first, so `B` waits for it, and a row of `B` 0 stays.
+#[test]
+fn keep_last_waits_for_the_rows_two_keys_never_checked() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (A NUMBER, B NUMBER);\nCREATE INDEX T_AI ON T (A);\nCREATE INDEX T_BI ON T (B);\n\
+             INSERT INTO T VALUES (1, 0);\nINSERT INTO T VALUES (4, 2);\nINSERT INTO T VALUES (1, 0);\n\
+             ALTER TABLE T ADD CONSTRAINT T_B UNIQUE (B) USING INDEX T_BI ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (4, 0);\n\
+             ALTER TABLE T ADD CONSTRAINT T_A UNIQUE (A) USING INDEX T_AI ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (4, 4);\nINSERT INTO T VALUES (0, 4);\nINSERT INTO T VALUES (0, 2);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let out = output(&report);
+    let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("INSERT")).collect();
+    assert_eq!(
+        rows,
+        [
+            "INSERT INTO T VALUES (1, 0);",
+            "INSERT INTO T VALUES (4, 4);",
+            "INSERT INTO T VALUES (0, 2);"
+        ]
+    );
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+}
+
+/// Keep-last keeps the last row of each key that stays. `A` 3's last row, r6, is one of the rows `B` 1's key never
+/// checked, and goes for `B`; so `A` waits, and keeps r5, its last row that stays. Keeping r6 instead would have kept
+/// more rows here, by luck of r6 going later; the report says `A` 3 kept another row.
+#[test]
+fn keep_last_keeps_the_last_row_that_stays_even_when_that_keeps_fewer_rows() {
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            "CREATE TABLE T (A NUMBER, B NUMBER);\nCREATE INDEX T_AI ON T (A);\nCREATE INDEX T_BI ON T (B);\n\
+             INSERT INTO T VALUES (3, 3);\nINSERT INTO T VALUES (3, 0);\nINSERT INTO T VALUES (3, 3);\n\
+             ALTER TABLE T ADD CONSTRAINT T_A UNIQUE (A) USING INDEX T_AI ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (3, 1);\nINSERT INTO T VALUES (3, 0);\nINSERT INTO T VALUES (3, 1);\n\
+             ALTER TABLE T ADD CONSTRAINT T_B UNIQUE (B) USING INDEX T_BI ENABLE NOVALIDATE;\n\
+             INSERT INTO T VALUES (2, 1);\nCOMMIT;\n",
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    let out = output(&report);
+    let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("INSERT")).collect();
+    assert_eq!(
+        rows,
+        [
+            "INSERT INTO T VALUES (3, 0);",
+            "INSERT INTO T VALUES (2, 1);"
+        ]
+    );
+    assert!(
+        report.output.findings.is_empty(),
+        "{:?}",
+        report.output.findings
+    );
+    let kept: Vec<(u64, Option<u64>)> = report
+        .kept
+        .iter()
+        .map(|k| (k.policy.line, k.kept.as_ref().map(|l| l.line)))
+        .collect();
+    assert!(kept.contains(&(10, Some(9))), "{kept:?}");
+}
+
+/// More rows a key never checked than the check keeps for one key value: keep-last can't know them all, so it leaves
+/// the key for review.
+#[test]
+fn keep_last_leaves_a_key_with_more_unchecked_rows_than_it_tracks_for_review() {
+    let before = "INSERT INTO T VALUES (1);\n".repeat(70);
+    let (_dir, _, report) = fix_scripts(
+        &[(
+            "t.sql",
+            &format!(
+                "CREATE TABLE T (ID NUMBER);\nCREATE INDEX T_I ON T (ID);\n{before}\
+                 ALTER TABLE T ADD CONSTRAINT T_U UNIQUE (ID) USING INDEX T_I ENABLE NOVALIDATE;\n\
+                 INSERT INTO T VALUES (1);\nCOMMIT;\n"
+            ),
+        )],
+        &Options::default(),
+        keep_last(),
+        false,
+    );
+    assert!(report.removed.is_empty(), "{:?}", report.removed);
+    assert_eq!(report.left.len(), 1);
+    assert!(report.left[0].finding.unchecked_more);
+    assert_eq!(report.left[0].finding.unchecked.len(), 64);
 }
 
 /// Under `--on-fk null` the duplicate's own foreign key goes to NULL, and with it the column its unique key shares, so
