@@ -27,6 +27,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect, and only what `sqlca fix` leaves in its output; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
+| `make sample-fixtures` | Rewrites `tests/fixtures/samples/oracle/` from Oracle's sample schemas at a pinned commit |
 | `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/`, and a smaller one with cascade rows (each reused while its options match), times `sqlca check` (release) on each in both modes and `sqlca fix --out` on each (into a temporary folder in `gen-out/`), and fails unless the findings equal the manifest and fix removes exactly the rows the manifest lists, keeping every other row byte for byte and every other finding; prints wall time, MB/s, peak RSS (Linux only) and fix's time against the check's |
 
 Run `make lint` and `make test` before calling a change done.
@@ -171,8 +172,9 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   a module there, not a file in `tests/`.
 - Fixtures under `tests/fixtures/` are byte-exact exports (CRLF, trailing spaces, other encodings);
   `.gitattributes` and `.editorconfig` leave their bytes alone.
-- **Only synthetic data is committed:** `sqlca-gen` output or Oracle exports of synthetic data. A real export is run
-  locally and never committed; what it teaches becomes a generator option and a synthetic fixture.
+- **Only synthetic data is committed:** `sqlca-gen` output, Oracle exports of synthetic data, or third-party sample
+  data that is fictional and permissively licensed, committed with its licence. A real export is run locally and
+  never committed; what it teaches becomes a generator option and a synthetic fixture.
 - Large generated exports (GB scale) go to `gen-out/`, which is git-ignored.
 - `tests/fixtures/sqlcl/` (`make sqlcl-fixtures`, needs Docker) is a generated export loaded into Oracle Free and
   exported again by SQLcl through `DBMS_METADATA`, in SQL Developer's separate-files layout with `order.txt` and
@@ -180,6 +182,12 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   for rows with none after them. Its `DBMS_METADATA` DDL ends each table with an `INSERT … SELECT … FROM …@ KU$`
   statement, as this Oracle version writes it; the analyzer skips it as an `INSERT … SELECT`. Rows that got
   `SYSTIMESTAMP` change on every regeneration, so review the diff.
+- `tests/fixtures/samples/oracle/` (`make sample-fixtures`, needs network) holds Oracle's HR and CO sample schemas
+  (oracle-samples/db-sample-schemas, MIT, `LICENSE.txt` beside them) at a pinned commit: DDL and INSERT shapes we
+  didn't write. Oracle wraps each table's INSERTs in a PL/SQL block, which the analyzer doesn't follow, so the script
+  strips the wrapper and changes nothing else but product 4's JSON, which it shortens to what plain SQL accepts
+  (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO's identity
+  columns give it six `not followed` catalog entries and one key that can't be checked.
 - Prove a fix by reverting it and watching a test fail.
 
 ### Ground truth
