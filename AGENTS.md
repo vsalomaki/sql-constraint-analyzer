@@ -102,6 +102,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   that row, itself or its parent. `fix` follows these rules; it doesn't search for the output that keeps the most rows.
   When a key's first (or last) row goes for another reason, the summary counts the key, and the reports name the row
   kept instead, or that none stays.
+- **Rows a key never checked:** a unique key enabled without validation holds the rows before it unchecked. The key's
+  first duplicate it judges of a value names them (up to 64 a value and a million in all; past that it says there
+  are more). Keep-last removes them a round at a time, as each comes first, and a key whose last row is one of them
+  waits for it; a key with more than the check kept is left for review.
 - **Never acted on:**
   - structure errors, unverifiable keys and disabled constraints;
   - load-order findings, since the row is valid in the end state; `fix` never reorders statements;

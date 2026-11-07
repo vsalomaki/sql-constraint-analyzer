@@ -260,6 +260,7 @@ struct Plant {
     /// Fill `key` from the row's values of `columns` when it is written.
     key_from_row: bool,
     first: Option<Location>,
+    unchecked: Vec<Location>,
 }
 
 impl Plant {
@@ -272,6 +273,7 @@ impl Plant {
             key: Vec::new(),
             key_from_row: false,
             first: None,
+            unchecked: Vec::new(),
         }
     }
 
@@ -735,6 +737,8 @@ impl<'o> Writer<'o> {
                 line: Some(at.line),
                 key,
                 first: plant.first,
+                unchecked: plant.unchecked,
+                unchecked_more: false,
                 count: None,
                 assumed: false,
             });
@@ -837,6 +841,8 @@ impl<'o> Writer<'o> {
                 line: Some(open.at.line),
                 key: Vec::new(),
                 first: None,
+                unchecked: Vec::new(),
+                unchecked_more: false,
                 count: Some(open.rows),
                 assumed: false,
             });
@@ -851,6 +857,8 @@ impl<'o> Writer<'o> {
                 line: None,
                 key: Vec::new(),
                 first: None,
+                unchecked: Vec::new(),
+                unchecked_more: false,
                 count: Some(count),
                 assumed: false,
             });
@@ -1580,8 +1588,8 @@ fn projects(w: &mut Writer<'_>, s: &Sizes) -> io::Result<()> {
 }
 
 /// Two projects with one name, then the key on the name enabled without checking the rows already there, then a third
-/// project with that name: only the third is a duplicate, of the first. Once `--on-duplicate keep-last` removes the
-/// first, the second is the third's first. After the data, or where the key has to wait for a deferred foreign key's
+/// project with that name: only the third is a duplicate, of the first, with the second a row the key never checked.
+/// Once `--on-duplicate keep-last` removes the first, the second is the third's first. After the data, or where the key has to wait for a deferred foreign key's
 /// parents, the key judges none of them.
 fn named_before_the_key(w: &mut Writer<'_>) -> io::Result<()> {
     let row = |k: u64| {
@@ -1595,7 +1603,7 @@ fn named_before_the_key(w: &mut Writer<'_>) -> io::Result<()> {
     let k = w.next_extra();
     let first = w.extra(&row(k), &[], Vec::new())?;
     let k = w.next_extra();
-    w.extra(&row(k), &[], Vec::new())?;
+    let second = w.extra(&row(k), &[], Vec::new())?;
     let judged = !w.after_data() && !w.commit_rolls_back(false);
     if judged {
         w.key_between_rows()?;
@@ -1603,11 +1611,14 @@ fn named_before_the_key(w: &mut Writer<'_>) -> io::Result<()> {
         w.key_pending = true;
     }
     let plants = if judged {
-        vec![Plant::duplicate(
-            schema::PROJECTS_NAME_UK.qualified(w.rules),
-            &["NAME"],
-            first.as_ref(),
-        )]
+        vec![Plant {
+            unchecked: second.into_iter().collect(),
+            ..Plant::duplicate(
+                schema::PROJECTS_NAME_UK.qualified(w.rules),
+                &["NAME"],
+                first.as_ref(),
+            )
+        }]
     } else {
         Vec::new()
     };

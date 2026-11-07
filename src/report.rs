@@ -202,7 +202,17 @@ pub fn describe(finding: &Finding) -> String {
                 .as_ref()
                 .map(|f| format!(", first at {}:{}", f.file, f.line))
                 .unwrap_or_default();
-            format!("duplicate key {}: {}{first}", named("of"), key(finding))
+            let unchecked = match (finding.unchecked.len(), finding.unchecked_more) {
+                (0, false) => String::new(),
+                (n, false) => format!(", and held by {n} rows the key never checked"),
+                (0, true) => ", and held by rows the key never checked".to_owned(),
+                (n, true) => format!(", and held by {n} rows the key never checked and more"),
+            };
+            format!(
+                "duplicate key {}: {}{first}{unchecked}",
+                named("of"),
+                key(finding)
+            )
         }
         FindingKind::NotNull => match &finding.constraint {
             None => format!("NULL in NOT NULL column {table}.{columns}"),
