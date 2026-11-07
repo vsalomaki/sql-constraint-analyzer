@@ -518,6 +518,78 @@ fn output_into_a_non_empty_folder_is_refused() {
     ));
 }
 
+#[test]
+fn cascades_hang_from_rows_with_null_in_a_not_null_column() {
+    let (dir, manifest) = generate(&Options {
+        cascades: true,
+        noise: Noise::all(),
+        ..small()
+    });
+    let place = |file: &Option<String>, line: Option<u64>| (file.clone().unwrap(), line.unwrap());
+    let roots: BTreeSet<(String, u64)> = manifest
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::NotNull)
+        .map(|f| place(&f.file, f.line))
+        .collect();
+    let rows: BTreeSet<(String, u64)> = manifest
+        .cascades
+        .iter()
+        .map(|c| (c.file.clone(), c.line))
+        .collect();
+    let depth = |mut at: (String, u64)| {
+        let mut depth = 1;
+        while let Some(c) = manifest
+            .cascades
+            .iter()
+            .find(|c| (c.file.clone(), c.line) == at)
+        {
+            at = (c.parent.file.clone(), c.parent.line);
+            depth += 1;
+        }
+        assert!(roots.contains(&at), "{at:?} is no NOT NULL row");
+        depth
+    };
+    let depths: BTreeSet<usize> = rows.iter().cloned().map(depth).collect();
+    // A department with no name, its employee, the employee's assignment, and the assignment's timesheet.
+    assert_eq!(depths.last(), Some(&4));
+    assert!(
+        manifest
+            .findings
+            .iter()
+            .all(|f| !rows.contains(&place(&f.file, f.line))),
+        "a cascade row has a finding of its own"
+    );
+    // Oracle rejects an `INSERT ALL` whole when one of its rows fails, so a cascade row is an insert of its own.
+    let files = tree(&root(&dir));
+    for (file, line) in &rows {
+        let text = String::from_utf8_lossy(&files[file]).into_owned();
+        let insert = text
+            .lines()
+            .nth(usize::try_from(*line - 1).unwrap())
+            .unwrap();
+        assert!(
+            insert
+                .trim_start()
+                .to_uppercase()
+                .starts_with("INSERT INTO"),
+            "{file}:{line}: {insert}"
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        synth::generate(
+            &Options {
+                cascades: true,
+                omit_data: vec!["APP.PROJECTS".to_owned()],
+                ..small()
+            },
+            &dir.path().join("out")
+        ),
+        Err(synth::Error::CascadesWithoutData)
+    ));
+}
+
 /// The committed fixtures (`tests/fixtures/gen/<dialect>/<variant>`) are what the generator writes today; `make
 /// fixtures` refreshes them on purpose.
 #[test]

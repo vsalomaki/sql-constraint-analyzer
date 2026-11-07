@@ -527,6 +527,15 @@ pub(crate) fn constraints_of(table: TableId) -> impl Iterator<Item = &'static Co
     CONSTRAINTS.iter().filter(move |c| c.table == table)
 }
 
+/// Whether `fix` can set the column to NULL: it isn't NOT NULL or part of the primary key.
+pub(crate) fn can_be_null(table: TableId, column: &str) -> bool {
+    table
+        .columns()
+        .iter()
+        .any(|c| c.name == column && c.not_null == NotNull::No)
+        && !constraints_of(table).any(|c| c.kind == Kind::Primary && c.columns.contains(&column))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UniqueIndex {
     pub(crate) name: &'static str,

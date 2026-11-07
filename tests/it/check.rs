@@ -276,6 +276,23 @@ mod generated {
         }
     }
 
+    /// Cascade rows have no finding of their own, wherever their parents are, and with a plant at every row the
+    /// extras' keys stay clear of theirs.
+    #[test]
+    fn cascade_rows_add_no_finding() {
+        for shuffle_order in [false, true] {
+            for constraints in [Placement::BeforeData, Placement::AfterData] {
+                assert_manifest(&synth::Options {
+                    cascades: true,
+                    violations_ppm: 1_000_000,
+                    shuffle_order,
+                    constraints,
+                    ..base(5)
+                });
+            }
+        }
+    }
+
     /// A finding as the manifest writes it: its file relative to the export.
     fn placed(finding: &Finding, root: &Path) -> Finding {
         let file = finding.file.as_deref().map(|file| {

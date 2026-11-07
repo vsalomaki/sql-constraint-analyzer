@@ -1,0 +1,2334 @@
+{
+  "generator": "sqlca-gen 0.2.1",
+  "options": {
+    "dialect": "oracle",
+    "seed": 1,
+    "rows": 20,
+    "layout": "separate",
+    "constraints": "before-data",
+    "shuffle-order": true,
+    "violations-ppm": 1000,
+    "deferred-violations": true,
+    "noise": {
+      "rem-header": true,
+      "set-define-off": true,
+      "comments": false,
+      "storage-clauses": true,
+      "plsql-trigger": false,
+      "quoted-numbers": true,
+      "numeric-forms": false,
+      "multiline-strings": false,
+      "q-quote": false,
+      "embedded-delimiters": false,
+      "nextval": false,
+      "insert-all": false,
+      "mixed-case": false,
+      "no-column-list": false,
+      "wrapped-statements": false
+    },
+    "line-ending": "lf",
+    "encoding": "utf-8",
+    "omit-data": [],
+    "omit-commit": [],
+    "cascades": true
+  },
+  "files": [
+    {
+      "path": "ref/tables/COUNTRIES.sql",
+      "statements": 2
+    },
+    {
+      "path": "ref/data/COUNTRIES.sql",
+      "statements": 13
+    },
+    {
+      "path": "app/tables/DEPARTMENTS.sql",
+      "statements": 3
+    },
+    {
+      "path": "app/tables/EMPLOYEES.sql",
+      "statements": 5
+    },
+    {
+      "path": "app/tables/PROJECTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/tables/ASSIGNMENTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/tables/TIMESHEETS.sql",
+      "statements": 4
+    },
+    {
+      "path": "app/tables/LEGACY_NOTES.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/tables/AuditLog.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/DEPARTMENTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/EMPLOYEES.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/PROJECTS.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/ref_constraints/ASSIGNMENTS.sql",
+      "statements": 2
+    },
+    {
+      "path": "app/ref_constraints/TIMESHEETS.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/ref_constraints/LEGACY_NOTES.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/ref_constraints/AuditLog.sql",
+      "statements": 1
+    },
+    {
+      "path": "app/data/ASSIGNMENTS.sql",
+      "statements": 49
+    },
+    {
+      "path": "app/data/LEGACY_NOTES.sql",
+      "statements": 6
+    },
+    {
+      "path": "app/data/TIMESHEETS.sql",
+      "statements": 110
+    },
+    {
+      "path": "app/data/EMPLOYEES.sql",
+      "statements": 36
+    },
+    {
+      "path": "app/data/PROJECTS.sql",
+      "statements": 11
+    },
+    {
+      "path": "app/data/AuditLog.sql",
+      "statements": 9
+    },
+    {
+      "path": "app/data/DEPARTMENTS.sql",
+      "statements": 14
+    }
+  ],
+  "findings": [
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 3,
+      "key": [
+        "1000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 3,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 4,
+      "key": [
+        "1000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 4,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 5,
+      "key": [
+        "1001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 5,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 6,
+      "key": [
+        "1001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 6,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 7,
+      "key": [
+        "1002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 7,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 8,
+      "key": [
+        "1002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 8,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 9,
+      "key": [
+        "1003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 9,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 10,
+      "key": [
+        "1003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 10,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 11,
+      "key": [
+        "1004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 11,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 12,
+      "key": [
+        "1004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 12,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_ROLE_UK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "ROLE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 13,
+      "key": [
+        "1004",
+        null
+      ],
+      "first": {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 12
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 13,
+      "key": [
+        "1004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 13,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 14,
+      "key": [
+        "1005"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 14,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 15,
+      "key": [
+        "1005"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 15,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 16,
+      "key": [
+        "1006"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 16,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 17,
+      "key": [
+        "1006"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 17,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 18,
+      "key": [
+        "1056"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 18,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 19,
+      "key": [
+        "1007"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 19,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 20,
+      "key": [
+        "1007"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 20,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 21,
+      "key": [
+        "1008"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 21,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 22,
+      "key": [
+        "1008"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 22,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.ASSIGNMENTS_PK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 23,
+      "key": [
+        "1008",
+        "P00003"
+      ],
+      "first": {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 21
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 23,
+      "key": [
+        "1008"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 23,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 24,
+      "key": [
+        "1009"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 24,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 25,
+      "key": [
+        "1009"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 25,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 26,
+      "key": [
+        "1010"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 26,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 27,
+      "key": [
+        "1010"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 27,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 28,
+      "key": [
+        "1011"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 28,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 29,
+      "key": [
+        "1011"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 29,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 30,
+      "key": [
+        "1012"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 30,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 31,
+      "key": [
+        "1012"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 31,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 32,
+      "key": [
+        "-3"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 32,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 33,
+      "key": [
+        "1013"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 33,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 34,
+      "key": [
+        "1013"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 34,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 35,
+      "key": [
+        "1057"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 35,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 36,
+      "key": [
+        "1014"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 36,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 37,
+      "key": [
+        "1014"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 37,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 38,
+      "key": [
+        "1015"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 38,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 39,
+      "key": [
+        "1015"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 39,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 40,
+      "key": [
+        "1016"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 40,
+      "key": [
+        "P00001"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 41,
+      "key": [
+        "1016"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 41,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 42,
+      "key": [
+        "1016"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 42,
+      "key": [
+        "NOPE4"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 43,
+      "key": [
+        "1017"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 43,
+      "key": [
+        "P00002"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 44,
+      "key": [
+        "1017"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 44,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 45,
+      "key": [
+        "1018"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 45,
+      "key": [
+        "P00003"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 46,
+      "key": [
+        "1018"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 46,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 47,
+      "key": [
+        "1019"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 47,
+      "key": [
+        "P00004"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 48,
+      "key": [
+        "1019"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.ASSIGNMENTS_PROJECT_FK",
+      "table": "APP.ASSIGNMENTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 48,
+      "key": [
+        "P00000"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.TIMESHEETS_ASSIGNMENT_FK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "EMP_ID",
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/TIMESHEETS.sql",
+      "line": 31,
+      "key": [
+        "1005",
+        "P00003"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "HOURS"
+      ],
+      "file": "app/data/TIMESHEETS.sql",
+      "line": 58
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.TIMESHEETS_PK",
+      "table": "APP.TIMESHEETS",
+      "columns": [
+        "TS_ID"
+      ],
+      "file": "app/data/TIMESHEETS.sql",
+      "line": 87,
+      "key": [
+        "80"
+      ],
+      "first": {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 86
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 3,
+      "key": [
+        "10"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 4,
+      "key": [
+        "20"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 5,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 6,
+      "key": [
+        "30"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 7,
+      "key": [
+        "40"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 8,
+      "key": [
+        "-2"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 9,
+      "key": [
+        "50"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 10,
+      "key": [
+        "10"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_PK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 11,
+      "key": [
+        "1005"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 10
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 12,
+      "key": [
+        "20"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 13
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 14,
+      "key": [
+        "30"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.EMPLOYEES_EMAIL_UIX",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 15,
+      "key": [
+        "user7@example.com"
+      ],
+      "first": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 14
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 17,
+      "key": [
+        "50"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 18
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 19,
+      "key": [
+        "10"
+      ]
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 20
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 21,
+      "key": [
+        "1011"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 22,
+      "key": [
+        "20"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 23,
+      "key": [
+        "30"
+      ]
+    },
+    {
+      "kind": "unknown_column",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "EMAIL_ADDR"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 24
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 25,
+      "key": [
+        "40"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 26,
+      "key": [
+        "82"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 27,
+      "key": [
+        "50"
+      ]
+    },
+    {
+      "kind": "value_count_mismatch",
+      "table": "APP.EMPLOYEES",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 28
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 29,
+      "key": [
+        "10"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 30,
+      "key": [
+        "20"
+      ]
+    },
+    {
+      "kind": "unknown_table",
+      "table": "APP.EMPLOYEES_ARCHIVE",
+      "columns": [],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 31
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 33,
+      "key": [
+        "40"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_MANAGER_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 34,
+      "key": [
+        "1019"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "table": "APP.EMPLOYEES",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 35,
+      "key": [
+        "50"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 3,
+      "key": [
+        "R&D 0"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 4,
+      "key": [
+        "Myynti & markkinointi 1"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 5,
+      "key": [
+        "Lakkautettu 1"
+      ]
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 6,
+      "key": [
+        "Hallinto 2"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_PK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "PROJECT_CODE"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 7,
+      "key": [
+        "P00002"
+      ],
+      "first": {
+        "file": "app/data/PROJECTS.sql",
+        "line": 6
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 8,
+      "key": [
+        "Logistiikka 3"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.PROJECTS_EXTREF_UK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "EXTERNAL_REF"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 9,
+      "key": [
+        "EXT-3"
+      ],
+      "first": {
+        "file": "app/data/PROJECTS.sql",
+        "line": 8
+      }
+    },
+    {
+      "kind": "fk_load_order",
+      "constraint": "APP.PROJECTS_DEPT_FK",
+      "table": "APP.PROJECTS",
+      "columns": [
+        "DEPT_NAME"
+      ],
+      "file": "app/data/PROJECTS.sql",
+      "line": 10,
+      "key": [
+        "Tuotekehitys 4"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.AUDITLOG_EMP_FK",
+      "table": "APP.\"AuditLog\"",
+      "columns": [
+        "EMP_ID"
+      ],
+      "file": "app/data/AuditLog.sql",
+      "line": 5,
+      "key": [
+        "-1"
+      ]
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_COUNTRY_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "COUNTRY_CODE"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 4,
+      "key": [
+        "XX"
+      ]
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_NAME_UK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "NAME"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 6,
+      "key": [
+        "Myynti & markkinointi 1"
+      ],
+      "first": {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 5
+      }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 8,
+      "key": [
+        "30"
+      ],
+      "first": {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 7
+      }
+    },
+    {
+      "kind": "not_null",
+      "constraint": "APP.DEPARTMENTS_PK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "DEPT_ID"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 10
+    },
+    {
+      "kind": "not_null",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "NAME"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 11
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "APP.DEPARTMENTS_MANAGER_FK",
+      "table": "APP.DEPARTMENTS",
+      "columns": [
+        "MANAGER_ID"
+      ],
+      "file": "app/data/DEPARTMENTS.sql",
+      "line": 13,
+      "key": [
+        "-5"
+      ]
+    }
+  ],
+  "cascades": [
+    {
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 18,
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 13
+      }
+    },
+    {
+      "file": "app/data/TIMESHEETS.sql",
+      "line": 39,
+      "constraint": "APP.TIMESHEETS_ASSIGNMENT_FK",
+      "parent": {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 18
+      }
+    },
+    {
+      "file": "app/data/AuditLog.sql",
+      "line": 6,
+      "constraint": "APP.AUDITLOG_EMP_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 13
+      }
+    },
+    {
+      "file": "app/data/EMPLOYEES.sql",
+      "line": 26,
+      "constraint": "APP.EMPLOYEES_DEPT_FK",
+      "parent": {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 11
+      }
+    },
+    {
+      "file": "app/data/ASSIGNMENTS.sql",
+      "line": 35,
+      "constraint": "APP.ASSIGNMENTS_EMP_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 26
+      }
+    },
+    {
+      "file": "app/data/TIMESHEETS.sql",
+      "line": 75,
+      "constraint": "APP.TIMESHEETS_ASSIGNMENT_FK",
+      "parent": {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 35
+      }
+    },
+    {
+      "file": "app/data/AuditLog.sql",
+      "line": 8,
+      "constraint": "APP.AUDITLOG_EMP_FK",
+      "parent": {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 26
+      }
+    }
+  ],
+  "fixes": {
+    "removed": [
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 23
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 32
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 42
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 31
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 58
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 87
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 5
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 8
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 11
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 15
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 18
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 20
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 5
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 7
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 9
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 5
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 4
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 6
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 8
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 10
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 11
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 18
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 39
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 6
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 26
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 35
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 75
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 8
+      }
+    ],
+    "removed_on_fk_null": [
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 23
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 32
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 42
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 58
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 87
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 11
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 15
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 18
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 20
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 7
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 9
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 6
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 8
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 10
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 11
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 18
+      }
+    ],
+    "nulled_on_fk_null": [
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 31,
+        "columns": [
+          "EMP_ID",
+          "PROJECT_CODE"
+        ]
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 5,
+        "columns": [
+          "DEPT_ID"
+        ]
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 8,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 5,
+        "columns": [
+          "DEPT_NAME"
+        ]
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 5,
+        "columns": [
+          "EMP_ID"
+        ]
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 4,
+        "columns": [
+          "COUNTRY_CODE"
+        ]
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 13,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 39,
+        "columns": [
+          "EMP_ID",
+          "PROJECT_CODE"
+        ]
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 6,
+        "columns": [
+          "EMP_ID"
+        ]
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 26,
+        "columns": [
+          "DEPT_ID"
+        ]
+      }
+    ]
+  }
+}

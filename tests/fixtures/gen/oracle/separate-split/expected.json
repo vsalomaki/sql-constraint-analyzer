@@ -535,5 +535,211 @@
       "line": 3,
       "count": 1
     }
-  ]
+  ],
+  "fixes": {
+    "removed": [
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 4
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 6
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 8
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 10
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 12
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 5
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 8
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 11
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 14
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 17
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 19
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 5
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 7
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 9
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 22
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 31
+      },
+      {
+        "file": "app/data/ASSIGNMENTS_2.sql",
+        "line": 10
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 31
+      },
+      {
+        "file": "app/data/TIMESHEETS_2.sql",
+        "line": 27
+      },
+      {
+        "file": "app/data/TIMESHEETS_3.sql",
+        "line": 25
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 5
+      }
+    ],
+    "removed_on_fk_null": [
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 6
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 8
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 10
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 11
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 14
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 17
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 19
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 7
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 9
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 13
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 22
+      },
+      {
+        "file": "app/data/ASSIGNMENTS.sql",
+        "line": 31
+      },
+      {
+        "file": "app/data/ASSIGNMENTS_2.sql",
+        "line": 10
+      },
+      {
+        "file": "app/data/TIMESHEETS_2.sql",
+        "line": 27
+      },
+      {
+        "file": "app/data/TIMESHEETS_3.sql",
+        "line": 25
+      }
+    ],
+    "nulled_on_fk_null": [
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 4,
+        "columns": [
+          "COUNTRY_CODE"
+        ]
+      },
+      {
+        "file": "app/data/DEPARTMENTS.sql",
+        "line": 12,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 5,
+        "columns": [
+          "DEPT_ID"
+        ]
+      },
+      {
+        "file": "app/data/EMPLOYEES.sql",
+        "line": 8,
+        "columns": [
+          "MANAGER_ID"
+        ]
+      },
+      {
+        "file": "app/data/PROJECTS.sql",
+        "line": 5,
+        "columns": [
+          "DEPT_NAME"
+        ]
+      },
+      {
+        "file": "app/data/TIMESHEETS.sql",
+        "line": 31,
+        "columns": [
+          "EMP_ID",
+          "PROJECT_CODE"
+        ]
+      },
+      {
+        "file": "app/data/AuditLog.sql",
+        "line": 5,
+        "columns": [
+          "EMP_ID"
+        ]
+      }
+    ]
+  }
 }

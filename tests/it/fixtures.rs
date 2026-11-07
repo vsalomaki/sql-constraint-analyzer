@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use sqlca::finding::Finding;
+use sqlca::finding::{Finding, Location};
 use sqlca::input::{InputFile, OrderSource, Role};
 use sqlca::source::Encoding;
 
@@ -14,6 +14,22 @@ pub(crate) struct Manifest {
     pub(crate) options: Options,
     pub(crate) files: Vec<OutputFile>,
     pub(crate) findings: Vec<Finding>,
+    pub(crate) fixes: Fixes,
+}
+
+/// The rows `fix` removes or sets to NULL under keep-first.
+#[derive(Deserialize)]
+pub(crate) struct Fixes {
+    pub(crate) removed: Vec<Location>,
+    pub(crate) removed_on_fk_null: Vec<Location>,
+    pub(crate) nulled_on_fk_null: Vec<Nulled>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+pub(crate) struct Nulled {
+    pub(crate) file: String,
+    pub(crate) line: u64,
+    pub(crate) columns: Vec<String>,
 }
 
 #[derive(Deserialize)]

@@ -56,6 +56,11 @@ struct Cli {
     /// part ending with the COMMIT a table's rows end with. Not with `--layout single`.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     rows_per_file: Option<u64>,
+
+    /// Hang rows from bad rows: children, and theirs, that the database rejects once their parent is rejected,
+    /// though they have no finding of their own. The manifest lists them. Not with `--omit-data`.
+    #[arg(long)]
+    cascades: bool,
 }
 
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -103,6 +108,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         omit_data: cli.omit_data,
         omit_commit: cli.omit_commit,
         rows_per_file: cli.rows_per_file,
+        cascades: cli.cascades,
     };
     let manifest = synth::generate(&options, &cli.out)
         .with_context(|| format!("writing {}", cli.out.display()))?;
