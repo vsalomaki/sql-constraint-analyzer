@@ -56,7 +56,7 @@ pub enum OnDuplicate {
     Keep,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Policy {
     pub on_fk: OnFk,
     pub on_duplicate: OnDuplicate,
@@ -64,6 +64,20 @@ pub struct Policy {
     /// Act on findings whose key rests on an assumption, such as a date written as text, instead of leaving them for
     /// review.
     pub fix_assumed: bool,
+    /// The most rounds that remove rows; what a further round would act on is left for review.
+    pub max_rounds: usize,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            on_fk: OnFk::default(),
+            on_duplicate: OnDuplicate::default(),
+            on_not_null: OnRow::default(),
+            fix_assumed: false,
+            max_rounds: 30,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -177,7 +191,8 @@ pub struct FixReport {
     pub removed: Vec<Removal>,
     /// The commits added at the end of files.
     pub committed: Vec<Commit>,
-    /// Fixable findings the fix left in place: assumed values, and rows it couldn't tell apart.
+    /// Fixable findings the fix left in place: assumed values, rows it couldn't tell apart, and rows past the round
+    /// limit.
     pub left: Vec<Left>,
     /// Where each input went, by input position.
     pub files: Vec<Output>,
@@ -446,6 +461,10 @@ fn run_rounds(
             left: skipped,
             waiting,
         } = targets(&report.findings, files, names, policy, &crowded);
+        if rounds == policy.max_rounds && !targets.is_empty() {
+            let left = past_limit(&report, policy, skipped);
+            break (Some(report), left);
+        }
         // A value set to NULL can make a unique key a duplicate, or take a key children point at.
         let mut settled = !waiting && !can_orphan(&targets, names, &report);
         let mut changed = false;
@@ -807,6 +826,24 @@ type Row = (usize, u64);
 
 const ASSUMED: &str = "its key rests on a date written as text";
 const CROWDED: &str = "the line holds several rows, so the fix can't tell which";
+
+const PAST_LIMIT: &str = "the fix reached its round limit (--max-rounds) before this row's round";
+
+/// Once the rounds reach their limit: what the fix leaves, which is every finding it would act on.
+fn past_limit(report: &check::Report, policy: Policy, mut left: Vec<Left>) -> Vec<Left> {
+    let reviewed: BTreeSet<&Finding> = left.iter().map(|l| &l.finding).collect();
+    let more: Vec<Left> = report
+        .findings
+        .iter()
+        .filter(|f| acted_on(f.kind, policy) && f.line.is_some() && !reviewed.contains(f))
+        .map(|finding| Left {
+            finding: finding.clone(),
+            why: PAST_LIMIT,
+        })
+        .collect();
+    left.extend(more);
+    left
+}
 
 /// Whether `policy` acts on findings of `kind`.
 fn acted_on(kind: FindingKind, policy: Policy) -> bool {

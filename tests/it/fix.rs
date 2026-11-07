@@ -872,6 +872,39 @@ fn a_removed_parent_takes_its_children_in_later_rounds() {
 }
 
 #[test]
+fn rows_past_the_round_limit_are_left_for_review() {
+    let fix = |max_rounds| {
+        fix_scripts(
+            &[("t.sql", &format!("{FAMILY}{CASCADE}"))],
+            &Options::default(),
+            Policy {
+                max_rounds,
+                ..Policy::default()
+            },
+            false,
+        )
+    };
+    let (_dir, _, report) = fix(2);
+    assert_eq!(report.rounds, 2);
+    let removed: Vec<(u64, usize)> = report.removed.iter().map(|r| (r.line, r.round)).collect();
+    assert_eq!(removed, [(6, 2), (8, 1)]);
+    let left: Vec<(Option<u64>, &str)> = report
+        .left
+        .iter()
+        .map(|l| (l.finding.line, l.why))
+        .collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left.first().unwrap().0, Some(5));
+    assert!(left.first().unwrap().1.contains("--max-rounds"));
+    assert_eq!(count(&report.output, FindingKind::FkMissingParent), 1);
+
+    let (_dir, _, report) = fix(3);
+    assert_eq!(report.rounds, 3);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+    assert!(report.output.findings.is_empty());
+}
+
+#[test]
 fn a_duplicate_of_a_removed_row_is_kept() {
     let (_dir, _, report) = fix_sql(
         "CREATE TABLE T (ID NUMBER PRIMARY KEY, V NUMBER NOT NULL);\n\

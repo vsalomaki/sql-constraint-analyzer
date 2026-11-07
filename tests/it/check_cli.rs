@@ -300,6 +300,41 @@ fn fix_shows_its_progress_unless_told_not_to() {
 }
 
 #[test]
+fn fix_warns_about_rows_past_its_round_limit() {
+    // The second C row's parent is missing, and the first D row's parent is that C row: two rounds.
+    let sql = "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+               CREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n\
+               CREATE TABLE D (ID NUMBER PRIMARY KEY, C_ID NUMBER REFERENCES C);\n\
+               INSERT INTO P VALUES (1);\nINSERT INTO C VALUES (1, 1);\nINSERT INTO C VALUES (2, 9);\n\
+               INSERT INTO D VALUES (1, 2);\nINSERT INTO D VALUES (2, 1);\nCOMMIT;\n";
+    let run = |rounds: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("t.sql"), sql).unwrap();
+        let output = Command::cargo_bin("sqlca")
+            .unwrap()
+            .current_dir(dir.path())
+            .args(["fix", "t.sql", "--out", "out"])
+            .args(["--max-rounds", rounds])
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (code, stderr) = run("1");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("left in place: the fix reached its round limit (--max-rounds)"),
+        "{stderr}"
+    );
+    let (code, stderr) = run("30");
+    assert_eq!(code, Some(0), "{stderr}");
+    let (code, stderr) = run("0");
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
 fn fix_writes_fixed_copies_and_a_report_folder() {
     let root = fixture("gen/oracle/separate-sqldev");
     let out = tempfile::tempdir().unwrap();
