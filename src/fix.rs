@@ -1006,6 +1006,58 @@ fn must_wait(
     nulls || takes_a_first_row(&all, names, report) || can_orphan(&all, names, report)
 }
 
+/// Of duplicates going alone, some of which can leave a row without its parent: those that keep the row they decide
+/// for. A duplicate and the row its key keeps are in one table, and that row can lose its parent, or a parent further
+/// up, when the table's foreign keys lead, directly or through other tables, to a table losing a row that can orphan;
+/// such duplicates wait. If that holds back every duplicate, the ones that can orphan go, and the rest wait.
+fn orphans_first<'a>(
+    going: Vec<(Row, &'a Finding)>,
+    report: &check::Report,
+    names: &[String],
+) -> Vec<(Row, &'a Finding)> {
+    let orphaning: Vec<(Row, &str)> = by_row(going.iter().copied())
+        .into_iter()
+        .flat_map(|(file, lines)| {
+            lines
+                .into_iter()
+                .map(move |(line, findings)| ((file, line), findings))
+        })
+        .filter_map(|(row, findings)| {
+            let table = findings.first()?.table.as_str();
+            let one = BTreeMap::from([(row.0, BTreeMap::from([(row.1, findings)]))]);
+            can_orphan(&one, names, report).then_some((row, table))
+        })
+        .collect();
+    let losing: BTreeSet<&str> = orphaning.iter().map(|(_, table)| *table).collect();
+    let mut at_risk: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let more: Vec<&str> = report
+            .parents
+            .iter()
+            .filter(|(child, parent)| {
+                !at_risk.contains(child.as_str())
+                    && (losing.contains(parent.as_str()) || at_risk.contains(parent.as_str()))
+            })
+            .map(|(child, _)| child.as_str())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        at_risk.extend(more);
+    }
+    let (go, wait): (Vec<_>, Vec<_>) = going
+        .into_iter()
+        .partition(|(_, f)| !at_risk.contains(f.table.as_str()));
+    if go.is_empty() {
+        let rows: BTreeSet<Row> = orphaning.iter().map(|(row, _)| *row).collect();
+        wait.into_iter()
+            .filter(|(row, _)| rows.contains(row))
+            .collect()
+    } else {
+        go
+    }
+}
+
 /// The rows going and how many of the findings and keep-last keys acting go, keeping back each duplicate whose first
 /// row goes, for another reason or as a duplicate of another key, and each keep-last key whose last row goes: once
 /// that row is gone, the duplicate may be the one to keep, or the row before the last.
@@ -1100,13 +1152,18 @@ fn targets<'a>(
     }
     let acting = going.len() + lasts.len();
     let (mut chosen, mut taken) = hold_back(going.clone(), lasts, &row_of);
+    let mut held = false;
     if must_wait(&chosen, report, names, policy) {
         going.retain(|(_, f)| f.kind != FindingKind::DuplicateKey);
         taken = going.len();
         chosen = going;
+    } else if can_orphan(&by_row(chosen.iter().copied()), names, report) {
+        let all = chosen.len();
+        chosen = orphans_first(chosen, report, names);
+        held = chosen.len() < all;
     }
     let going = chosen;
-    let waiting = taken < acting;
+    let waiting = held || taken < acting;
     Decision {
         targets: by_row(going),
         left,

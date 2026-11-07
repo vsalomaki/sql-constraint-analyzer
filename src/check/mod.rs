@@ -113,6 +113,8 @@ pub struct Report {
     pub schema: SchemaCounts,
     /// The parent keys enabled foreign keys point at, by table and columns as findings name them.
     pub referenced: BTreeSet<(String, Vec<String>)>,
+    /// The child and parent tables of the enabled foreign keys, as findings name tables.
+    pub parents: BTreeSet<(String, String)>,
     /// Rows with a finding, or a duplicated key's first row, that hold a key some child row found, by file and line:
     /// cutting one can leave a child without its parent.
     pub referenced_rows: BTreeSet<(String, u64)>,
@@ -312,6 +314,7 @@ pub fn schema(
     )?;
     report.schema = schema_counts(&catalog);
     report.referenced = referenced(&catalog);
+    report.parents = parents(&catalog);
     observer.schema(&catalog);
     report.catalog = issues
         .into_iter()
@@ -516,6 +519,25 @@ fn referenced(catalog: &Catalog) -> BTreeSet<(String, Vec<String>)> {
         keys.insert((catalog.display(&parent.name), parent.column_names(columns)));
     }
     keys
+}
+
+fn parents(catalog: &Catalog) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for child in catalog.tables() {
+        for constraint in &child.constraints {
+            let Kind::ForeignKey {
+                parent: Parent::Key { table, .. },
+                ..
+            } = &constraint.kind
+            else {
+                continue;
+            };
+            if let Some(parent) = catalog.table(*table).filter(|_| constraint.state.enabled) {
+                pairs.insert((catalog.display(&child.name), catalog.display(&parent.name)));
+            }
+        }
+    }
+    pairs
 }
 
 /// A path as the user gave it, with `/` between its parts on Windows too, so findings read the same everywhere.
