@@ -13,7 +13,7 @@ pub use order::{Ordered, dependency_order};
 pub use structure::{Row, StructureError, resolve_row};
 
 use crate::catalog::{Catalog, CatalogBuilder, CreatedTwice, Issue, Kind, Lookup, Origin, Parent};
-use crate::dialect::{DialectId, Pass, Runner};
+use crate::dialect::{DialectId, ParseMemo, Pass, Runner};
 use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role};
 use crate::source::{Encoding, Piece, Span};
@@ -552,6 +552,7 @@ fn read(
         names.get(index).map_or("", String::as_str),
         file.bytes,
     );
+    let mut memo = ParseMemo::new(options.dialect);
     for piece in options
         .dialect
         .pieces(opened.reader, options.runner, opened.base_offset)
@@ -571,7 +572,10 @@ fn read(
                 break;
             }
         };
-        match options.dialect.parse(&piece, options.encoding, pass) {
+        match options
+            .dialect
+            .parse_with(&piece, options.encoding, pass, &mut memo)
+        {
             Ok(Some(statement)) => {
                 let origin = Origin {
                     file: index,

@@ -30,14 +30,15 @@ const MODIFIERS: [&str; 6] = [
     "NOFORCE",
 ];
 
-pub fn parse(
-    piece: &Piece,
+pub fn parse<'a>(
+    piece: &'a Piece,
     encoding: Encoding,
     pass: Pass,
-) -> Result<Option<Statement<'_>>, ParseError> {
+    memo: Option<&'a mut insert::Memo>,
+) -> Result<Option<Statement<'a>>, ParseError> {
     match pass {
         Pass::Schema => ddl::parse_ddl(piece, encoding),
-        Pass::Rows => rows(piece, encoding).map(Some),
+        Pass::Rows => rows(piece, encoding, memo).map(Some),
     }
 }
 
@@ -46,7 +47,11 @@ fn is_exit(word: &str) -> bool {
     word == "EXIT" || word == "QUIT"
 }
 
-fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> {
+fn rows<'a>(
+    piece: &'a Piece,
+    encoding: Encoding,
+    memo: Option<&'a mut insert::Memo>,
+) -> Result<Statement<'a>, ParseError> {
     if piece.kind == PieceKind::Unterminated {
         return Err(ParseError {
             offset: piece.span.start,
@@ -57,7 +62,7 @@ fn rows(piece: &Piece, encoding: Encoding) -> Result<Statement<'_>, ParseError> 
         });
     }
     if piece.kind == PieceKind::Sql
-        && let Some(statement) = insert::parse_insert(piece, encoding)?
+        && let Some(statement) = insert::parse_insert_with(piece, encoding, memo)?
     {
         return Ok(statement);
     }
@@ -123,8 +128,8 @@ mod tests {
 
     /// What the schema pass makes of a piece, or else the rows pass; exactly one of them takes it.
     fn read(piece: &Piece) -> Result<Statement<'static>, ParseError> {
-        let schema = parse(piece, Encoding::Utf8, Pass::Schema)?;
-        let rows = parse(piece, Encoding::Utf8, Pass::Rows)?;
+        let schema = parse(piece, Encoding::Utf8, Pass::Schema, None)?;
+        let rows = parse(piece, Encoding::Utf8, Pass::Rows, None)?;
         match (schema, rows) {
             (Some(s), None | Some(Statement::Commit)) | (None, Some(s)) => Ok(s.into_owned()),
             other => panic!("{other:?}"),
@@ -210,7 +215,7 @@ mod tests {
     #[test]
     fn a_commit_and_ddl_end_the_transaction() {
         let rows = |kind, text| {
-            parse(&piece(kind, text), Encoding::Utf8, Pass::Rows)
+            parse(&piece(kind, text), Encoding::Utf8, Pass::Rows, None)
                 .unwrap()
                 .map(Statement::into_owned)
         };

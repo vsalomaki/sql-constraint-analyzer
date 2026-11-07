@@ -19,6 +19,20 @@ pub enum DialectId {
     Oracle,
 }
 
+/// What a dialect's parser keeps from one piece of a file to the next; start each file with a new one.
+#[derive(Debug)]
+pub enum ParseMemo {
+    Oracle(oracle::insert::Memo),
+}
+
+impl ParseMemo {
+    pub fn new(dialect: DialectId) -> Self {
+        match dialect {
+            DialectId::Oracle => Self::Oracle(oracle::insert::Memo::default()),
+        }
+    }
+}
+
 /// Which pass reads a script: the schema pass wants table and index DDL only, the rows pass everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
@@ -83,7 +97,23 @@ impl DialectId {
         pass: Pass,
     ) -> Result<Option<Statement<'_>>, ParseError> {
         match self {
-            Self::Oracle => oracle::parse::parse(piece, encoding, pass),
+            Self::Oracle => oracle::parse::parse(piece, encoding, pass, None),
+        }
+    }
+
+    /// `parse` for the pieces of one file in order, with `memo` kept from one to the next: the dialect may skip
+    /// what a piece repeats of the one before.
+    pub fn parse_with<'a>(
+        self,
+        piece: &'a Piece,
+        encoding: Encoding,
+        pass: Pass,
+        memo: &'a mut ParseMemo,
+    ) -> Result<Option<Statement<'a>>, ParseError> {
+        match (self, memo) {
+            (Self::Oracle, ParseMemo::Oracle(memo)) => {
+                oracle::parse::parse(piece, encoding, pass, Some(memo))
+            }
         }
     }
 
