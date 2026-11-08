@@ -28,6 +28,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
 | `make sample-fixtures` | Rewrites `tests/fixtures/samples/oracle/` from Oracle's sample schemas at a pinned commit |
+| `make sample-sqlcl-fixtures` | Rewrites `tests/fixtures/samples/oracle/sqlcl/`: those schemas loaded into Oracle Free and exported again with SQLcl, in Docker |
 | `make perf` | Generates a ~1 GB and a ~2.4 GB export into `gen-out/`, and a smaller one with cascade rows (each reused while its options match), times `sqlca check` (release) on each in both modes and `sqlca fix --out` on each (into a temporary folder in `gen-out/`), and fails unless the findings equal the manifest and fix removes exactly the rows the manifest lists, keeping every other row byte for byte and every other finding; prints wall time, MB/s, peak RSS (Linux only) and fix's time against the check's |
 
 Run `make lint` and `make test` before calling a change done.
@@ -188,6 +189,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   strips the wrapper and changes nothing else but product 4's JSON, which it shortens to what plain SQL accepts
   (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO's identity
   columns give it six `not followed` catalog entries and one key that can't be checked.
+  `sqlcl/` (`make sample-sqlcl-fixtures`) is both schemas loaded into Oracle Free and exported again by SQLcl in
+  SQL Developer's separate-files layout, one folder per schema with `order.txt` and `counts.csv`; the object list
+  comes from Oracle's dictionary. Like `tests/fixtures/sqlcl/`, each data file has the finding for rows with no
+  `COMMIT` after them and nothing else.
 - Prove a fix by reverting it and watching a test fail.
 
 ### Ground truth

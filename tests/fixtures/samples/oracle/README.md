@@ -15,3 +15,7 @@ commit.
 
 Every other line is as Oracle wrote it. Oracle Free loads each schema's two files without an error: 216 rows for
 HR, 8,783 for CO.
+
+`sqlcl/` (`make sample-sqlcl-fixtures`, needs Docker) is what Oracle Free holds after loading `hr/` and `co/`,
+exported again by SQLcl in SQL Developer's separate-files layout: `tables/`, `sequences/`, `indexes/`, `data/` and
+`ref_constraints/` per schema, with `order.txt` and `counts.csv`.

@@ -10,7 +10,6 @@ cd "$(dirname "$0")/../.."
 # shellcheck source=scripts/oracle/container.sh
 source scripts/oracle/container.sh
 
-SQLCL="container-registry.oracle.com/database/sqlcl:latest@sha256:7f1854c7a95c5a0eddf93c6bce1c2d441fab980384a061297e865a5a3ce55d2f"
 OUT=tests/fixtures/sqlcl
 
 start_oracle

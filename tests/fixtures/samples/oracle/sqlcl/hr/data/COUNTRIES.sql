@@ -1,0 +1,27 @@
+REM INSERTING into "HR"."COUNTRIES"
+SET DEFINE OFF;
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('AR','Argentina',20);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('AU','Australia',40);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('BE','Belgium',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('BR','Brazil',20);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('CA','Canada',20);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('CH','Switzerland',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('CN','China',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('DE','Germany',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('DK','Denmark',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('EG','Egypt',50);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('FR','France',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('GB','United Kingdom of Great Britain and Northern Ireland',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('IL','Israel',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('IN','India',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('IT','Italy',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('JP','Japan',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('KW','Kuwait',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('ML','Malaysia',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('MX','Mexico',20);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('NG','Nigeria',50);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('NL','Netherlands',10);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('SG','Singapore',30);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('US','United States of America',20);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('ZM','Zambia',50);
+Insert into "HR"."COUNTRIES" (COUNTRY_ID,COUNTRY_NAME,REGION_ID) values ('ZW','Zimbabwe',50);
