@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::RULES;
@@ -31,6 +31,123 @@ struct Signature {
 struct Oracle {
     container: String,
     password: String,
+}
+
+/// The users a load creates, the grants it gives between them after the `ref/` files, and the tables whose rows it
+/// counts. A file in a folder named after a user loads with that user as its current schema, since the sample
+/// schemas' DDL names none.
+struct Schemas {
+    users: Vec<String>,
+    grants: Vec<String>,
+    tables: Vec<String>,
+}
+
+impl Schemas {
+    fn generated() -> Self {
+        Self {
+            users: vec!["APP".into(), "REF".into()],
+            // A foreign key into another schema needs the REFERENCES privilege on the parent.
+            grants: vec!["GRANT REFERENCES ON REF.COUNTRIES TO APP;".into()],
+            tables: REF_TABLES
+                .iter()
+                .chain(APP_TABLES.iter())
+                .map(|t| t.qualified(&RULES))
+                .collect(),
+        }
+    }
+
+    fn samples() -> Self {
+        Self {
+            users: vec!["HR".into(), "CO".into()],
+            grants: Vec::new(),
+            tables: SAMPLE_TABLES.iter().map(|t| (*t).to_owned()).collect(),
+        }
+    }
+
+    /// Drops the users and creates them again, empty.
+    fn users_script(&self) -> String {
+        let mut script = vec!["WHENEVER SQLERROR CONTINUE".to_owned()];
+        script.extend(self.users.iter().map(|u| format!("DROP USER {u} CASCADE;")));
+        script.push("WHENEVER SQLERROR EXIT FAILURE".into());
+        script.extend(self.users.iter().map(|u| {
+            let password = u.to_lowercase();
+            format!("CREATE USER {u} IDENTIFIED BY {password} QUOTA UNLIMITED ON USERS;")
+        }));
+        script.extend(["EXIT", ""].map(String::from));
+        script.join("\n")
+    }
+
+    /// Loads `files` in order, continuing past errors, into the spool `run` names, then counts the tables' rows.
+    fn driver(&self, files: &[&str], run: &str) -> String {
+        let mut schema = None;
+        let mut include = |f: &&str| {
+            let user = f.split('/').next().map(str::to_uppercase);
+            let mut lines = Vec::new();
+            if let Some(user) = user.filter(|u| self.users.contains(u))
+                && schema.as_ref() != Some(&user)
+            {
+                lines.push(format!("ALTER SESSION SET CURRENT_SCHEMA = {user};"));
+                schema = Some(user);
+            }
+            lines.push(format!("@@{f}"));
+            lines
+        };
+        let mut driver: Vec<String> = [
+            "WHENEVER SQLERROR CONTINUE",
+            "SET DEFINE OFF",
+            "SET LINESIZE 32767",
+            "SET FEEDBACK ON",
+            "ALTER SESSION SET NLS_DATE_LANGUAGE=AMERICAN;",
+            "ALTER SESSION SET NLS_NUMERIC_CHARACTERS='.,';",
+        ]
+        .map(String::from)
+        .into();
+        driver.push(format!("SPOOL /tmp/sqlca-{run}.log"));
+        let (references, data): (Vec<&str>, Vec<&str>) =
+            files.iter().partition(|f| f.starts_with("ref/"));
+        driver.extend(references.iter().flat_map(&mut include));
+        driver.extend(self.grants.iter().cloned());
+        driver.extend(data.iter().flat_map(&mut include));
+        driver.extend(["COMMIT;", "SET HEADING OFF", "SET FEEDBACK OFF"].map(String::from));
+        driver.push(format!("SPOOL /tmp/sqlca-{run}-rows.log"));
+        let tables: Vec<String> = self
+            .tables
+            .iter()
+            .map(|t| format!("SELECT 1 FROM {t}"))
+            .collect();
+        driver.push(format!(
+            "SELECT COUNT(*) FROM ({});",
+            tables.join(" UNION ALL ")
+        ));
+        driver.extend(["SPOOL OFF", "EXIT", ""].map(String::from));
+        driver.join("\n")
+    }
+}
+
+/// The tables of Oracle's HR and CO sample schemas.
+const SAMPLE_TABLES: &[&str] = &[
+    "HR.REGIONS",
+    "HR.COUNTRIES",
+    "HR.LOCATIONS",
+    "HR.DEPARTMENTS",
+    "HR.JOBS",
+    "HR.EMPLOYEES",
+    "HR.JOB_HISTORY",
+    "CO.CUSTOMERS",
+    "CO.STORES",
+    "CO.PRODUCTS",
+    "CO.ORDERS",
+    "CO.SHIPMENTS",
+    "CO.ORDER_ITEMS",
+    "CO.INVENTORY",
+];
+
+/// An export in a folder of its own, since a load writes its scripts beside it.
+struct Export {
+    dir: tempfile::TempDir,
+    path: PathBuf,
+    manifest: Manifest,
+    schemas: Schemas,
 }
 
 impl Oracle {
@@ -59,50 +176,15 @@ impl Oracle {
     }
 
     /// Loads `export` in its load order as SYSTEM, continuing past errors, and returns the SQL*Plus spool.
-    fn load(&self, export: &Path, encoding: Encoding, run: &str) -> String {
+    fn load(&self, export: &Path, schemas: &Schemas, encoding: Encoding, run: &str) -> String {
         let order = fs::read_to_string(export.join(synth::ORDER_FILE)).unwrap();
         let files: Vec<&str> = order
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .collect();
-        let include = |f: &&str| format!("@@{f}");
-        let mut driver: Vec<String> = [
-            "WHENEVER SQLERROR CONTINUE",
-            "SET DEFINE OFF",
-            "SET LINESIZE 32767",
-            "SET FEEDBACK ON",
-            "ALTER SESSION SET NLS_DATE_LANGUAGE=AMERICAN;",
-            "ALTER SESSION SET NLS_NUMERIC_CHARACTERS='.,';",
-        ]
-        .map(String::from)
-        .into();
-        driver.push(format!("SPOOL /tmp/sqlca-{run}.log"));
-        driver.extend(files.iter().filter(|f| f.starts_with("ref/")).map(include));
-        // A foreign key into another schema needs the REFERENCES privilege on the parent.
-        driver.push("GRANT REFERENCES ON REF.COUNTRIES TO APP;".into());
-        driver.extend(files.iter().filter(|f| !f.starts_with("ref/")).map(include));
-        driver.extend(["COMMIT;", "SET HEADING OFF", "SET FEEDBACK OFF"].map(String::from));
-        driver.push(format!("SPOOL /tmp/sqlca-{run}-rows.log"));
-        let tables: Vec<String> = REF_TABLES
-            .iter()
-            .chain(APP_TABLES.iter())
-            .map(|t| format!("SELECT 1 FROM {}", t.qualified(&RULES)))
-            .collect();
-        driver.push(format!(
-            "SELECT COUNT(*) FROM ({});",
-            tables.join(" UNION ALL ")
-        ));
-        driver.extend(["SPOOL OFF", "EXIT", ""].map(String::from));
-        fs::write(export.join("driver.sql"), driver.join("\n")).unwrap();
-        fs::write(
-            export.join("users.sql"),
-            "WHENEVER SQLERROR CONTINUE\nDROP USER APP CASCADE;\nDROP USER REF CASCADE;\n\
-             WHENEVER SQLERROR EXIT FAILURE\n\
-             CREATE USER APP IDENTIFIED BY app QUOTA UNLIMITED ON USERS;\n\
-             CREATE USER REF IDENTIFIED BY ref QUOTA UNLIMITED ON USERS;\nEXIT\n",
-        )
-        .unwrap();
+        fs::write(export.join("driver.sql"), schemas.driver(&files, run)).unwrap();
+        fs::write(export.join("users.sql"), schemas.users_script()).unwrap();
 
         let dir = format!("/tmp/sqlca-{run}");
         Self::docker(&["exec", "-u", "root", &self.container, "rm", "-rf", &dir]);
@@ -291,21 +373,52 @@ fn counts(signatures: impl IntoIterator<Item = Signature>) -> BTreeMap<Signature
     counts
 }
 
-fn generate(options: &Options) -> (tempfile::TempDir, std::path::PathBuf, Manifest) {
+fn generate(options: &Options) -> Export {
     let dir = tempfile::tempdir().unwrap();
-    let export = dir.path().join("export");
-    let manifest = synth::generate(options, &export).unwrap();
-    (dir, export, manifest)
+    let path = dir.path().join("export");
+    let manifest = synth::generate(options, &path).unwrap();
+    Export {
+        dir,
+        path,
+        manifest,
+        schemas: Schemas::generated(),
+    }
+}
+
+/// Oracle's HR and CO sample schemas with the rows planted after them, and their hand-written manifest.
+fn samples() -> Export {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/samples/oracle");
+    let manifest: Manifest =
+        serde_json::from_str(&fs::read_to_string(root.join("expected.json")).unwrap()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("export");
+    let files = manifest.files.iter().map(|f| f.path.as_str());
+    for file in files.chain([synth::ORDER_FILE]) {
+        let to = path.join(file);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(root.join(file), to).unwrap();
+    }
+    Export {
+        dir,
+        path,
+        manifest,
+        schemas: Schemas::samples(),
+    }
 }
 
 /// Constraints in before the data: Oracle rejects each bad row at its insert, so the rows with manifest findings
 /// must be the rejected rows, on the same lines. With `exact` off (wrapped statements, multi-line strings, where
 /// SQL*Plus prints a line other than the first), only the kinds and counts are compared.
-fn check_load_order(oracle: &Oracle, options: &Options, run: &str, exact: bool) {
-    let (_dir, export, manifest) = generate(options);
-    let spool = oracle.load(&export, options.encoding, run);
-    let observed = observed_load_order(&spool, &line_index(&export, &manifest), run, exact);
-    let files = load_order(&manifest);
+fn check_load_order(oracle: &Oracle, export: &Export, run: &str, exact: bool) {
+    let manifest = &export.manifest;
+    let spool = oracle.load(
+        &export.path,
+        &export.schemas,
+        manifest.options.encoding,
+        run,
+    );
+    let observed = observed_load_order(&spool, &line_index(&export.path, manifest), run, exact);
+    let files = load_order(manifest);
     let expected = expected_load_order(&manifest.findings, &manifest.cascades, &files, exact);
     assert_rejections(
         &observed,
@@ -617,10 +730,15 @@ fn expected_after_data(findings: &[Finding], cascades: &[Cascade]) -> AfterData 
 
 /// Constraints after the data: the rows load except those with a NOT NULL or structure error, then each key and
 /// foreign key either validates or fails. A foreign key whose parent key failed can't be added at all.
-fn check_after_data(oracle: &Oracle, options: &Options, run: &str) {
-    let (_dir, export, manifest) = generate(options);
-    let spool = oracle.load(&export, options.encoding, run);
-    let observed = observed_after_data(&spool, &line_index(&export, &manifest), run);
+fn check_after_data(oracle: &Oracle, export: &Export, run: &str) {
+    let manifest = &export.manifest;
+    let spool = oracle.load(
+        &export.path,
+        &export.schemas,
+        manifest.options.encoding,
+        run,
+    );
+    let observed = observed_after_data(&spool, &line_index(&export.path, manifest), run);
     assert_eq!(
         observed,
         expected_after_data(&manifest.findings, &manifest.cascades),
@@ -864,14 +982,14 @@ fn acted_on(
 /// data, constraints judge rows as they come, so the fix runs in load-order mode.
 fn check_fixed(
     oracle: &Oracle,
-    options: &Options,
+    export: &Export,
     run: &str,
     exact: bool,
     policy: Policy,
     annotate: bool,
 ) {
-    let (dir, export, manifest) = generate(options);
-    let fixed = fs::canonicalize(dir.path()).unwrap().join("fixed");
+    let (manifest, options) = (&export.manifest, &export.manifest.options);
+    let fixed = fs::canonicalize(export.dir.path()).unwrap().join("fixed");
     let after_data = options.constraints == Placement::AfterData;
     let check = check::Options {
         encoding: options.encoding,
@@ -881,9 +999,9 @@ fn check_fixed(
     let inputs: Vec<(String, Vec<u8>)> = manifest
         .files
         .iter()
-        .map(|f| (f.path.clone(), fs::read(export.join(&f.path)).unwrap()))
+        .map(|f| (f.path.clone(), fs::read(export.path.join(&f.path)).unwrap()))
         .collect();
-    let (report, left) = fix_export(&export, &fixed, &check, policy, annotate);
+    let (report, left) = fix_export(&export.path, &fixed, &check, policy, annotate);
     assert!(!report.removed.is_empty(), "{run}: the fix removed nothing");
     assert!(
         policy.on_fk != OnFk::Null || report.removed.iter().any(|r| !r.nulled.is_empty()),
@@ -893,8 +1011,8 @@ fn check_fixed(
         assert_fixes(&report, &inputs, &manifest.fixes, policy.on_fk, run);
     }
     assert_restores(&inputs, &fixed, &report, annotate, run);
-    let spool = oracle.load(&fixed, options.encoding, run);
-    let index = line_index(&fixed, &manifest);
+    let spool = oracle.load(&fixed, &export.schemas, options.encoding, run);
+    let index = line_index(&fixed, manifest);
     let rejected = if after_data {
         let observed = observed_after_data(&spool, &index, run);
         let failed = [&observed.keys, &observed.fks, &observed.blocked];
@@ -915,7 +1033,7 @@ fn check_fixed(
         observed.rows.values().sum::<usize>()
     } else {
         let observed = observed_load_order(&spool, &index, run, exact);
-        let files = load_order(&manifest);
+        let files = load_order(manifest);
         let before_parents: Vec<Finding> = left
             .iter()
             .filter(|f| f.kind == FindingKind::FkLoadOrder)
@@ -1012,8 +1130,8 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
     ];
     for (options, run, exact) in &exports {
         match options.constraints {
-            Placement::BeforeData => check_load_order(&oracle, options, run, *exact),
-            Placement::AfterData => check_after_data(&oracle, options, run),
+            Placement::BeforeData => check_load_order(&oracle, &generate(options), run, *exact),
+            Placement::AfterData => check_after_data(&oracle, &generate(options), run),
         }
     }
     let keep_last = Policy {
@@ -1039,13 +1157,25 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         for (policy, annotate, how) in fixes {
             check_fixed(
                 &oracle,
-                &options,
+                &generate(&options),
                 &format!("{how}-{run}"),
                 *exact,
                 policy,
                 annotate,
             );
         }
+    }
+    // Oracle's sample schemas with the rows planted after them: DDL and INSERTs the generator doesn't write.
+    check_load_order(&oracle, &samples(), "samples", true);
+    for (policy, annotate, how) in fixes {
+        check_fixed(
+            &oracle,
+            &samples(),
+            &format!("{how}-samples"),
+            true,
+            policy,
+            annotate,
+        );
     }
 }
 

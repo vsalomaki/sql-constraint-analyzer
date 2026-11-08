@@ -24,7 +24,7 @@ with [gitleaks](https://github.com/gitleaks/gitleaks#installation) (needs it in 
 | `cargo run -- <args>` | Runs `sqlca` |
 | `cargo run -F gen --bin sqlca-gen -- <args>` | Runs the generator; it builds only with the `gen` feature |
 | `make fixtures` | Regenerates `tests/fixtures/gen/<dialect>/` from the generator; a test fails until fixtures match the generator, so review the diff and commit it with the generator change |
-| `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the generator's manifests expect, and only what `sqlca fix` leaves in its output; see "Ground truth" below |
+| `make oracle-check` | Starts Oracle Free in Docker (kept between runs) and checks that Oracle rejects exactly what the manifests expect (the generator's and the planted samples'), and only what `sqlca fix` leaves in its output; see "Ground truth" below |
 | `make oracle-stop` | Removes that container |
 | `make sqlcl-fixtures` | Rewrites `tests/fixtures/sqlcl/` with Oracle Free and SQLcl in Docker |
 | `make sample-fixtures` | Rewrites `tests/fixtures/samples/oracle/` from Oracle's sample schemas at a pinned commit |
@@ -188,7 +188,9 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   didn't write. Oracle wraps each table's INSERTs in a PL/SQL block, which the analyzer doesn't follow, so the script
   strips the wrapper and changes nothing else but product 4's JSON, which it shortens to what plain SQL accepts
   (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO leaves INVENTORY's
-  key to its identity column, so that key can't be checked.
+  key to its identity column, so that key can't be checked. `hr_plants.sql` and `co_plants.sql` plant rows after
+  them that break each kind `fix` acts on, CO's with a cascade; `order.txt` and the hand-written `expected.json`
+  make the folder an export like the generator's, which the manifest tests and `make oracle-check` run on.
   `sqlcl/` (`make sample-sqlcl-fixtures`) is both schemas loaded into Oracle Free and exported again by SQLcl in
   SQL Developer's separate-files layout, one folder per schema with `order.txt` and `counts.csv`; the object list
   comes from Oracle's dictionary. Like `tests/fixtures/sqlcl/`, each data file has the finding for rows with no
@@ -197,13 +199,13 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 
 ### Ground truth
 
-`make oracle-check` (`scripts/oracle/check.sh`, about a minute) runs the ignored test
+`make oracle-check` (`scripts/oracle/check.sh`, about three minutes) runs the ignored test
 `oracle_agrees_with_the_manifest_and_the_fix` against Oracle Free in Docker: image pinned by digest, no published
-port, a throwaway password. It loads generated exports and requires Oracle's rejections to match the manifest, by
-file and line where SQL\*Plus allows: its findings' rows, and its cascade rows, which have no finding but whose parent
-Oracle rejected; but not a duplicate whose key's earlier rows Oracle all rejected for another reason, since a
-rejected row never holds its key. A missing `COMMIT` (one export plants it with `omit_commit`) is no rejection,
-since the load commits at its end. Then it fixes the same exports (default policy, with `--annotate`, and
+port, a throwaway password. It loads generated exports and the planted sample schemas, and requires Oracle's
+rejections to match the manifest, by file and line where SQL\*Plus allows: its findings' rows, and its cascade rows,
+which have no finding but whose parent Oracle rejected; but not a duplicate whose key's earlier rows Oracle all
+rejected for another reason, since a rejected row never holds its key. A missing `COMMIT` (one export plants it with
+`omit_commit`) is no rejection, since the load commits at its end. Then it fixes the same exports (default policy, with `--annotate`, and
 `--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires that under keep-first it removes and sets to NULL exactly the rows the
 manifest lists, that each output with its removed rows put back and any `COMMIT` it added taken out to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
 rejects no duplicate, NULL or missing-parent row other than a child the fix leaves before its parent, that its

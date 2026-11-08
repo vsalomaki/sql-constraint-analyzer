@@ -1,7 +1,8 @@
 //! `tests/fixtures/samples/oracle/` (`make sample-fixtures`) holds Oracle's HR and CO sample schemas: DDL and
 //! INSERTs Oracle wrote, with no violations in them. Oracle Free loads the same files without an error and holds
 //! the row counts below. `sqlcl/` (`make sample-sqlcl-fixtures`) holds what it loaded, exported again by SQLcl in
-//! SQL Developer's separate-files layout.
+//! SQL Developer's separate-files layout. The rows `hr_plants.sql` and `co_plants.sql` plant after the data are
+//! checked with the generator's exports, against `expected.json`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

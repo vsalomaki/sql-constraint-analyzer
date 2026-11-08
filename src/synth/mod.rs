@@ -161,10 +161,10 @@ impl Noise {
     }
 }
 
+/// A manifest written by hand gives only the options that differ from the defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", default)]
 pub struct Options {
-    #[serde(default)]
     pub dialect: DialectId,
     pub seed: u64,
     /// Number of employees; the other tables scale from it.
@@ -183,17 +183,16 @@ pub struct Options {
     /// Tables (`APP.PROJECTS`) whose data isn't written.
     pub omit_data: Vec<String>,
     /// Tables whose rows get no commit after them.
-    #[serde(default)]
     pub omit_commit: Vec<String>,
     /// The most rows a data file holds before the rows go on in `<name>_2.sql`, `<name>_3.sql`, …
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rows_per_file: Option<u64>,
     /// Hang rows from bad rows: children the database rejects with their parent, and `fix` removes with it. Also
     /// enables a key between the projects' rows.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cascades: bool,
     /// With `cascades`, the employees each tree's employee manages in a chain, each the manager of the next.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "is_zero")]
     pub manager_chain: u64,
 }
 
