@@ -677,6 +677,21 @@ impl Build {
                             .extend(constraints.into_iter().map(|c| Written::new(c, origin)));
                     }
                 }
+                AlterAction::Identity { column, on_null } => {
+                    let restated = table
+                        .column(&column.value)
+                        .and_then(|i| table.columns.get(i))
+                        .is_some_and(|c| c.identity && c.default_on_null == on_null);
+                    if !restated {
+                        issues.push(Issue {
+                            origin,
+                            message: format!(
+                                "ALTER TABLE {shown} MODIFY {} changes its identity: not followed",
+                                column.value
+                            ),
+                        });
+                    }
+                }
                 AlterAction::ChangeConstraint { name, change } => {
                     let found = draft
                         .constraints

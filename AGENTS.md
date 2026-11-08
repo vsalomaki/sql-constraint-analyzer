@@ -187,8 +187,8 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   (oracle-samples/db-sample-schemas, MIT, `LICENSE.txt` beside them) at a pinned commit: DDL and INSERT shapes we
   didn't write. Oracle wraps each table's INSERTs in a PL/SQL block, which the analyzer doesn't follow, so the script
   strips the wrapper and changes nothing else but product 4's JSON, which it shortens to what plain SQL accepts
-  (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO's identity
-  columns give it six `not followed` catalog entries and one key that can't be checked.
+  (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO leaves INVENTORY's
+  key to its identity column, so that key can't be checked.
   `sqlcl/` (`make sample-sqlcl-fixtures`) is both schemas loaded into Oracle Free and exported again by SQLcl in
   SQL Developer's separate-files layout, one folder per schema with `order.txt` and `counts.csv`; the object list
   comes from Oracle's dictionary. Like `tests/fixtures/sqlcl/`, each data file has the finding for rows with no

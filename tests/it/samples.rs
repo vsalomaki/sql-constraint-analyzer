@@ -61,12 +61,13 @@ fn hr_checks_clean() {
     );
 }
 
-/// CO resets its identity columns at the end, which the catalog doesn't follow, and leaves INVENTORY's identity
-/// column to Oracle, so those keys can't be checked.
+/// CO leaves INVENTORY's identity column to Oracle, so its key can't be checked. Its identity resets at the end
+/// change only the next generated values.
 #[test]
-fn co_checks_clean_but_for_its_identity_columns() {
+fn co_checks_clean_but_for_the_keys_oracle_generates() {
     let report = check("co");
     assert_read_whole(&report);
+    assert!(report.catalog.is_empty(), "{:?}", report.catalog);
     assert_eq!(report.rows, 8_783);
     assert_eq!(
         (
@@ -75,35 +76,6 @@ fn co_checks_clean_but_for_its_identity_columns() {
             report.schema.disabled
         ),
         (7, 20, 0)
-    );
-    let reset: Vec<(Option<u64>, &str)> = report
-        .catalog
-        .iter()
-        .map(|p| {
-            (
-                p.line,
-                p.message.split(" MODIFY").next().unwrap_or_default(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        reset,
-        [
-            (Some(8920), "ALTER TABLE PRODUCTS"),
-            (Some(8926), "ALTER TABLE STORES"),
-            (Some(8932), "ALTER TABLE CUSTOMERS"),
-            (Some(8938), "ALTER TABLE ORDERS"),
-            (Some(8944), "ALTER TABLE SHIPMENTS"),
-            (Some(8950), "ALTER TABLE INVENTORY"),
-        ]
-    );
-    assert!(
-        report
-            .catalog
-            .iter()
-            .all(|p| p.message.contains("AS IDENTITY") && p.message.ends_with(": not followed")),
-        "{:?}",
-        report.catalog
     );
     let [
         Warning::Unverifiable {

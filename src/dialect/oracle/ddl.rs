@@ -167,14 +167,9 @@ fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
             }
             column.default = Some(default_value(c)?);
         } else if c.eat_word("GENERATED") {
-            // `BY DEFAULT ON NULL`: an explicit NULL takes a generated value, like `DEFAULT ON NULL`.
-            if !c.eat_word("ALWAYS") && c.eat_words(&["BY", "DEFAULT"]) {
-                column.default_on_null = c.eat_words(&["ON", "NULL"]);
-            }
-            c.expect_word("AS")?;
-            if c.eat_word("IDENTITY") {
+            if let Some(on_null) = generated_identity(c)? {
                 column.identity = true;
-                identity_options(c)?;
+                column.default_on_null = on_null;
             } else {
                 virtual_expression(c)?;
             }
@@ -212,6 +207,19 @@ const IDENTITY_OPTIONS: &[&str] = &[
     "SESSION",
     "GLOBAL",
 ];
+
+/// After `GENERATED`: for an identity column, whether an explicit NULL takes a generated value (`BY DEFAULT ON
+/// NULL`); `None` before a virtual column's expression.
+fn generated_identity(c: &mut Cursor) -> Result<Option<bool>, ParseError> {
+    let on_null =
+        !c.eat_word("ALWAYS") && c.eat_words(&["BY", "DEFAULT"]) && c.eat_words(&["ON", "NULL"]);
+    c.expect_word("AS")?;
+    if !c.eat_word("IDENTITY") {
+        return Ok(None);
+    }
+    identity_options(c)?;
+    Ok(Some(on_null))
+}
 
 /// An identity column's options, in parentheses or, as `DBMS_METADATA` writes them, without.
 fn identity_options(c: &mut Cursor) -> Result<(), ParseError> {
@@ -584,7 +592,7 @@ fn alter_table(c: &mut Cursor) -> Result<Statement<'static>, ParseError> {
             && !c.at_words(&["MODIFY", "UNIQUE"])
         {
             c.bump();
-            actions.push(modify(c, start)?);
+            modify(c, start, &mut actions)?;
         } else if let Some(action) = enable_constraint(c)? {
             actions.push(action);
         } else {
@@ -635,16 +643,27 @@ fn add(c: &mut Cursor, actions: &mut Vec<AlterAction>) -> Result<(), ParseError>
     Ok(())
 }
 
-/// `MODIFY` columns: the constraints they gain. Anything else a modification does (a type, a default, `NULL`) isn't
-/// followed, so such a `MODIFY` is kept as written.
-fn modify(c: &mut Cursor, start: usize) -> Result<AlterAction, ParseError> {
+/// `MODIFY` columns: the constraints they gain, and the identity they restate. Anything else a modification does (a
+/// type, a default, `NULL`) isn't followed, so such a `MODIFY` is kept as written.
+fn modify(c: &mut Cursor, start: usize, actions: &mut Vec<AlterAction>) -> Result<(), ParseError> {
     let parenthesized = c.eat_punct(b'(');
     let mut items = Vec::new();
+    let mut identities = Vec::new();
     let mut followed = true;
     loop {
         let column = c.ident("a column name").map(Ident::into_owned)?;
         let mut constraints = Vec::new();
         while !c.at_item_end() {
+            if c.eat_word("GENERATED") {
+                match generated_identity(c)? {
+                    Some(on_null) => identities.push(AlterAction::Identity {
+                        column: column.clone(),
+                        on_null,
+                    }),
+                    None => followed = false,
+                }
+                continue;
+            }
             let at_constraint = c.at_any_word(&[
                 "CONSTRAINT",
                 "NOT",
@@ -673,11 +692,13 @@ fn modify(c: &mut Cursor, start: usize) -> Result<AlterAction, ParseError> {
     if parenthesized {
         c.expect_punct(b')')?;
     }
-    Ok(if followed {
-        AlterAction::ModifyColumns(items)
+    if followed {
+        actions.push(AlterAction::ModifyColumns(items));
+        actions.extend(identities);
     } else {
-        AlterAction::Other(c.text(start, c.pos()))
-    })
+        actions.push(AlterAction::Other(c.text(start, c.pos())));
+    }
+    Ok(())
 }
 
 /// `ENABLE|DISABLE [VALIDATE|NOVALIDATE] CONSTRAINT name …`; `None` when the cursor isn't at one.
