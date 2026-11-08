@@ -1,0 +1,131 @@
+{
+  "generator": "written by hand from hr/hr_plants.sql and co/co_plants.sql",
+  "options": {
+    "encoding": "utf-8"
+  },
+  "files": [
+    { "path": "hr/hr_create.sql" },
+    { "path": "hr/hr_populate.sql" },
+    { "path": "hr/hr_plants.sql" },
+    { "path": "co/co_create.sql" },
+    { "path": "co/co_populate.sql" },
+    { "path": "co/co_plants.sql" }
+  ],
+  "findings": [
+    {
+      "kind": "duplicate_key",
+      "constraint": "HR.JHIST_EMP_ID_ST_DATE_PK",
+      "table": "HR.JOB_HISTORY",
+      "columns": ["EMPLOYEE_ID", "START_DATE"],
+      "file": "hr/hr_plants.sql",
+      "line": 2,
+      "key": ["200", "2012-07-01 00:00:00"],
+      "first": { "file": "hr/hr_populate.sql", "line": 2360 }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "HR.EMP_EMAIL_UK",
+      "table": "HR.EMPLOYEES",
+      "columns": ["EMAIL"],
+      "file": "hr/hr_plants.sql",
+      "line": 3,
+      "key": ["SKING"],
+      "first": { "file": "hr/hr_populate.sql", "line": 790 }
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "HR.EMP_DEPT_FK",
+      "table": "HR.EMPLOYEES",
+      "columns": ["DEPARTMENT_ID"],
+      "file": "hr/hr_plants.sql",
+      "line": 4,
+      "key": ["999"]
+    },
+    {
+      "kind": "not_null",
+      "constraint": "HR.JOB_TITLE_NN",
+      "table": "HR.JOBS",
+      "columns": ["JOB_TITLE"],
+      "file": "hr/hr_plants.sql",
+      "line": 5
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "CO.ORDER_ITEMS_PK",
+      "table": "CO.ORDER_ITEMS",
+      "columns": ["ORDER_ID", "LINE_ITEM_ID"],
+      "file": "co/co_plants.sql",
+      "line": 3,
+      "key": ["1", "1"],
+      "first": { "file": "co/co_populate.sql", "line": 4428 }
+    },
+    {
+      "kind": "duplicate_key",
+      "constraint": "CO.ORDER_ITEMS_PRODUCT_U",
+      "table": "CO.ORDER_ITEMS",
+      "columns": ["PRODUCT_ID", "ORDER_ID"],
+      "file": "co/co_plants.sql",
+      "line": 4,
+      "key": ["33", "1"],
+      "first": { "file": "co/co_populate.sql", "line": 4428 }
+    },
+    {
+      "kind": "not_null",
+      "table": "CO.CUSTOMERS",
+      "columns": ["FULL_NAME"],
+      "file": "co/co_plants.sql",
+      "line": 5
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "CO.ORDERS_CUSTOMER_ID_FK",
+      "table": "CO.ORDERS",
+      "columns": ["CUSTOMER_ID"],
+      "file": "co/co_plants.sql",
+      "line": 6,
+      "key": ["9999"]
+    }
+  ],
+  "cascades": [
+    {
+      "file": "co/co_plants.sql",
+      "line": 7,
+      "constraint": "CO.ORDER_ITEMS_ORDER_ID_FK",
+      "parent": { "file": "co/co_plants.sql", "line": 6 }
+    },
+    {
+      "file": "co/co_plants.sql",
+      "line": 8,
+      "constraint": "CO.ORDER_ITEMS_ORDER_ID_FK",
+      "parent": { "file": "co/co_plants.sql", "line": 6 }
+    }
+  ],
+  "fixes": {
+    "removed": [
+      { "file": "hr/hr_plants.sql", "line": 2 },
+      { "file": "hr/hr_plants.sql", "line": 3 },
+      { "file": "hr/hr_plants.sql", "line": 4 },
+      { "file": "hr/hr_plants.sql", "line": 5 },
+      { "file": "co/co_plants.sql", "line": 3 },
+      { "file": "co/co_plants.sql", "line": 4 },
+      { "file": "co/co_plants.sql", "line": 5 },
+      { "file": "co/co_plants.sql", "line": 6 },
+      { "file": "co/co_plants.sql", "line": 7 },
+      { "file": "co/co_plants.sql", "line": 8 }
+    ],
+    "removed_on_fk_null": [
+      { "file": "hr/hr_plants.sql", "line": 2 },
+      { "file": "hr/hr_plants.sql", "line": 3 },
+      { "file": "hr/hr_plants.sql", "line": 5 },
+      { "file": "co/co_plants.sql", "line": 3 },
+      { "file": "co/co_plants.sql", "line": 4 },
+      { "file": "co/co_plants.sql", "line": 5 },
+      { "file": "co/co_plants.sql", "line": 6 },
+      { "file": "co/co_plants.sql", "line": 7 },
+      { "file": "co/co_plants.sql", "line": 8 }
+    ],
+    "nulled_on_fk_null": [
+      { "file": "hr/hr_plants.sql", "line": 4, "columns": ["DEPARTMENT_ID"] }
+    ]
+  }
+}

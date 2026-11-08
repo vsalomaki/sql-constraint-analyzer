@@ -89,7 +89,7 @@ fn run_with(
 
 #[test]
 fn committed_exports_are_fixed_and_restored_by_their_rejects() {
-    for root in fixtures::generated() {
+    for root in fixtures::with_manifests() {
         let manifest = fixtures::manifest(&root);
         for load_order in [false, true] {
             let options = Options {
@@ -219,7 +219,7 @@ fn assert_fixes_as_listed(root: &Path) {
 
 #[test]
 fn committed_exports_lose_exactly_the_rows_their_manifests_list() {
-    for root in fixtures::generated() {
+    for root in fixtures::with_manifests() {
         assert_fixes_as_listed(&root);
     }
 }

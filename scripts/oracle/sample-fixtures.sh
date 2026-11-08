@@ -30,7 +30,6 @@ json="$(sed -n "/^  prod_details := '/,/';\$/p" "$work/co_populate.sql" |
     jq -c 'def fit: if (tojson | utf8bytelength) <= 2000 then . else .reviews |= .[:-1] | fit end; fit')"
 literal="$(printf '%s' "$json" | sed "s/'/''/g")"
 
-rm -rf "$OUT/hr" "$OUT/co"
 mkdir -p "$OUT/hr" "$OUT/co"
 cp "$work/LICENSE.txt" "$OUT/LICENSE.txt"
 cp "$work/hr_create.sql" "$OUT/hr/hr_create.sql"

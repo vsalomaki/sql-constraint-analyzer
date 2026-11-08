@@ -57,6 +57,14 @@ pub(crate) fn generated() -> Vec<PathBuf> {
     exports
 }
 
+/// The committed exports a manifest describes: the generator's, then Oracle's HR and CO sample schemas with the rows
+/// `hr/hr_plants.sql` and `co/co_plants.sql` plant after them, whose manifest is written by hand.
+pub(crate) fn with_manifests() -> Vec<PathBuf> {
+    let mut exports = generated();
+    exports.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/samples/oracle"));
+    exports
+}
+
 #[expect(
     clippy::unwrap_used,
     reason = "a missing or malformed manifest fails the test"

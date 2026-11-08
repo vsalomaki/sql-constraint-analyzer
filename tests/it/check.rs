@@ -71,7 +71,7 @@ fn difference(found: &BTreeSet<Finding>, expected: &BTreeSet<Finding>) -> String
 
 #[test]
 fn committed_exports_give_exactly_the_planted_findings_in_both_modes() {
-    for root in fixtures::generated() {
+    for root in fixtures::with_manifests() {
         let manifest = fixtures::manifest(&root);
         for load_order in [false, true] {
             let at = format!("{} load_order={load_order}", root.display());
