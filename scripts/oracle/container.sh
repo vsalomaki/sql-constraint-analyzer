@@ -5,6 +5,8 @@
 
 # The 23 tags now ship Oracle 26ai Free; the digest pins the exact build.
 IMAGE="gvenzl/oracle-free:23-slim-faststart@sha256:f5ff19033860d662c821cb04eb10483fa94f14f78eae252d054291ea07028093"
+# SQLcl, for the scripts that export what Oracle holds.
+SQLCL="container-registry.oracle.com/database/sqlcl:latest@sha256:7f1854c7a95c5a0eddf93c6bce1c2d441fab980384a061297e865a5a3ce55d2f"
 NAME="${SQLCA_ORACLE_CONTAINER:-sqlca-oracle}"
 # A throwaway password for a local container that publishes no port.
 PASSWORD="${SQLCA_ORACLE_PASSWORD:-sqlca-local}"
