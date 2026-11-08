@@ -167,6 +167,12 @@ pub enum AlterAction {
     AddColumns(Vec<ColumnDef>),
     /// `MODIFY (col NOT NULL …)` and the like: the constraints the modified columns gain.
     ModifyColumns(Vec<(Ident<'static>, Vec<ConstraintDef>)>),
+    /// `MODIFY col GENERATED … AS IDENTITY …`. Oracle accepts it only on an identity column, so it changes no more
+    /// than the next generated value unless it changes whether an explicit NULL takes one.
+    Identity {
+        column: Ident<'static>,
+        on_null: bool,
+    },
     /// `ENABLE` / `DISABLE` / `MODIFY CONSTRAINT name …`: what changes in a constraint's state.
     ChangeConstraint {
         name: Ident<'static>,
