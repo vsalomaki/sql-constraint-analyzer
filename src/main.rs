@@ -54,11 +54,12 @@ struct InputArgs {
     #[arg(short = '0', long, requires = "files_from", conflicts_with_all = ["paths", "script"])]
     null: bool,
 
-    /// A SQL*Plus master script: its @file, @@file and START file lines are followed in order, recursively.
+    /// A SQL*Plus master script: each @file, @@file and START file line runs that file where the line is, recursively.
     ///
-    /// `@` and START look in the working directory, then in each SQLPATH entry; `@@` looks beside the script that
-    /// holds it; `.sql` is added to a name without an extension. The script itself is listed first, so its own
-    /// statements load before what it includes. A script that includes itself is refused.
+    /// The script's own statements run where they are, between what it includes, as one session: a COMMIT in the
+    /// script commits the rows its includes left. `@` and START look in the working directory, then in each SQLPATH
+    /// entry; `@@` looks beside the script that holds it; `.sql` is added to a name without an extension. A file
+    /// included again is read only where it is first included or listed. A script that includes itself is refused.
     #[arg(long, value_name = "FILE", group = "form")]
     script: Option<PathBuf>,
 
@@ -356,12 +357,15 @@ struct InputsArgs {
     /// given; a cycle is broken at the earliest file given in it. A key whose parent rows still come later is named in
     /// a warning. A foreign key that is disabled, checked only at commit, or points at its own table doesn't order
     /// files. A statement it can't read is an error and exits 1, as the order may miss what it holds; a file it can't
-    /// read to the end exits 2.
-    #[arg(long)]
+    /// read to the end exits 2. Not with --script, whose own statements run between its includes.
+    #[arg(long, conflicts_with = "script")]
     dependency_order: bool,
 
     /// text (default); JSON Lines, one object per file with position, role, path, bytes and order; or paths, the
     /// data files' paths alone, one per line, for --files-from (give --schema and --reference files again).
+    ///
+    /// With --script, paths lists each file whole: a list read with --files-from runs a script's own statements
+    /// before what it includes, so check a script with --script itself.
     #[arg(long, value_enum, default_value_t)]
     format: Format,
 

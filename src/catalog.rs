@@ -7,16 +7,17 @@
 use std::collections::HashMap;
 
 use crate::dialect::Rules;
+use crate::source::RunAt;
 use crate::statement::{
     AlterAction, ColumnDef, ConstraintDef, ConstraintKind, ConstraintState, DataType, Expr, Ident,
     IndexColumn, Name, Statement,
 };
 
-/// Where a statement is in the input: the file's position in the run, and its offset and line in that file.
+/// Where a statement is in the input: the file's position in the run, where it runs, and its line in that file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Origin {
     pub file: usize,
-    pub offset: u64,
+    pub run: RunAt,
     pub line: u64,
 }
 
@@ -117,8 +118,6 @@ impl Table {
             .collect()
     }
 
-    /// The constraint that forbids NULL in the column at `position` for a row at `offset` in the file at `file` in
-    /// the run: a NOT NULL, else a primary key, that judges the row.
     /// Whether some constraint reads each column: a key's, a foreign key's or a NOT NULL's.
     pub fn read_columns(&self) -> Vec<bool> {
         let mut read = vec![false; self.columns.len()];
@@ -139,8 +138,10 @@ impl Table {
         read
     }
 
-    pub fn forbids_null(&self, position: usize, file: usize, offset: u64) -> Option<&Constraint> {
-        let judging = |c: &&Constraint| c.judges(file, offset);
+    /// The constraint that forbids NULL in the column at `position` for a row that runs `at`: a NOT NULL, else a
+    /// primary key, that judges the row.
+    pub fn forbids_null(&self, position: usize, at: RunAt) -> Option<&Constraint> {
+        let judging = |c: &&Constraint| c.judges(at);
         let not_null = self
             .constraints
             .iter()
@@ -155,12 +156,10 @@ impl Table {
 }
 
 impl Constraint {
-    /// Whether the constraint judges a row at `offset` in the file at `file` in the run: enabled, and either enabled
-    /// before the row or validating the rows that were there when it was enabled.
-    pub fn judges(&self, file: usize, offset: u64) -> bool {
-        self.state.enabled
-            && ((file, offset) > (self.enabled_at.file, self.enabled_at.offset)
-                || self.state.validated)
+    /// Whether the constraint judges a row that runs `at`: enabled, and either enabled before the row ran or
+    /// validating the rows that were there when it was enabled.
+    pub fn judges(&self, at: RunAt) -> bool {
+        self.state.enabled && (at > self.enabled_at.run || self.state.validated)
     }
 }
 

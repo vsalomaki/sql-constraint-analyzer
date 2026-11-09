@@ -97,6 +97,7 @@ fn uncommitted(sql: &str, role: Role) -> Vec<Finding> {
         role,
         bytes: 0,
         order: OrderSource::Given,
+        includes: Vec::new(),
     }];
     let report = check::run(&files, &Options::default()).unwrap();
     report
@@ -168,6 +169,7 @@ fn rows_with_no_commit_after_them_are_one_finding_at_the_first() {
         role: Role::Data,
         bytes: 0,
         order: OrderSource::Given,
+        includes: Vec::new(),
     }];
     assert!(check::run(&files, &off).unwrap().findings.is_empty());
 }
@@ -439,6 +441,7 @@ fn check_sql(sql: &str, load_order: bool) -> (Report, Vec<(FindingKind, u64, boo
         role: Role::Data,
         bytes: 0,
         order: OrderSource::Given,
+        includes: Vec::new(),
     }];
     let options = Options {
         load_order,
@@ -591,6 +594,7 @@ fn an_identity_restated_by_alter_table_is_followed() {
             role: Role::Data,
             bytes: 0,
             order: OrderSource::Given,
+            includes: Vec::new(),
         }];
         let report = check::run(&files, &Options::default()).unwrap();
         assert!(

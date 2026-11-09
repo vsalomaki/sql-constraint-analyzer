@@ -252,6 +252,18 @@ fn a_script_is_followed_through_nested_includes() {
     assert_eq!(found[1].order, "as included by load.sql");
 }
 
+/// A script runs its own statements between its includes, which no list of whole files can say.
+#[test]
+fn dependency_order_refuses_a_script() {
+    let dir = workspace(&[("load.sql", b"@@a\n"), ("a.sql", b"")]);
+    sqlca_in(&dir)
+        .args(["inputs", "--script", "load.sql", "--dependency-order"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(contains("cannot be used with"));
+}
+
 #[test]
 fn a_script_that_includes_itself_is_refused() {
     let dir = workspace(&[("a.sql", b"@@b\n"), ("b.sql", b"@@a\n")]);

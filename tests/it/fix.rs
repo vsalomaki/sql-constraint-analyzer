@@ -284,6 +284,7 @@ fn write_scripts(scripts: &[(&str, &str)]) -> (tempfile::TempDir, Vec<InputFile>
                 },
                 bytes: u64::try_from(sql.len()).unwrap(),
                 order: OrderSource::Given,
+                includes: Vec::new(),
             }
         })
         .collect();
@@ -1831,6 +1832,7 @@ fn an_output_folder_that_isnt_empty_is_refused() {
         role: Role::Data,
         bytes: 8,
         order: OrderSource::Given,
+        includes: Vec::new(),
     }];
     let error = fix::fix(
         &files,
@@ -1874,6 +1876,7 @@ fn a_failed_backup_leaves_every_input_as_it_was() {
                 role: Role::Data,
                 bytes: u64::try_from(sql.len()).unwrap(),
                 order: OrderSource::Given,
+                includes: Vec::new(),
             }
         })
         .collect();
@@ -1959,6 +1962,7 @@ fn two_files() -> (tempfile::TempDir, Vec<InputFile>) {
                 role: Role::Data,
                 bytes: u64::try_from(sql.len()).unwrap(),
                 order: OrderSource::Given,
+                includes: Vec::new(),
             }
         })
         .collect();
@@ -2473,6 +2477,7 @@ fn fix_uncommitted(
         role: Role::Data,
         bytes: u64::try_from(sql.len()).unwrap(),
         order: OrderSource::Given,
+        includes: Vec::new(),
     }];
     let report = fix::fix(
         &files,

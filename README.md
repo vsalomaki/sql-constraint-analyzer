@@ -53,7 +53,7 @@ is declared, and `--load-order` judges rows in that order. Name the main inputs 
 |---|---|---|
 | Paths or glob patterns | Each pattern's matches version-sorted (`2_a.sql` before `10_a.sql`); patterns in the order given | `sqlca check 'export/tables/*.sql' 'export/data/**/*.sql'` |
 | `--files-from LIST` | As listed, one literal path per line; `-` reads the list from stdin, `-0` takes NUL separators | `find export -name '*.sql' \| sort \| sqlca check --files-from -` |
-| `--script FILE` | A SQL\*Plus master script's `@`, `@@` and `START` lines, followed recursively | `sqlca check --script export/load.sql` |
+| `--script FILE` | A SQL\*Plus master script: each `@`, `@@` and `START` line runs its file where the line is, recursively, between the script's own statements | `sqlca check --script export/load.sql` |
 
 - Quote glob patterns: `sqlca` expands them itself, including `**`. A pattern that matches nothing, or a missing
   file, stops the run.

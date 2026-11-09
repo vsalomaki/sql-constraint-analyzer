@@ -22,8 +22,8 @@ use crate::catalog::{Catalog, Kind, Table};
 use crate::check::{self, Report};
 use crate::dialect::Pass;
 use crate::finding::{Finding, FindingKind, Location};
-use crate::input::{self, InputError, InputFile, Role};
-use crate::source::Span;
+use crate::input::{self, InputError, InputFile, Role, RunPlan};
+use crate::source::{RunAt, Span};
 use crate::statement::{InsertRow, Statement};
 use crate::value;
 
@@ -306,6 +306,7 @@ pub fn fix_with(
         mut left,
         holders,
         defers_checks,
+        run: plan,
     } = run_rounds(files, options, policy, &names, target.dry_run, observer)?;
     let committed = if defers_checks {
         let uncommitted = input
@@ -318,7 +319,14 @@ pub fn fix_with(
         }));
         Vec::new()
     } else {
-        commits(files, &names, &input.findings, options, target.annotate)?
+        commits(
+            files,
+            &names,
+            &input.findings,
+            options,
+            target.annotate,
+            &plan,
+        )?
     };
 
     let outputs: Vec<Output> = names
@@ -347,13 +355,12 @@ pub fn fix_with(
         return Err(FixError::BackupExists(taken.clone()));
     }
     describe_removals(&mut removed, files, target.annotate)?;
-    let kept = kept_another_row(&input, &holders, &removed, &left, &order, policy);
+    let kept = kept_another_row(&input, &holders, &removed, &left, &order, policy, &plan);
     // Without a last round, the verify supplies it; the last round reads the input without the commits added.
     let mut output = last.unwrap_or_default();
-    output.findings.retain(|f| {
-        f.kind != FindingKind::Uncommitted
-            || !committed.iter().any(|c| f.file.as_ref() == Some(&c.file))
-    });
+    output
+        .findings
+        .retain(|f| !settled_by(&committed, f, &order, &plan));
     let mut report = FixReport {
         input,
         output,
@@ -414,13 +421,22 @@ fn write(
             };
             // The verify's progress counts the bytes as written; a file that can't be read fails the check itself.
             let bytes = fs::metadata(&path).map_or(f.bytes, |m| m.len());
-            InputFile {
+            // The same files, at where the script's include commands are now that rows before them are cut.
+            let includes = input::refresh_includes(
+                f,
+                &path,
+                options.dialect,
+                options.runner,
+                options.encoding,
+            )?;
+            Ok(InputFile {
                 path,
                 bytes,
+                includes,
                 ..f.clone()
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, InputError>>()?;
     observer.stage("verify");
     report.output = check::run_with(&written, options, observer)?;
     report.files = outputs;
@@ -449,6 +465,8 @@ struct Plan {
     holders: Holders,
     /// Whether an enabled constraint is checked only at commit.
     defers_checks: bool,
+    /// The order the inputs run in.
+    run: RunPlan,
 }
 
 /// A duplicated key: its table, constraint, columns and value.
@@ -494,6 +512,7 @@ fn run_rounds(
     confirm: bool,
     observer: &mut dyn check::Observer,
 ) -> Result<Plan, FixError> {
+    let plan = RunPlan::new(files);
     let mut cuts: Vec<Vec<Span>> = vec![Vec::new(); files.len()];
     let mut removed = Vec::new();
     let mut first_report = None;
@@ -517,7 +536,7 @@ fn run_rounds(
             targets,
             left: skipped,
             waiting,
-        } = targets(&report, files, names, policy, &crowded);
+        } = targets(&report, files, names, &plan, policy, &crowded);
         if rounds == policy.max_rounds && !targets.is_empty() {
             let left = past_limit(&report, policy, skipped);
             break (Some(report), left);
@@ -533,7 +552,7 @@ fn run_rounds(
             else {
                 continue;
             };
-            for cut in locate(scanned, *index, lines, schema.catalog(), policy) {
+            for cut in locate(scanned, *index, lines, schema.catalog(), &plan, policy) {
                 let name = names.get(*index).cloned().unwrap_or_default();
                 if !cut.nulled.is_empty() {
                     if change(&mut removed, name, cut, rounds + 1) {
@@ -574,6 +593,7 @@ fn run_rounds(
         left,
         holders,
         defers_checks: schema.catalog().defers_checks(),
+        run: plan,
     })
 }
 
@@ -693,13 +713,15 @@ fn nulled_values(removed: &[Removal], names: &[String]) -> Vec<Vec<Span>> {
         .collect()
 }
 
-/// A commit at the end of each data file whose last rows the input check found with none after them.
+/// A commit at the end of each unit whose last rows the input check found with none after them: at the end of the
+/// file read on its own, which may be a script that included the rows.
 fn commits(
     files: &[InputFile],
     names: &[String],
     findings: &[Finding],
     options: &check::Options,
     annotate: bool,
+    plan: &RunPlan,
 ) -> Result<Vec<Commit>, FixError> {
     let mut commits = Vec::new();
     for finding in findings
@@ -709,7 +731,7 @@ fn commits(
         let Some(file) = names
             .iter()
             .position(|n| finding.file.as_ref() == Some(n))
-            .and_then(|i| files.get(i))
+            .and_then(|i| files.get(plan.unit_of(i)))
         else {
             continue;
         };
@@ -723,6 +745,19 @@ fn commits(
         });
     }
     Ok(commits)
+}
+
+/// Whether one of the commits added settles `finding`: one at the end of the unit, which may be a script that
+/// included the rows.
+fn settled_by(committed: &[Commit], finding: &Finding, names: &[String], plan: &RunPlan) -> bool {
+    let unit = |file: &str| {
+        let index = names.iter().position(|n| n == file)?;
+        names.get(plan.unit_of(index))
+    };
+    finding.kind == FindingKind::Uncommitted
+        && committed
+            .iter()
+            .any(|c| finding.file.as_deref().and_then(unit) == Some(&c.file))
 }
 
 /// The end of the file at `path`, and what goes there to commit its last rows, each line ended as the file's last
@@ -775,7 +810,15 @@ fn write_outputs(
             continue;
         }
         let bytes = files.get(index).map_or(0, |f| f.bytes);
-        observer.file(index, &output.input, bytes);
+        observer.file(
+            index,
+            &output.input,
+            bytes,
+            Span {
+                start: 0,
+                end: bytes,
+            },
+        );
         let removals = report.removed.iter().filter(|r| r.file == output.input);
         let commits = report.committed.iter().filter(|c| c.file == output.input);
         let edits: Vec<Edit> = removals
@@ -1179,6 +1222,7 @@ fn targets<'a>(
     report: &'a check::Report,
     files: &[InputFile],
     names: &[String],
+    plan: &RunPlan,
     policy: Policy,
     crowded: &BTreeSet<Row>,
 ) -> Decision<'a> {
@@ -1224,7 +1268,7 @@ fn targets<'a>(
     }
     let mut lasts = Vec::new();
     for group in groups.into_values() {
-        match all_but_last(&group, files, &row_of, policy, crowded) {
+        match all_but_last(&group, files, &row_of, plan, policy, crowded) {
             Ok(last) => lasts.push(last),
             Err(why) => left.extend(group.iter().map(|f| Left {
                 finding: (*f).clone(),
@@ -1267,6 +1311,7 @@ fn all_but_last<'a>(
     group: &[&'a Finding],
     files: &[InputFile],
     row_of: &dyn Fn(&str, u64) -> Option<Row>,
+    plan: &RunPlan,
     policy: Policy,
     crowded: &BTreeSet<Row>,
 ) -> Result<(Row, Vec<(Row, &'a Finding)>), &'static str> {
@@ -1299,7 +1344,7 @@ fn all_but_last<'a>(
         }
         rows.push((own, finding));
     }
-    rows.sort_by_key(|(row, _)| *row);
+    rows.sort_by_key(|((file, line), _)| plan.row_order(*file, *line));
     let shared = rows.windows(2).any(|pair| match pair {
         [(a, _), (b, _)] => a == b,
         _ => false,
@@ -1344,7 +1389,7 @@ fn scan(
     let mut statements = Vec::new();
     for piece in options
         .dialect
-        .pieces(opened.reader, options.runner, opened.base_offset)
+        .pieces(opened.reader, options.runner, opened.base_offset, 1)
     {
         let Ok(piece) = piece else {
             break;
@@ -1385,6 +1430,7 @@ fn locate(
     file: usize,
     lines: &BTreeMap<u64, Vec<&Finding>>,
     catalog: &Catalog,
+    plan: &RunPlan,
     policy: Policy,
 ) -> Vec<Cut> {
     let mut cuts = Vec::new();
@@ -1393,7 +1439,14 @@ fn locate(
             .iter()
             .filter_map(|row| {
                 let findings = lines.get(&row.line)?;
-                Some(action(row, (file, *statement), findings, catalog, policy))
+                Some(action(
+                    row,
+                    (file, *statement),
+                    findings,
+                    catalog,
+                    plan,
+                    policy,
+                ))
             })
             .collect();
         let going = actions.iter().filter(|a| a.nulled.is_empty()).count();
@@ -1419,6 +1472,7 @@ fn action(
     (file, statement): (usize, Span),
     findings: &[&Finding],
     catalog: &Catalog,
+    plan: &RunPlan,
     policy: Policy,
 ) -> Cut {
     let mut reasons: Vec<Reason> = findings.iter().map(|f| reason(f)).collect();
@@ -1428,7 +1482,7 @@ fn action(
             .all(|f| f.kind == FindingKind::FkMissingParent);
     let mut nulled = Vec::new();
     if null_wanted {
-        match nullable_values(row, file, findings, catalog) {
+        match nullable_values(row, file, findings, catalog, plan) {
             Ok(values) => nulled = values,
             Err(why) => {
                 for reason in &mut reasons {
@@ -1454,6 +1508,7 @@ fn nullable_values(
     file: usize,
     findings: &[&Finding],
     catalog: &Catalog,
+    plan: &RunPlan,
 ) -> Result<Vec<(String, Span)>, String> {
     let resolved = check::resolve_row(catalog, row, file)
         .map_err(|_| "its table can't be matched".to_owned())?;
@@ -1465,7 +1520,7 @@ fn nullable_values(
         let position = table
             .column(column)
             .ok_or_else(|| format!("{column} isn't a column of its table"))?;
-        if let Some(why) = not_nullable(table, position, file, row.span.start) {
+        if let Some(why) = not_nullable(table, position, plan.at(file, row.span.start)) {
             return Err(format!("{column} {why}"));
         }
         let value = resolved
@@ -1482,9 +1537,9 @@ fn nullable_values(
     Ok(nulled)
 }
 
-/// Why the column at `position` can't hold NULL in a row at `offset` in the file at `file`, if it can't: the same
-/// constraints the check judges the row by.
-fn not_nullable(table: &Table, position: usize, file: usize, offset: u64) -> Option<&'static str> {
+/// Why the column at `position` can't hold NULL in a row that runs `at`, if it can't: the same constraints the
+/// check judges the row by.
+fn not_nullable(table: &Table, position: usize, at: RunAt) -> Option<&'static str> {
     let column = table.columns.get(position)?;
     if column.identity {
         return Some("is an identity column");
@@ -1492,12 +1547,10 @@ fn not_nullable(table: &Table, position: usize, file: usize, offset: u64) -> Opt
     if column.default_on_null {
         return Some("takes its default in place of NULL");
     }
-    table
-        .forbids_null(position, file, offset)
-        .map(|c| match c.kind {
-            Kind::PrimaryKey { .. } => "is part of the primary key",
-            _ => "is NOT NULL",
-        })
+    table.forbids_null(position, at).map(|c| match c.kind {
+        Kind::PrimaryKey { .. } => "is part of the primary key",
+        _ => "is NOT NULL",
+    })
 }
 
 /// A finding as a removal or change gives it, without places: the removal says where the row was.
@@ -1940,7 +1993,7 @@ pub fn summary(report: &FixReport) -> String {
 
 /// The duplicated keys of the input whose row the policy keeps went for another reason, other than keys left for
 /// review. The policy's row is the input's; the rows the key keeps instead may be ones later rounds found, in
-/// `holders`. `names` are the inputs in run order.
+/// `holders`. `names` are the inputs by position, and `plan` the order they run in.
 fn kept_another_row(
     input: &check::Report,
     holders: &Holders,
@@ -1948,6 +2001,7 @@ fn kept_another_row(
     left: &[Left],
     names: &[String],
     policy: Policy,
+    plan: &RunPlan,
 ) -> Vec<Kept> {
     if policy.on_duplicate == OnDuplicate::Keep {
         return Vec::new();
@@ -1970,7 +2024,10 @@ fn kept_another_row(
         .filter(|l| l.finding.kind == FindingKind::DuplicateKey)
         .map(|l| key_of(&l.finding))
         .collect();
-    let order = |at: &Location| (names.iter().position(|n| *n == at.file), at.line);
+    let order = |at: &Location| {
+        let file = names.iter().position(|n| *n == at.file)?;
+        Some(plan.row_order(file, at.line))
+    };
     // By key, in the input's order: a duplicate naming it, and the rows the input's duplicates name.
     let mut keys: Vec<(KeyId, &Finding, Vec<Location>)> = Vec::new();
     let mut index: BTreeMap<KeyId, usize> = BTreeMap::new();

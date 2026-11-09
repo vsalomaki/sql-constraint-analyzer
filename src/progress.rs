@@ -1,6 +1,7 @@
 //! The run as it goes, on stderr: a live line on a terminal, or a line per finished file elsewhere, and how long each
 //! phase took, for the summary.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::catalog::{Catalog, Kind, Parent, Table};
 use crate::check::Observer;
 use crate::dialect::Pass;
+use crate::source::Span;
 
 /// How the run shows its progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +50,22 @@ pub struct Progress<'a> {
     stage: Option<String>,
     pass: Option<(Pass, Instant)>,
     resolving: Option<Instant>,
-    /// Bytes of the pass read before the current file, the current file's name, size and start.
+    /// Bytes of the pass read in the parts before the current one.
     done: u64,
-    file: Option<(String, u64, Instant)>,
+    file: Option<Part>,
     offset: u64,
+    /// By file: the time its earlier parts took, while the files its includes run are read.
+    taken: BTreeMap<usize, Duration>,
     drawn: Option<Instant>,
+}
+
+/// The part of a file being read: its position, name and size, the part's place, and when it started.
+struct Part {
+    index: usize,
+    name: String,
+    bytes: u64,
+    span: Span,
+    started: Instant,
 }
 
 /// Redraws the live line at most this often.
@@ -71,6 +84,7 @@ impl<'a> Progress<'a> {
             done: 0,
             file: None,
             offset: 0,
+            taken: BTreeMap::new(),
             drawn: None,
         }
     }
@@ -108,13 +122,19 @@ impl<'a> Progress<'a> {
         }
     }
 
-    /// Writes the finished file's line in plain display: a file the rows pass read, or one a stage outside any pass
-    /// wrote.
+    /// Counts the current part as read, and once it is the file's last, writes the file's line in plain display: a
+    /// file the rows pass read, or one a stage outside any pass wrote.
     fn end_file(&mut self) {
-        let Some((name, bytes, started)) = self.file.take() else {
+        let Some(part) = self.file.take() else {
             return;
         };
-        self.done += bytes;
+        self.offset = 0;
+        self.done += part.span.end.saturating_sub(part.span.start);
+        let took = self.taken.remove(&part.index).unwrap_or_default() + part.started.elapsed();
+        if part.span.end < part.bytes {
+            self.taken.insert(part.index, took);
+            return;
+        }
         let listed = match self.pass {
             Some((pass, _)) => pass == Pass::Rows,
             None => self.stage.is_some(),
@@ -123,10 +143,11 @@ impl<'a> Progress<'a> {
             // A write that fails here has nowhere better to go; the summary will fail too.
             drop(writeln!(
                 self.err,
-                "{} {name}  {}  {}",
+                "{} {}  {}  {}",
                 self.step(),
-                size(bytes),
-                seconds(started.elapsed())
+                part.name,
+                size(part.bytes),
+                seconds(took)
             ));
         }
     }
@@ -146,7 +167,7 @@ impl<'a> Progress<'a> {
         if self.drawn.is_some_and(|at| at.elapsed() < REDRAW) {
             return;
         }
-        let name = self.file.as_ref().map_or("", |(n, _, _)| n.as_str());
+        let name = self.file.as_ref().map_or("", |p| p.name.as_str());
         let (head, mut tail) = match self.pass {
             Some((pass, started)) => self.bar(pass, started),
             None if self.stage.is_some() => (format!("{} ", self.step()), Vec::new()),
@@ -165,6 +186,12 @@ impl<'a> Progress<'a> {
         self.drawn = Some(Instant::now());
     }
 
+    /// The bytes of the pass read: the parts before, and the current one so far.
+    fn read(&self) -> u64 {
+        let start = self.file.as_ref().map_or(0, |p| p.span.start);
+        self.done + self.offset.saturating_sub(start)
+    }
+
     /// `[2/3] Rows    ███░░░░░░░  30%  `, and the speed and ETA that go after the file's name.
     fn bar(&self, pass: Pass, started: Instant) -> (String, Vec<(Keep, String)>) {
         let label = match pass {
@@ -175,7 +202,7 @@ impl<'a> Progress<'a> {
             Pass::Schema => self.phases.schema.bytes,
             Pass::Rows => self.phases.rows.bytes,
         };
-        let read = self.done + self.offset;
+        let read = self.read();
         let share = if total == 0 {
             1.0
         } else {
@@ -213,12 +240,19 @@ impl Observer for Progress<'_> {
         self.pass = Some((pass, Instant::now()));
         self.done = 0;
         self.offset = 0;
+        self.taken.clear();
     }
 
-    fn file(&mut self, _index: usize, name: &str, bytes: u64) {
+    fn file(&mut self, index: usize, name: &str, bytes: u64, part: Span) {
         self.end_file();
-        self.file = Some((name.to_owned(), bytes, Instant::now()));
-        self.offset = 0;
+        self.file = Some(Part {
+            index,
+            name: name.to_owned(),
+            bytes,
+            span: part,
+            started: Instant::now(),
+        });
+        self.offset = part.start;
         self.draw();
     }
 
@@ -246,6 +280,7 @@ impl Observer for Progress<'_> {
         self.stage = Some(stage.to_owned());
         self.done = 0;
         self.offset = 0;
+        self.taken.clear();
     }
 }
 
@@ -419,6 +454,45 @@ fn listing(catalog: &Catalog) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn whole(bytes: u64) -> Span {
+        Span {
+            start: 0,
+            end: bytes,
+        }
+    }
+
+    #[test]
+    fn a_script_read_in_parts_is_counted_once_and_listed_after_its_includes() {
+        let mut out = Vec::new();
+        let mut progress = Progress::new(Display::Plain, false, &mut out);
+        progress.pass(Pass::Rows, 2, 300);
+        progress.file(0, "load.sql", 100, Span { start: 0, end: 40 });
+        progress.advance(40);
+        assert_eq!(progress.read(), 40);
+        progress.file(1, "data.sql", 200, whole(200));
+        progress.advance(200);
+        progress.file(
+            0,
+            "load.sql",
+            100,
+            Span {
+                start: 40,
+                end: 100,
+            },
+        );
+        progress.advance(70);
+        assert_eq!(progress.read(), 270, "the script's first part counts once");
+        progress.resolve();
+        assert_eq!(progress.read(), 300);
+        progress.finish();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| l.rsplit_once("  ").map_or(l, |(head, _)| head))
+            .collect();
+        assert_eq!(lines, ["[2/3] data.sql  200 B", "[2/3] load.sql  100 B"]);
+    }
+
     #[test]
     fn sizes_and_counts_read_like_people_write_them() {
         assert_eq!(size(0), "0 B");
@@ -438,11 +512,11 @@ mod tests {
         let mut out = Vec::new();
         let mut progress = Progress::new(Display::Plain, false, &mut out);
         progress.pass(Pass::Schema, 1, 10);
-        progress.file(0, "t.sql", 10);
+        progress.file(0, "t.sql", 10, whole(10));
         progress.pass(Pass::Rows, 2, 2500);
-        progress.file(0, "a.sql", 500);
+        progress.file(0, "a.sql", 500, whole(500));
         progress.advance(500);
-        progress.file(1, "b.sql", 2000);
+        progress.file(1, "b.sql", 2000, whole(2000));
         progress.resolve();
         let phases = progress.finish();
         let text = String::from_utf8(out).unwrap();
@@ -463,15 +537,15 @@ mod tests {
         let mut progress = Progress::new(Display::Plain, false, &mut out);
         progress.stage("check 1");
         progress.pass(Pass::Schema, 1, 10);
-        progress.file(0, "a.sql", 10);
+        progress.file(0, "a.sql", 10, whole(10));
         progress.pass(Pass::Rows, 1, 10);
-        progress.file(0, "a.sql", 10);
+        progress.file(0, "a.sql", 10, whole(10));
         progress.resolve();
         progress.stage("write");
-        progress.file(0, "a.sql", 10);
+        progress.file(0, "a.sql", 10, whole(10));
         progress.stage("verify");
         progress.pass(Pass::Rows, 1, 8);
-        progress.file(0, "a.sql", 8);
+        progress.file(0, "a.sql", 8, whole(8));
         progress.finish();
         let text = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = text
@@ -491,9 +565,9 @@ mod tests {
         let mut progress = Progress::new(Display::Live { width: 80 }, false, &mut out);
         progress.stage("check 2");
         progress.pass(Pass::Rows, 1, 10);
-        progress.file(0, "a.sql", 10);
+        progress.file(0, "a.sql", 10, whole(10));
         progress.stage("write");
-        progress.file(0, "b.sql", 10);
+        progress.file(0, "b.sql", 10, whole(10));
         progress.finish();
         let text = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = text.split("\r\x1b[2K").filter(|l| !l.is_empty()).collect();
@@ -515,7 +589,7 @@ mod tests {
         let mut progress = Progress::new(Display::Live { width: 80 }, false, &mut out);
         progress.stage("check 2");
         progress.pass(Pass::Rows, 1, 1000);
-        progress.file(0, "app/data/some_long_table_name.sql", 1000);
+        progress.file(0, "app/data/some_long_table_name.sql", 1000, whole(1000));
         progress.finish();
         let text = String::from_utf8(out).unwrap();
         let line = text.split("\r\x1b[2K").find(|l| !l.is_empty()).unwrap();
@@ -587,7 +661,7 @@ mod tests {
             let mut out = Vec::new();
             let mut progress = Progress::new(display, false, &mut out);
             progress.pass(Pass::Rows, 1, 10);
-            progress.file(0, "a.sql", 10);
+            progress.file(0, "a.sql", 10, whole(10));
             progress.advance(10);
             progress.finish();
             let text = String::from_utf8(out).unwrap();
@@ -610,6 +684,7 @@ mod tests {
             0,
             "a/very/long/path/to/a/data/file/with/a/long/name.sql",
             1000,
+            whole(1000),
         );
         progress.finish();
         let text = String::from_utf8(out).unwrap();
