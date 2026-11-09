@@ -426,16 +426,15 @@ mod generated {
     }
 }
 
-/// The findings and report of a script given as text, as one data file.
+/// The report of `text`, as written, checked as one data file.
 #[expect(
     clippy::unwrap_used,
     reason = "a script that can't be written or read fails the test"
 )]
-fn check_sql(sql: &str, load_order: bool) -> (Report, Vec<(FindingKind, u64, bool)>) {
+fn run_script(text: &str, load_order: bool) -> Report {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.sql");
-    // A COMMIT at the end, as an export has; it moves no line.
-    fs::write(&path, format!("{sql}\nCOMMIT;\n")).unwrap();
+    fs::write(&path, text).unwrap();
     let files = [InputFile {
         path,
         role: Role::Data,
@@ -447,7 +446,13 @@ fn check_sql(sql: &str, load_order: bool) -> (Report, Vec<(FindingKind, u64, boo
         load_order,
         ..Options::default()
     };
-    let report = check::run(&files, &options).unwrap();
+    check::run(&files, &options).unwrap()
+}
+
+/// The findings and report of a script given as text, as one data file.
+fn check_sql(sql: &str, load_order: bool) -> (Report, Vec<(FindingKind, u64, bool)>) {
+    // A COMMIT at the end, as an export has; it moves no line.
+    let report = run_script(&format!("{sql}\nCOMMIT;\n"), load_order);
     assert_clean(&report, sql);
     let findings = report
         .findings
@@ -459,6 +464,94 @@ fn check_sql(sql: &str, load_order: bool) -> (Report, Vec<(FindingKind, u64, boo
 
 const PARENT_AND_CHILD: &str =
     "CREATE TABLE P (ID NUMBER PRIMARY KEY);\nCREATE TABLE C (P_ID NUMBER);\n";
+
+const DEPT_AND_EMP: &str = "CREATE TABLE DEPT (DEPTNO NUMBER(2) PRIMARY KEY);\n\
+    CREATE TABLE EMP (EMPNO NUMBER(4) PRIMARY KEY, DEPTNO NUMBER(2) NOT NULL REFERENCES DEPT);\n";
+
+/// The kind and line of each finding, the lines of the errors, and each foreign key's rows that can't be checked.
+type Outcome = (Vec<(FindingKind, u64)>, Vec<u64>, Vec<(String, u64)>);
+
+fn outcome(report: &Report) -> Outcome {
+    let findings = report
+        .findings
+        .iter()
+        .map(|f| (f.kind, f.line.unwrap_or(0)))
+        .collect();
+    let errors = report.errors.iter().filter_map(|e| e.line).collect();
+    let unverifiable = report
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            check::Warning::Unverifiable { table, count, .. } => Some((table.clone(), *count)),
+            _ => None,
+        })
+        .collect();
+    (findings, errors, unverifiable)
+}
+
+#[test]
+fn rows_in_an_insert_the_checker_cant_parse_leave_their_tables_keys_incomplete() {
+    // Multi-row VALUES stands for any insert the runner runs and the checker can't parse.
+    let report = run_script(
+        &format!(
+            "{DEPT_AND_EMP}INSERT INTO DEPT VALUES\n (10),\n (20);\nINSERT INTO DEPT VALUES (30);\n\
+             INSERT INTO EMP VALUES (1, 10);\nINSERT INTO EMP VALUES (2, 30);\nCOMMIT;\n"
+        ),
+        false,
+    );
+    assert_eq!(
+        outcome(&report),
+        (vec![], vec![4], vec![("EMP".to_owned(), 1)])
+    );
+}
+
+#[test]
+fn an_insert_the_checker_cant_parse_in_a_child_table_leaves_its_parent_checked() {
+    let report = run_script(
+        &format!(
+            "{DEPT_AND_EMP}INSERT INTO DEPT VALUES (10);\nINSERT INTO EMP VALUES\n (1, 10),\n (2, 99);\n\
+             INSERT INTO EMP VALUES (3, 99);\nCOMMIT;\n"
+        ),
+        false,
+    );
+    assert_eq!(
+        outcome(&report),
+        (vec![(FindingKind::FkMissingParent, 7)], vec![5], vec![])
+    );
+}
+
+#[test]
+fn an_insert_whose_table_cant_be_read_leaves_every_key_incomplete() {
+    let report = run_script(
+        &format!(
+            "{DEPT_AND_EMP}INSERT INTO 9 VALUES (1);\nINSERT INTO DEPT VALUES (30);\n\
+             INSERT INTO EMP VALUES (1, 10);\nCOMMIT;\n"
+        ),
+        false,
+    );
+    assert_eq!(
+        outcome(&report),
+        (vec![], vec![3], vec![("EMP".to_owned(), 1)])
+    );
+}
+
+#[test]
+fn a_statement_the_runner_never_runs_holds_no_key() {
+    // Cut off at the end of the file, the last insert never runs: its child is missing its parent.
+    let report = run_script(
+        &format!(
+            "{DEPT_AND_EMP}INSERT INTO DEPT VALUES (30);\nINSERT INTO EMP VALUES (1, 10);\n\
+             INSERT INTO DEPT VALUES (10)\n"
+        ),
+        false,
+    );
+    let (findings, errors, unverifiable) = outcome(&report);
+    assert!(
+        findings.contains(&(FindingKind::FkMissingParent, 4)),
+        "{findings:?}"
+    );
+    assert_eq!((errors, unverifiable), (vec![5], vec![]));
+}
 
 #[test]
 fn a_parent_key_the_checker_cant_know_makes_a_missing_parent_unverifiable() {

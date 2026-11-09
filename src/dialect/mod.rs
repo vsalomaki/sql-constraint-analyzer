@@ -9,7 +9,7 @@ use std::io::{self, BufRead};
 use serde::{Deserialize, Serialize};
 
 use crate::source::{Encoding, Piece, Span};
-use crate::statement::{Expr, ParseError, Statement};
+use crate::statement::{Expr, ParseError, Statement, Unread};
 use crate::value::Literal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -122,6 +122,14 @@ impl DialectId {
             (Self::Oracle, ParseMemo::Oracle(memo)) => {
                 oracle::parse::parse(piece, encoding, pass, Some(memo))
             }
+        }
+    }
+
+    /// For a piece `parse` refused: the tables it writes to, when it is an insert the runner still runs; `None` for
+    /// anything else.
+    pub fn unread(self, piece: &Piece, encoding: Encoding) -> Option<Unread> {
+        match self {
+            Self::Oracle => oracle::insert::unread(piece, encoding),
         }
     }
 

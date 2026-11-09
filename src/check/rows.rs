@@ -9,11 +9,11 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::Warning;
 use super::structure::Row;
-use crate::catalog::{Catalog, Column, Constraint, Kind, Parent, Table, TableId};
+use crate::catalog::{Catalog, Column, Constraint, Kind, Lookup, Parent, Table, TableId};
 use crate::dialect::{DialectId, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::source::{Encoding, RunAt};
-use crate::statement::{DataType, Expr, InsertRow, TypeFamily};
+use crate::statement::{DataType, Expr, InsertRow, TypeFamily, Unread};
 use crate::value::{self, Canonical, Literal};
 
 /// Whether a value no constraint reads still counts: a string, or the default, in a date column may be text read as
@@ -140,6 +140,8 @@ struct Doubt {
     unknown: bool,
     /// Some keys rest on an assumption, so whether a key matches does too.
     assumed: bool,
+    /// Some rows are in an insert the checker couldn't parse, so a key missing from the map may still exist.
+    unread: bool,
 }
 
 /// Rows of one constraint the checker couldn't decide, and a reason for one of them.
@@ -247,6 +249,35 @@ impl<'a> Checker<'a> {
     /// A row of `table` that `fix` removed.
     pub(super) fn removed(&mut self, table: TableId) {
         self.removed.insert(table);
+    }
+
+    /// An insert in the file at `file` that the checker couldn't parse: no key of the tables it writes knows its rows.
+    pub(super) fn unread(&mut self, unread: &Unread, file: usize) {
+        let catalog = self.catalog;
+        let tables: Vec<TableId> = match unread {
+            Unread::Tables(names) => names
+                .iter()
+                .flat_map(|name| match catalog.resolve(name, file) {
+                    Lookup::Found(id) => vec![id],
+                    Lookup::Ambiguous(ids) => ids,
+                    Lookup::Missing => Vec::new(),
+                })
+                .collect(),
+            Unread::AnyTable => catalog.ids().collect(),
+        };
+        for id in tables {
+            let Some(table) = catalog.table(id) else {
+                continue;
+            };
+            for (position, constraint) in table.constraints.iter().enumerate() {
+                if matches!(
+                    constraint.kind,
+                    Kind::PrimaryKey { .. } | Kind::Unique { .. }
+                ) {
+                    self.doubt.entry((id, position)).or_default().unread = true;
+                }
+            }
+        }
     }
 
     pub(super) fn structure(&mut self, finding: Finding, reference: bool) {
@@ -594,6 +625,12 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let doubt = self.doubt.get(&pending.parent).copied().unwrap_or_default();
+            if doubt.unread {
+                self.count_unverifiable((pending.table, pending.constraint), || {
+                    "parent rows in an insert the checker couldn't read".to_owned()
+                });
+                continue;
+            }
             if doubt.unknown {
                 // The parent key may be one of the values the checker couldn't know, or have been one earlier.
                 self.count_unverifiable((pending.table, pending.constraint), || {

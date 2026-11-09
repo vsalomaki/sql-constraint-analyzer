@@ -1020,6 +1020,31 @@ fn rows_past_the_round_limit_are_left_for_review() {
     assert!(report.output.findings.is_empty());
 }
 
+/// The runner runs the multi-row insert the checker can't parse, so which rows exist is unknown: the first child's
+/// parent is there in Oracle. The fix writes nothing.
+#[test]
+fn an_insert_the_checker_cant_parse_makes_the_fix_refuse() {
+    let (dir, files) = write_scripts(&[(
+        "t.sql",
+        "CREATE TABLE DEPT (DEPTNO NUMBER(2) PRIMARY KEY);\n\
+         CREATE TABLE EMP (EMPNO NUMBER(4) PRIMARY KEY, DEPTNO NUMBER(2) NOT NULL REFERENCES DEPT);\n\
+         INSERT INTO DEPT VALUES\n (10),\n (20);\nINSERT INTO DEPT VALUES (30);\n\
+         INSERT INTO EMP VALUES (1, 10);\nINSERT INTO EMP VALUES (2, 30);\n",
+    )]);
+    let out = dir.path().join("out");
+    let result = fix::fix(
+        &files,
+        &Options::default(),
+        Policy::default(),
+        &fix::Target::out(out.clone()),
+    );
+    match result {
+        Err(fix::FixError::Unread(at)) => assert!(at.ends_with("t.sql:3"), "{at}"),
+        other => panic!("expected a refusal: {other:?}"),
+    }
+    assert!(!out.exists() || fs::read_dir(&out).unwrap().next().is_none());
+}
+
 #[test]
 fn a_duplicate_of_a_removed_row_is_kept() {
     let (_dir, _, report) = fix_sql(
