@@ -100,6 +100,11 @@ pub enum FixError {
     BackupExists(PathBuf),
     #[error("an in-place fix with no backups and no report would keep the removed rows nowhere")]
     NothingKept,
+    #[error(
+        "{0}: the checker couldn't parse this insert, but the runner runs it, so which rows exist is unknown and no \
+         fix is safe; check the input instead"
+    )]
+    Unread(String),
 }
 
 /// A removed row, or with `nulled` a row kept with its foreign key set to NULL: where it was in the input, what it
@@ -526,6 +531,13 @@ fn run_rounds(
         }
         let nulls = nulled_values(&removed, names);
         let report = check::run_without(files, options, &schema, &cuts, &nulls, observer)?;
+        if let Some(unread) = report.unread.first() {
+            let at = unread.line.map_or_else(
+                || unread.file.clone(),
+                |line| format!("{}:{line}", unread.file),
+            );
+            return Err(FixError::Unread(at));
+        }
         note_holders(&mut holders, &report);
         let scans = scans(&report, files, options, names, policy, &cuts)?;
         let crowded: BTreeSet<Row> = scans

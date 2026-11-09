@@ -293,6 +293,16 @@ pub enum Skip {
     /// A statement that changes data in a way the checker doesn't follow: `UPDATE`, `DELETE`, `MERGE`,
     /// `INSERT … SELECT`. Reported, since the end state may differ from what the checker sees.
     NotFollowed(String),
+    /// An insert the checker couldn't parse, which the runner still runs: its rows exist, but their keys are unknown.
+    Unread(Unread),
+}
+
+/// The tables an insert the checker couldn't parse writes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unread {
+    Tables(Vec<Name<'static>>),
+    /// Its table names couldn't be read either, so it may write to any table.
+    AnyTable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -108,6 +108,8 @@ pub struct Report {
     pub catalog: Vec<Problem>,
     /// Statements that change data in ways the checker doesn't follow.
     pub not_followed: Vec<Problem>,
+    /// Inserts the checker couldn't parse, which the runner still runs: their rows exist, unread.
+    pub unread: Vec<Problem>,
     /// Statements the checker has no use for (sequences, SQL*Plus commands).
     pub unused: u64,
     pub rows: u64,
@@ -355,6 +357,7 @@ pub fn run_without(
     let in_rows_pass = |f: &InputFile| f.role != Role::Schema;
     let mut checker = rows::Checker::new(catalog, options.dialect, options.load_order, &names);
     let mut not_followed = Vec::new();
+    let mut unread_inserts = Vec::new();
     let mut unused = 0;
     let mut count = 0;
     let mut uncommitted = Vec::new();
@@ -417,6 +420,11 @@ pub fn run_without(
                 Statement::Skipped(Skip::NotFollowed(what)) => {
                     not_followed.push(problem(&names, origin.file, Some(origin.line), what));
                 }
+                Statement::Skipped(Skip::Unread(unread)) => {
+                    checker.unread(&unread, origin.file);
+                    let what = "an insert the checker couldn't parse".to_owned();
+                    unread_inserts.push(problem(&names, origin.file, Some(origin.line), what));
+                }
                 Statement::Commit => open = Open::default(),
                 Statement::Skipped(Skip::Unused(_)) => unused += 1,
                 _ => {}
@@ -435,6 +443,7 @@ pub fn run_without(
     report.findings = findings;
     report.warnings = warnings;
     report.not_followed = not_followed;
+    report.unread = unread_inserts;
     report.unused = unused;
     report.rows = count;
     Ok(report)
@@ -650,26 +659,28 @@ fn read(
                     break;
                 }
             };
+            let origin = Origin {
+                file: index,
+                run: RunAt {
+                    segment: position,
+                    offset: piece.span.start,
+                },
+                line: piece.line,
+            };
             match options
                 .dialect
                 .parse_with(&piece, options.encoding, pass, &mut memo)
             {
-                Ok(Some(statement)) => {
-                    let origin = Origin {
-                        file: index,
-                        run: RunAt {
-                            segment: position,
-                            offset: piece.span.start,
-                        },
-                        line: piece.line,
-                    };
-                    take(statement, origin);
-                }
+                Ok(Some(statement)) => take(statement, origin),
                 Ok(None) => {}
                 Err(error) => {
                     report
                         .errors
                         .push(problem(names, index, Some(error.line), error.message));
+                    // The runner still runs it, so its rows exist, unread.
+                    if let Some(unread) = options.dialect.unread(&piece, options.encoding) {
+                        take(Statement::Skipped(Skip::Unread(unread)), origin);
+                    }
                 }
             }
         }

@@ -7,8 +7,8 @@ use std::borrow::Cow;
 use super::RULES;
 use super::cursor::{Cursor, first_word_is};
 use super::lex::{Token, TokenKind, is_word_byte, same_ignoring_case};
-use crate::source::{Encoding, Piece};
-use crate::statement::{Expr, Ident, InsertRow, Name, ParseError, Skip, Statement, Value};
+use crate::source::{Encoding, Piece, PieceKind};
+use crate::statement::{Expr, Ident, InsertRow, Name, ParseError, Skip, Statement, Unread, Value};
 
 /// Calls and negations nested deeper than this are kept as written, so no input can exhaust the stack.
 const MAX_DEPTH: usize = 64;
@@ -52,6 +52,35 @@ impl Memo {
             && !next.get(6).is_some_and(|&b| is_word_byte(b));
         (next.len() < rest.len() && values).then_some(prefix.len())
     }
+}
+
+/// The tables an insert that didn't parse writes to: the name after each `INTO`. `None` when the piece is no insert the
+/// runner runs.
+pub fn unread(piece: &Piece, encoding: Encoding) -> Option<Unread> {
+    if piece.kind != PieceKind::Sql || !first_word_is(&piece.text, "INSERT") {
+        return None;
+    }
+    let Ok(mut c) = Cursor::new(piece, encoding) else {
+        return Some(Unread::AnyTable);
+    };
+    let mut tables = Vec::new();
+    while let Some(token) = c.bump() {
+        // `RETURNING … INTO` names variables.
+        if c.is_word(token, "RETURNING") || c.is_word(token, "RETURN") {
+            break;
+        }
+        if c.is_word(token, "INTO") {
+            let Ok(name) = c.name("a table name") else {
+                return Some(Unread::AnyTable);
+            };
+            tables.push(name.into_owned());
+        }
+    }
+    Some(if tables.is_empty() {
+        Unread::AnyTable
+    } else {
+        Unread::Tables(tables)
+    })
 }
 
 /// `parse_insert`, keeping in `memo`, when there is one, what a file's next row may start with.
@@ -532,6 +561,49 @@ mod tests {
 
     fn other(s: &str) -> Expr<'static> {
         Expr::Other(s.to_owned().into())
+    }
+
+    #[test]
+    fn an_insert_that_didnt_parse_names_the_tables_it_writes() {
+        let named = |text: &str, kind| {
+            let piece = Piece {
+                kind,
+                ..piece(text)
+            };
+            unread(&piece, Encoding::Utf8).map(|unread| match unread {
+                Unread::Tables(tables) => tables
+                    .into_iter()
+                    .map(|t| t.name.value.into_owned())
+                    .collect(),
+                Unread::AnyTable => vec!["*".to_owned()],
+            })
+        };
+        let sql = PieceKind::Sql;
+        assert_eq!(
+            named("INSERT INTO APP.DEPT (A) VALUES (1),\n (2)", sql),
+            Some(vec!["DEPT".to_owned()])
+        );
+        assert_eq!(
+            named(
+                "INSERT ALL INTO A VALUES (1) INTO B VALUES (2), (3) SELECT 1 FROM DUAL",
+                sql
+            ),
+            Some(vec!["A".to_owned(), "B".to_owned()])
+        );
+        assert_eq!(
+            named("INSERT INTO 9 VALUES (1)", sql),
+            Some(vec!["*".to_owned()])
+        );
+        assert_eq!(
+            named("INSERT INTO Q VALUES (1) RETURNING ID INTO :X", sql),
+            Some(vec!["Q".to_owned()])
+        );
+        assert_eq!(named("UPDATE T SET A = 1", sql), None);
+        // The runner never runs a statement cut off at the end of the file.
+        assert_eq!(
+            named("INSERT INTO T VALUES (1)", PieceKind::Unterminated),
+            None
+        );
     }
 
     #[test]

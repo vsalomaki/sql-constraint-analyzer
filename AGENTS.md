@@ -117,6 +117,11 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   - structure errors, unverifiable keys and disabled constraints;
   - load-order findings, since the row is valid in the end state; `fix` never reorders statements;
   - a key resting on an assumed value, and a row on a line holding several rows, both left for review.
+- **Refused:** an input with an insert the checker couldn't parse. The runner runs it, so which rows exist is unknown,
+  and a fix could remove a row the database keeps: a child of an unread row, the duplicate of a row the database
+  rejects, a row in the same `INSERT ALL` as one. The check still runs, and a child whose parent table has such rows
+  can't be checked (any table when the insert's table names can't be read). A statement the runner never runs, such
+  as one cut off at the end of a file, holds no key and is not refused.
 - **Output is the input's bytes** with only the affected statements cut or their values replaced. An `INSERT ALL`
   loses only the bad `INTO` clause, and goes whole when no row is left. Unchanged files are hard-linked or copied.
 - **Rounds:** a removed row's key never enters the parent map, so its children fail in the same round. Rounds
