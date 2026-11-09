@@ -1813,11 +1813,16 @@ mod fixtures {
         found
     }
 
-    /// The export's DDL statements with their origins, in `order.txt` order.
+    /// The export's DDL statements with their origins, in `order.txt` order, then its `load.sql`'s own, which run
+    /// after them.
     fn ddl(dir: &Path, encoding: Encoding) -> Vec<(Statement<'static>, Origin)> {
         let order = std::fs::read_to_string(dir.join("order.txt")).unwrap();
+        let script = dir
+            .join(crate::synth::LOAD_SCRIPT)
+            .exists()
+            .then_some(crate::synth::LOAD_SCRIPT);
         let mut statements = Vec::new();
-        for (file, path) in order.lines().enumerate() {
+        for (file, path) in order.lines().chain(script).enumerate() {
             let bytes = std::fs::read(dir.join(path)).unwrap();
             for piece in Splitter::new(bytes.as_slice(), Runner::SqlPlus) {
                 let piece = piece.unwrap();
@@ -1901,15 +1906,23 @@ mod fixtures {
 
     /// The generator's constraints of `id` that `export` has: the key between rows only with cascades, and the SQLcl
     /// export, which has no manifest, was made without them.
-    fn generated(id: TableId, export: &Path) -> Vec<&'static schema::Constraint> {
-        let cascades = std::fs::read_to_string(export.join("expected.json")).is_ok_and(|json| {
-            serde_json::from_str::<Manifest>(&json)
-                .unwrap()
-                .options
-                .cascades
-        });
+    /// The constraints the export gives the table, in the state it leaves them in: with `script_statements`, `load.sql`
+    /// adds the disabled foreign keys after the data, enabled without checking it.
+    fn generated(id: TableId, export: &Path) -> Vec<schema::Constraint> {
+        let options = std::fs::read_to_string(export.join("expected.json"))
+            .ok()
+            .map(|json| serde_json::from_str::<Manifest>(&json).unwrap().options);
+        let cascades = options.as_ref().is_some_and(|o| o.cascades);
+        let script_statements = options.as_ref().is_some_and(|o| o.script_statements);
         schema::constraints_of(id)
             .filter(|c| cascades || c.form != schema::Form::BetweenRows)
+            .map(|&c| match c.state {
+                State::Disabled if script_statements => schema::Constraint {
+                    state: State::NotValidated,
+                    ..c
+                },
+                _ => c,
+            })
             .collect()
     }
 
@@ -2029,10 +2042,10 @@ mod fixtures {
     fn assert_constraints(
         catalog: &Catalog,
         t: &Table,
-        constraints: &[&'static schema::Constraint],
+        constraints: &[schema::Constraint],
         at: &str,
     ) {
-        for &generated in constraints {
+        for generated in constraints {
             let c = t
                 .constraints
                 .iter()

@@ -11,6 +11,7 @@ use sqlca::synth::{self, Encoding, Layout, LineEnding, Noise, Options, Placement
 /// findings (`expected.json`).
 #[derive(Debug, Parser)]
 #[command(name = "sqlca-gen", version)]
+#[expect(clippy::struct_excessive_bools, reason = "each is a command-line flag")]
 struct Cli {
     /// Folder to write into; must not exist yet, or be empty.
     #[arg(long)]
@@ -68,6 +69,12 @@ struct Cli {
     /// per round.
     #[arg(long, value_name = "N", default_value_t = 3, requires = "cascades")]
     manager_chain: u64,
+
+    /// Give `load.sql` statements of its own, as a master written for a SQLcl export has: each data file's COMMIT
+    /// after its include instead of in the file, the grants a foreign key into the reference schema needs, and the
+    /// disabled foreign keys added after the data with ENABLE NOVALIDATE. Only with `--layout separate`.
+    #[arg(long)]
+    script_statements: bool,
 }
 
 fn parse_rate(text: &str) -> Result<f64, String> {
@@ -117,6 +124,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         rows_per_file: cli.rows_per_file,
         cascades: cli.cascades,
         manager_chain: if cli.cascades { cli.manager_chain } else { 0 },
+        script_statements: cli.script_statements,
     };
     let manifest = synth::generate(&options, &cli.out)
         .with_context(|| format!("writing {}", cli.out.display()))?;

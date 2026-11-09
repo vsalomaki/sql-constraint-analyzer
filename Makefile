@@ -31,6 +31,7 @@ fixtures:
 	$(GEN) --out $(FIXTURES)/type-after-data-shuffled --rows 20 --layout type --noise all --constraints after-data --shuffle-order
 	$(GEN) --out $(FIXTURES)/separate-split --rows 20 --rows-per-file 30 --omit-commit APP.EMPLOYEES
 	$(GEN) --out $(FIXTURES)/separate-cascades-shuffled --rows 20 --cascades --shuffle-order
+	$(GEN) --out $(FIXTURES)/separate-script-statements --rows 20 --seed 6 --shuffle-order --script-statements
 
 ## Times sqlca check and fix on a ~1 GB and a ~2.4 GB generated export in gen-out/ and checks their output (Linux only).
 perf:

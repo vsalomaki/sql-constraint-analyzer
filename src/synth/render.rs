@@ -2,7 +2,7 @@
 //! neutral; a dialect only turns them into text.
 
 use super::rng::Rng;
-use super::schema::TableId;
+use super::schema::{Constraint, TableId};
 use super::value::Value;
 
 /// How the DDL is written.
@@ -13,6 +13,23 @@ pub(crate) struct DdlStyle<'a> {
     pub(crate) keys_in_table: bool,
     /// The export has the key enabled between a table's rows, and the index it needs.
     pub(crate) key_between_rows: bool,
+    /// The disabled foreign keys are in the DDL; otherwise `load.sql` adds them after the data.
+    pub(crate) disabled_keys_in_ddl: bool,
+}
+
+/// A line of `load.sql`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ScriptItem<'a> {
+    /// Runs the file at this path, beside the script.
+    Include(&'a str),
+    Commit,
+    /// Lets the schema `to` point foreign keys at `parent`.
+    GrantReferences {
+        parent: TableId,
+        to: &'static str,
+    },
+    /// A foreign key added after the data, enabled without checking the rows there.
+    ForeignKeyAfterData(&'static Constraint),
 }
 
 /// Text a dialect wrote, and how many statements (SQL, PL/SQL blocks and script commands) are in it.
@@ -73,6 +90,6 @@ pub(crate) trait Render {
     fn batch(&self, part: Batch<'_>, eol: &str) -> String;
     /// What ends a table's rows: a commit.
     fn commit(&self, eol: &str) -> Sql;
-    /// A script that runs the files in order, with paths relative to it.
-    fn load_script(&self, paths: &[&str], eol: &str) -> String;
+    /// A script that runs the files in order, with paths relative to it, and what else it says.
+    fn load_script(&self, items: &[ScriptItem<'_>], eol: &str) -> String;
 }
