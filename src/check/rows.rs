@@ -118,6 +118,9 @@ pub(super) struct Holders {
     /// Tables with a key value the check couldn't know or assumed: cutting a row there can uncover a missing parent
     /// that no child found.
     pub uncertain: BTreeSet<String>,
+    /// Tables that may hold a row the database rejects for a foreign key the check couldn't decide: a duplicate there
+    /// may rest on a row that isn't there.
+    pub undecided: BTreeSet<String>,
 }
 
 /// A foreign key value with no parent row yet.
@@ -170,6 +173,10 @@ pub(super) struct Checker<'a> {
     rows: FxMap<TableId, u64>,
     /// Tables with rows `fix` removed: a parent among them had rows, so its children lack theirs.
     removed: FxSet<TableId>,
+    /// Tables with a row whose foreign key the checker couldn't decide: the database may reject it.
+    undecided: FxSet<TableId>,
+    /// Tables whose rows share an insert, which the database takes or rejects whole.
+    together: FxSet<(TableId, TableId)>,
     pending: Vec<Pending>,
     findings: Vec<Finding>,
     unverifiable: FxMap<(TableId, usize), Undecided>,
@@ -198,6 +205,8 @@ impl<'a> Checker<'a> {
             doubt: FxMap::default(),
             rows: FxMap::default(),
             removed: FxSet::default(),
+            undecided: FxSet::default(),
+            together: FxSet::default(),
             pending: Vec::new(),
             findings: Vec::new(),
             unverifiable: FxMap::default(),
@@ -301,6 +310,14 @@ impl<'a> Checker<'a> {
             .collect();
         if reference {
             return;
+        }
+        let mut tables: Vec<TableId> = rows.iter().map(|(matched, _, _)| matched.table).collect();
+        tables.sort_unstable();
+        tables.dedup();
+        for (i, &a) in tables.iter().enumerate() {
+            for &b in tables.iter().skip(i + 1) {
+                self.together.insert((a, b));
+            }
         }
         let catalog = self.catalog;
         for ((matched, _, at), literals) in rows.iter().zip(&literals) {
@@ -548,6 +565,7 @@ impl<'a> Checker<'a> {
                 } => (*table, *constraint, columns),
                 Parent::Missing(_) => {
                     *self.no_parent.entry((id, position)).or_default() += 1;
+                    self.undecided.insert(id);
                     continue;
                 }
             };
@@ -579,6 +597,7 @@ impl<'a> Checker<'a> {
             }
             if parts.iter().any(|(p, _)| *p == Canonical::Unknown) {
                 self.undecided((id, position), columns, literals);
+                self.undecided.insert(id);
                 continue;
             }
             let hash = hash(parts.iter().map(|(p, _)| p));
@@ -625,6 +644,9 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let doubt = self.doubt.get(&pending.parent).copied().unwrap_or_default();
+            if doubt.unread || doubt.unknown {
+                self.undecided.insert(pending.table);
+            }
             if doubt.unread {
                 self.count_unverifiable((pending.table, pending.constraint), || {
                     "parent rows in an insert the checker couldn't read".to_owned()
@@ -643,6 +665,8 @@ impl<'a> Checker<'a> {
             } else if self.rows.get(&pending.parent.0).copied().unwrap_or(0) == 0
                 && !self.removed.contains(&pending.parent.0)
             {
+                // A summary the fix doesn't act on: the database rejects the row unless the parent rows come from elsewhere.
+                self.undecided.insert(pending.table);
                 *empty
                     .entry((pending.table, pending.constraint))
                     .or_default() += 1;
@@ -713,7 +737,37 @@ impl<'a> Checker<'a> {
                 Some(self.catalog.display(&self.catalog.table(*table)?.name))
             })
             .collect();
-        Holders { rows, uncertain }
+        Holders {
+            rows,
+            uncertain,
+            undecided: self.undecided_tables(),
+        }
+    }
+
+    /// The tables with a row whose foreign key the checker couldn't decide, every table below one through foreign
+    /// keys, and every table that shares an insert with one, by name.
+    fn undecided_tables(&self) -> BTreeSet<String> {
+        let catalog = self.catalog;
+        let mut edges: Vec<(TableId, TableId)> = Vec::new();
+        for child in catalog.ids() {
+            let constraints = catalog
+                .table(child)
+                .map_or(&[][..], |t| t.constraints.as_slice());
+            for constraint in constraints {
+                if let Kind::ForeignKey {
+                    parent: Parent::Key { table, .. },
+                    ..
+                } = &constraint.kind
+                {
+                    edges.push((*table, child));
+                }
+            }
+        }
+        edges.extend(self.together.iter().flat_map(|&(a, b)| [(a, b), (b, a)]));
+        reach(self.undecided.iter().copied(), &edges)
+            .into_iter()
+            .filter_map(|id| Some(catalog.display(&catalog.table(id)?.name)))
+            .collect()
     }
 
     fn foreign_key(
@@ -797,6 +851,28 @@ fn shown(part: &Canonical<'_>) -> Option<String> {
     }
 }
 
+/// `roots` and every node an edge leads to from one, however far.
+fn reach<T: Copy + Eq + std::hash::Hash>(
+    roots: impl IntoIterator<Item = T>,
+    edges: &[(T, T)],
+) -> FxSet<T> {
+    let mut reached: FxSet<T> = FxSet::default();
+    let mut queue: Vec<T> = Vec::new();
+    for root in roots {
+        if reached.insert(root) {
+            queue.push(root);
+        }
+    }
+    while let Some(from) = queue.pop() {
+        for &(a, b) in edges {
+            if a == from && reached.insert(b) {
+                queue.push(b);
+            }
+        }
+    }
+    reached
+}
+
 /// The 128-bit hash of a key's canonical values, each one tagged and length-prefixed so no two keys run together.
 fn hash<'p>(parts: impl IntoIterator<Item = &'p Canonical<'p>>) -> u128 {
     let mut hasher = Xxh3::new();
@@ -818,5 +894,20 @@ mod size {
     #[test]
     fn a_key_maps_entry_stays_16_bytes() {
         assert_eq!(std::mem::size_of::<super::First>(), 16);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reach;
+
+    #[test]
+    fn reach_follows_every_edge_from_the_roots_however_far() {
+        // 1 is a parent of 2, 2 of 3; 3 and 4 share an insert, both ways; 5 is a parent of 1.
+        let edges = [(1, 2), (2, 3), (3, 4), (4, 3), (5, 1)];
+        let mut reached: Vec<u32> = reach([1], &edges).into_iter().collect();
+        reached.sort_unstable();
+        assert_eq!(reached, [1, 2, 3, 4], "a grandchild, and a table beside it");
+        assert!(!reach([3], &edges).contains(&2), "never up to a parent");
     }
 }

@@ -116,7 +116,11 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
 - **Never acted on:**
   - structure errors, unverifiable keys and disabled constraints;
   - load-order findings, since the row is valid in the end state; `fix` never reorders statements;
-  - a key resting on an assumed value, and a row on a line holding several rows, both left for review.
+  - a key resting on an assumed value, and a row on a line holding several rows, both left for review;
+  - a duplicate in a table that may hold a row the database rejects for a foreign key the check couldn't decide (a
+    parent key it can't know, an unknown value, an empty parent table or one no input defines), in any table below
+    such a table, or in one sharing an `INSERT ALL` with one: left for review, since the row holding the key may not
+    exist. Only duplicates wait; a missing parent the check is sure of is still acted on.
 - **Refused:** an input with an insert the checker couldn't parse. The runner runs it, so which rows exist is unknown,
   and a fix could remove a row the database keeps: a child of an unread row, the duplicate of a row the database
   rejects, a row in the same `INSERT ALL` as one. The check still runs, and a child whose parent table has such rows
