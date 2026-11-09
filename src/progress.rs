@@ -181,7 +181,9 @@ impl<'a> Progress<'a> {
         }
         // One column short of the width, so the cursor never wraps to the next line.
         let line = fit(&head, name, tail, width.saturating_sub(1));
-        drop(write!(self.err, "\r\x1b[2K{line}"));
+        // One write that overwrites the line and then clears what is left of the old one: erasing first would let the
+        // terminal show a blank line between two writes.
+        drop(self.err.write_all(format!("\r{line}\x1b[K").as_bytes()));
         drop(self.err.flush());
         self.drawn = Some(Instant::now());
     }
@@ -461,6 +463,28 @@ mod tests {
         }
     }
 
+    /// The live lines drawn: each written as `\r`, the line, then a clear to the end of the line.
+    fn frames(text: &str) -> Vec<&str> {
+        text.split('\r')
+            .filter_map(|f| f.strip_suffix("\x1b[K"))
+            .collect()
+    }
+
+    /// Each `write` call as made.
+    #[derive(Default)]
+    struct Writes(Vec<Vec<u8>>);
+
+    impl Write for Writes {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_script_read_in_parts_is_counted_once_and_listed_after_its_includes() {
         let mut out = Vec::new();
@@ -491,6 +515,31 @@ mod tests {
             .map(|l| l.rsplit_once("  ").map_or(l, |(head, _)| head))
             .collect();
         assert_eq!(lines, ["[2/3] data.sql  200 B", "[2/3] load.sql  100 B"]);
+    }
+
+    #[test]
+    fn each_live_line_is_one_write_that_never_blanks_the_line() {
+        let mut writes = Writes::default();
+        let mut progress = Progress::new(Display::Live { width: 80 }, false, &mut writes);
+        progress.pass(Pass::Rows, 2, 20);
+        progress.file(0, "a.sql", 10, whole(10));
+        progress.drawn = None;
+        progress.file(1, "b.sql", 10, whole(10));
+        progress.finish();
+        let writes: Vec<String> = writes
+            .0
+            .into_iter()
+            .map(|w| String::from_utf8(w).unwrap())
+            .collect();
+        let (clear, drawn) = writes.split_last().unwrap();
+        assert_eq!(clear, "\r\x1b[2K", "{writes:?}");
+        assert!(drawn.len() >= 2, "{writes:?}");
+        for write in drawn {
+            assert!(
+                write.starts_with('\r') && write.ends_with("\x1b[K") && !write.contains("\x1b[2K"),
+                "{writes:?}"
+            );
+        }
     }
 
     #[test]
@@ -570,7 +619,7 @@ mod tests {
         progress.file(0, "b.sql", 10, whole(10));
         progress.finish();
         let text = String::from_utf8(out).unwrap();
-        let lines: Vec<&str> = text.split("\r\x1b[2K").filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = frames(&text);
         assert!(
             lines.first().unwrap().starts_with("[check 2] Rows    "),
             "{text:?}"
@@ -592,7 +641,7 @@ mod tests {
         progress.file(0, "app/data/some_long_table_name.sql", 1000, whole(1000));
         progress.finish();
         let text = String::from_utf8(out).unwrap();
-        let line = text.split("\r\x1b[2K").find(|l| !l.is_empty()).unwrap();
+        let line = *frames(&text).first().unwrap();
         assert!(line.chars().count() <= 79, "{line:?}");
         let (_, memory) = line.rsplit_once(" · mem ").unwrap();
         let (number, unit) = memory.split_once(' ').unwrap();
@@ -688,7 +737,7 @@ mod tests {
         );
         progress.finish();
         let text = String::from_utf8(out).unwrap();
-        let lines: Vec<&str> = text.split("\r\x1b[2K").filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = frames(&text);
         assert!(!lines.is_empty(), "{text:?}");
         for line in lines {
             assert!(line.chars().count() <= 39, "{line:?}");
