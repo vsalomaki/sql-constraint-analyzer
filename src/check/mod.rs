@@ -7,6 +7,7 @@ mod rows;
 mod structure;
 
 use std::collections::BTreeSet;
+use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 pub use order::{Ordered, dependency_order};
@@ -15,8 +16,8 @@ pub use structure::{Row, StructureError, resolve_row};
 use crate::catalog::{Catalog, CatalogBuilder, CreatedTwice, Issue, Kind, Lookup, Origin, Parent};
 use crate::dialect::{DialectId, ParseMemo, Pass, Runner};
 use crate::finding::{Finding, FindingKind};
-use crate::input::{self, InputError, InputFile, Role};
-use crate::source::{Encoding, Piece, Span};
+use crate::input::{self, InputError, InputFile, Role, RunPlan, Segment, Unit};
+use crate::source::{Encoding, Piece, RunAt, Span};
 use crate::statement::{Expr, Skip, Statement};
 
 #[derive(Debug, Clone)]
@@ -137,9 +138,11 @@ pub struct SchemaCounts {
 pub trait Observer {
     /// A pass starts over `files` files of `bytes` bytes in all.
     fn pass(&mut self, _pass: Pass, _files: usize, _bytes: u64) {}
-    /// The current pass starts reading the file at `index` in the run.
-    fn file(&mut self, _index: usize, _name: &str, _bytes: u64) {}
-    /// The current file has been read up to `offset`.
+    /// The current pass starts reading `part` of the file at `index` in the run, which ends the part before. A part
+    /// is the whole file, or the stretch between two of its include commands, which read their files in between;
+    /// the file's last part ends at `bytes`.
+    fn file(&mut self, _index: usize, _name: &str, _bytes: u64, _part: Span) {}
+    /// The current part has been read up to `offset` in its file.
     fn advance(&mut self, _offset: u64) {}
     /// The schema pass built the catalog.
     fn schema(&mut self, _catalog: &Catalog) {}
@@ -176,6 +179,7 @@ pub struct Schema {
     report: Report,
     /// By file: whether the pass applied table DDL from it.
     ddl: Vec<bool>,
+    plan: RunPlan,
 }
 
 impl Schema {
@@ -259,6 +263,7 @@ pub fn schema(
 ) -> Result<Schema, InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
     let reading = Reading {
+        files,
         names: &names,
         options,
     };
@@ -271,16 +276,17 @@ pub fn schema(
     });
     let mut builder = CatalogBuilder::new(rules, options.default_schema.clone(), homes);
     let mut ddl = vec![false; files.len()];
+    let plan = RunPlan::new(files);
     let (count, bytes) = total(files, in_schema_pass);
     observer.pass(Pass::Schema, count, bytes);
-    for (index, file) in files.iter().enumerate() {
-        if !in_schema_pass(file) {
+    for unit in plan.units() {
+        if !files.get(unit.file).is_some_and(in_schema_pass) {
             continue;
         }
         read(
             &reading,
-            file,
-            index,
+            &plan,
+            unit,
             Pass::Schema,
             &mut report,
             observer,
@@ -324,6 +330,7 @@ pub fn schema(
         catalog,
         report,
         ddl,
+        plan,
     })
 }
 
@@ -339,6 +346,7 @@ pub fn run_without(
 ) -> Result<Report, InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
     let reading = Reading {
+        files,
         names: &names,
         options,
     };
@@ -352,23 +360,25 @@ pub fn run_without(
     let mut uncommitted = Vec::new();
     let (files_read, bytes) = total(files, in_rows_pass);
     observer.pass(Pass::Rows, files_read, bytes);
-    for (index, file) in files.iter().enumerate() {
-        if !in_rows_pass(file) {
+    for unit in schema.plan.units() {
+        let Some(top) = files.get(unit.file).filter(|f| in_rows_pass(f)) else {
             continue;
-        }
-        let reference = file.role == Role::Reference;
-        let cuts = removed.get(index).map_or(&[][..], Vec::as_slice);
-        let nulls = nulled.get(index).map_or(&[][..], Vec::as_slice);
+        };
+        // A transaction runs through the unit: a commit in a script ends what its includes left open.
         let mut open = Open::default();
         read(
             &reading,
-            file,
-            index,
+            &schema.plan,
+            unit,
             Pass::Rows,
             &mut report,
             observer,
             |statement, origin| match statement {
                 Statement::Insert(mut inserted) => {
+                    let index = origin.file;
+                    let reference = files.get(index).is_some_and(|f| f.role == Role::Reference);
+                    let cuts = removed.get(index).map_or(&[][..], Vec::as_slice);
+                    let nulls = nulled.get(index).map_or(&[][..], Vec::as_slice);
                     if !nulls.is_empty() {
                         let values = inserted.iter_mut().flat_map(|r| &mut r.values);
                         for value in values.filter(|v| nulls.binary_search(&v.span).is_ok()) {
@@ -387,16 +397,16 @@ pub fn run_without(
                         count += 1;
                         let at = rows::At {
                             file: index,
-                            offset: row.span.start,
+                            run: RunAt {
+                                offset: row.span.start,
+                                ..origin.run
+                            },
                             line: row.line,
                         };
+                        open.add(catalog, row, index, file);
                         match resolve_row(catalog, row, index) {
-                            Ok(resolved) => {
-                                open.add(catalog, row, index);
-                                matched.push((resolved, row, at));
-                            }
+                            Ok(resolved) => matched.push((resolved, row, at)),
                             Err(error) => {
-                                open.add(catalog, row, index);
                                 let finding = error.finding(catalog, row, file, index);
                                 checker.structure(finding, reference);
                             }
@@ -412,8 +422,8 @@ pub fn run_without(
                 _ => {}
             },
         )?;
-        if options.commit_check && file.role == Role::Data {
-            uncommitted.extend(open.finding(names.get(index).map_or("", String::as_str)));
+        if options.commit_check && top.role == Role::Data {
+            uncommitted.extend(open.finding());
         }
     }
     observer.resolve();
@@ -430,29 +440,36 @@ pub fn run_without(
     Ok(report)
 }
 
-/// The rows of a file since its last commit: how many, and the first one's line and table.
+/// The rows of a unit since its last commit: how many, and the first one's file, line and table.
 #[derive(Default)]
 struct Open {
     rows: u64,
-    first: Option<(u64, String)>,
+    first: Option<(String, u64, String)>,
 }
 
 impl Open {
-    fn add(&mut self, catalog: &Catalog, row: &crate::statement::InsertRow, file: usize) {
+    fn add(
+        &mut self,
+        catalog: &Catalog,
+        row: &crate::statement::InsertRow,
+        index: usize,
+        file: &str,
+    ) {
         self.rows += 1;
         if self.first.is_none() {
-            self.first = Some((row.line, structure::table_name(catalog, row, file)));
+            let table = structure::table_name(catalog, row, index);
+            self.first = Some((file.to_owned(), row.line, table));
         }
     }
 
-    fn finding(self, file: &str) -> Option<Finding> {
-        let (line, table) = self.first?;
+    fn finding(self) -> Option<Finding> {
+        let (file, line, table) = self.first?;
         Some(Finding {
             kind: FindingKind::Uncommitted,
             constraint: None,
             table,
             columns: Vec::new(),
-            file: Some(file.to_owned()),
+            file: Some(file),
             line: Some(line),
             key: Vec::new(),
             first: None,
@@ -563,64 +580,97 @@ fn problem(names: &[String], file: usize, line: Option<u64>, message: String) ->
 /// What every file read shares.
 #[derive(Clone, Copy)]
 struct Reading<'a> {
+    files: &'a [InputFile],
     names: &'a [String],
     options: &'a Options,
 }
 
-/// Reads one file's statements for `pass`, handing each to `take` with where it starts.
+/// Reads a unit's statements for `pass`, segment by segment in the order they run, handing each to `take` with where
+/// it is. Each segment gets a splitter of its own: an include command is a piece of its own, so nothing is in progress
+/// where one ends.
 fn read(
     reading: &Reading,
-    file: &InputFile,
-    index: usize,
+    plan: &RunPlan,
+    unit: &Unit,
     pass: Pass,
     report: &mut Report,
     observer: &mut dyn Observer,
     mut take: impl FnMut(Statement, Origin),
 ) -> Result<(), InputError> {
-    let Reading { names, options } = *reading;
-    let opened = input::open(&file.path)?;
-    observer.file(
-        index,
-        names.get(index).map_or("", String::as_str),
-        file.bytes,
-    );
-    let mut memo = ParseMemo::new(options.dialect);
-    for piece in options
-        .dialect
-        .pieces(opened.reader, options.runner, opened.base_offset)
-    {
-        let piece: Piece = match piece {
-            Ok(piece) => {
-                observer.advance(piece.span.end);
-                piece
-            }
-            Err(error) => {
-                // Both passes read the file; the last one to read it reports it.
-                if pass == Pass::Rows || file.role == Role::Schema {
-                    report
-                        .unreadable
-                        .push(problem(names, index, None, error.to_string()));
-                }
-                break;
-            }
+    let Reading {
+        files,
+        names,
+        options,
+    } = *reading;
+    for position in unit.segments.clone() {
+        let Some(&Segment {
+            file: index,
+            start,
+            line,
+            end,
+        }) = plan.segment(position)
+        else {
+            continue;
         };
-        match options
-            .dialect
-            .parse_with(&piece, options.encoding, pass, &mut memo)
-        {
-            Ok(Some(statement)) => {
-                let origin = Origin {
-                    file: index,
-                    offset: piece.span.start,
-                    line: piece.line,
-                };
-                take(statement, origin);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                report
-                    .errors
-                    .push(problem(names, index, Some(error.line), error.message));
+        let Some(file) = files.get(index) else {
+            continue;
+        };
+        let opened = input::open(&file.path)?;
+        let from = start.max(opened.base_offset);
+        let mut reader = opened.reader;
+        if from > opened.base_offset {
+            reader
+                .seek(SeekFrom::Start(from))
+                .map_err(|source| InputError::Io {
+                    path: file.path.clone(),
+                    source,
+                })?;
+        }
+        let part = Span {
+            start,
+            end: end.unwrap_or(file.bytes),
+        };
+        let name = names.get(index).map_or("", String::as_str);
+        observer.file(index, name, file.bytes, part);
+        let reader = reader.take(end.map_or(u64::MAX, |end| end.saturating_sub(from)));
+        let mut memo = ParseMemo::new(options.dialect);
+        for piece in options.dialect.pieces(reader, options.runner, from, line) {
+            let piece: Piece = match piece {
+                Ok(piece) => {
+                    observer.advance(piece.span.end);
+                    piece
+                }
+                Err(error) => {
+                    // Both passes read the file; the last one to read it reports it.
+                    if pass == Pass::Rows || file.role == Role::Schema {
+                        report
+                            .unreadable
+                            .push(problem(names, index, None, error.to_string()));
+                    }
+                    break;
+                }
+            };
+            match options
+                .dialect
+                .parse_with(&piece, options.encoding, pass, &mut memo)
+            {
+                Ok(Some(statement)) => {
+                    let origin = Origin {
+                        file: index,
+                        run: RunAt {
+                            segment: position,
+                            offset: piece.span.start,
+                        },
+                        line: piece.line,
+                    };
+                    take(statement, origin);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    report
+                        .errors
+                        .push(problem(names, index, Some(error.line), error.message));
+                }
             }
         }
     }

@@ -33,6 +33,7 @@ fn check_in_folders(
                 role: Role::Data,
                 bytes: u64::try_from(sql.len()).unwrap(),
                 order: OrderSource::Given,
+                includes: Vec::new(),
             }
         })
         .collect();
@@ -277,6 +278,7 @@ fn a_linked_file_is_in_the_folder_it_points_to() {
             role: Role::Data,
             bytes: u64::try_from(sql.len()).unwrap(),
             order: OrderSource::Given,
+            includes: Vec::new(),
         });
     }
     let out = dir.path().join("fixed");

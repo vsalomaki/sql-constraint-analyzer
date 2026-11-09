@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Observer, Options, Problem, Reading, Report, display, read, schema, total};
+use super::{Observer, Options, Problem, Reading, Report, Schema, display, read, schema, total};
 use crate::catalog::{self, Catalog, Kind, Lookup, Parent, TableId};
 use crate::dialect::{Pass, Rules};
 use crate::input::{InputError, InputFile, OrderSource, Role};
@@ -40,7 +40,7 @@ pub fn dependency_order(
     let schema = schema(files, options, observer)?;
     let catalog = schema.catalog();
     let rules = options.dialect.rules();
-    let (tables, rows) = inserted(files, options, catalog, observer)?;
+    let (tables, rows) = inserted(files, options, &schema, observer)?;
     let mut holders: BTreeMap<TableId, Vec<usize>> = BTreeMap::new();
     for (index, held) in tables.iter().enumerate() {
         for &table in held {
@@ -196,11 +196,12 @@ fn depends_on(graph: &Graph, pending: &BTreeSet<usize>, file: usize, on: usize) 
 fn inserted(
     files: &[InputFile],
     options: &Options,
-    catalog: &Catalog,
+    schema: &Schema,
     observer: &mut dyn Observer,
 ) -> Result<(Vec<BTreeSet<TableId>>, Report), InputError> {
     let names: Vec<String> = files.iter().map(|f| display(&f.path)).collect();
     let reading = Reading {
+        files,
         names: &names,
         options,
     };
@@ -209,27 +210,29 @@ fn inserted(
     observer.pass(Pass::Rows, count, bytes);
     let mut report = Report::default();
     let mut tables = vec![BTreeSet::new(); files.len()];
-    for (index, (file, held)) in files.iter().zip(&mut tables).enumerate() {
-        if !in_rows_pass(file) {
+    for unit in schema.plan.units() {
+        if !files.get(unit.file).is_some_and(in_rows_pass) {
             continue;
         }
-        let data = file.role == Role::Data;
         read(
             &reading,
-            file,
-            index,
+            &schema.plan,
+            unit,
             Pass::Rows,
             &mut report,
             observer,
-            |statement, _| {
+            |statement, origin| {
                 let Statement::Insert(rows) = statement else {
                     return;
                 };
-                if !data {
+                if !files.get(origin.file).is_some_and(|f| f.role == Role::Data) {
                     return;
                 }
+                let Some(held) = tables.get_mut(origin.file) else {
+                    return;
+                };
                 for row in &rows {
-                    if let Lookup::Found(table) = catalog.resolve(&row.table, index) {
+                    if let Lookup::Found(table) = schema.catalog.resolve(&row.table, origin.file) {
                         held.insert(table);
                     }
                 }

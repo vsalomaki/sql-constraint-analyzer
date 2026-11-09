@@ -80,6 +80,11 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   first (`FolderSchema`: the file's own folder, or the first below the folder all inputs share; named through
   `Rules::folder_schema`), then the only table of that name in any schema. A file in the shared folder has no folder
   schema. A table created twice is a fatal error, never a choice between two definitions.
+- **Run order** (neutral): a `--script` include runs its file where the command is. `input::RunPlan` reads a script in
+  segments with each included file in between, and every "earlier" or "later" (what a constraint judges, a key's
+  first or last row, load order) compares `RunAt` (segment, offset), never file positions. A transaction runs through
+  a file read on its own and all it includes, so `fix` adds a missing COMMIT at the end of that file. A file included
+  again, or also given as an input, is read once, where it comes first.
 - **Dependencies:** add with `cargo add`; pin features (`default-features = false` when the defaults pull in more
   than needed). A dependency that brings a new licence adds it to `deny.toml`'s allowlist, permissive licences only.
   The generator's dependencies are `optional = true` and enabled by the `gen` feature.

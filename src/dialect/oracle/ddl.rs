@@ -1526,7 +1526,7 @@ mod catalog {
                 statement,
                 Origin {
                     file: 0,
-                    offset: 0,
+                    run: crate::source::RunAt::default(),
                     line,
                 },
             );
@@ -1847,7 +1847,10 @@ mod fixtures {
                 }
                 let origin = Origin {
                     file,
-                    offset: piece.span.start,
+                    run: crate::source::RunAt {
+                        segment: file,
+                        offset: piece.span.start,
+                    },
                     line: piece.line,
                 };
                 statements.push((statement, origin));

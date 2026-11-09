@@ -8,7 +8,7 @@ use std::io::{self, BufRead};
 
 use serde::{Deserialize, Serialize};
 
-use crate::source::{Encoding, Piece};
+use crate::source::{Encoding, Piece, Span};
 use crate::statement::{Expr, ParseError, Statement};
 use crate::value::Literal;
 
@@ -19,7 +19,8 @@ pub enum DialectId {
     Oracle,
 }
 
-/// What a dialect's parser keeps from one piece of a file to the next; start each file with a new one.
+/// What a dialect's parser keeps from one piece of a file to the next; start each file, or each segment of one, with a
+/// new one.
 #[derive(Debug)]
 pub enum ParseMemo {
     Oracle(oracle::insert::Memo),
@@ -56,6 +57,10 @@ pub enum Runner {
 pub struct Include {
     /// The line the command starts on, from 1.
     pub line: u64,
+    /// Where the command is: from its first character to the end of its last line, without the line end.
+    pub span: Span,
+    /// The line the command ends on: a command ending in `-` goes on onto the next line.
+    pub last_line: u64,
     /// The name is looked up beside the script that holds the command, not in the working directory.
     pub beside_script: bool,
     /// The file name as written, quotes and arguments removed; a default extension is not added yet.
@@ -63,28 +68,31 @@ pub struct Include {
 }
 
 impl DialectId {
-    /// The include commands of the script in `reader`, in order.
+    /// The include commands of the script in `reader`, which starts `offset` bytes into its file, in order.
     pub fn script_includes(
         self,
         reader: impl BufRead,
         runner: Runner,
+        offset: u64,
         encoding: Encoding,
     ) -> io::Result<Vec<Include>> {
         match self {
-            Self::Oracle => oracle::script::includes(reader, runner, encoding),
+            Self::Oracle => oracle::script::includes(reader, runner, offset, encoding),
         }
     }
 
-    /// The pieces of the script in `reader`, which starts `offset` bytes into its file, split by `runner`'s rules.
+    /// The pieces of the script in `reader`, which starts `offset` bytes into its file on line `line`, split by
+    /// `runner`'s rules.
     pub fn pieces<'r>(
         self,
         reader: impl BufRead + 'r,
         runner: Runner,
         offset: u64,
+        line: u64,
     ) -> Box<dyn Iterator<Item = io::Result<Piece>> + 'r> {
         match self {
             Self::Oracle => {
-                Box::new(oracle::split::Splitter::new(reader, runner).starting_at(offset))
+                Box::new(oracle::split::Splitter::new(reader, runner).starting_at(offset, line))
             }
         }
     }

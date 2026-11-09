@@ -9,7 +9,7 @@ use sqlca::check::{self, StructureError};
 use sqlca::dialect::{DialectId, Pass, Runner};
 use sqlca::finding::FindingKind;
 use sqlca::input;
-use sqlca::source::{Encoding, Piece};
+use sqlca::source::{Encoding, Piece, RunAt};
 use sqlca::statement::{Expr, InsertRow, ParseError, Statement};
 
 use crate::fixtures;
@@ -47,7 +47,7 @@ fn every_piece_of_every_export_belongs_to_exactly_one_pass() {
         for path in order.lines() {
             let opened = input::open(&root.join(path)).unwrap();
             for piece in
-                DialectId::Oracle.pieces(opened.reader, Runner::SqlPlus, opened.base_offset)
+                DialectId::Oracle.pieces(opened.reader, Runner::SqlPlus, opened.base_offset, 1)
             {
                 both_passes(&piece.unwrap(), encoding).unwrap();
                 pieces += 1;
@@ -78,12 +78,15 @@ fn catalog(statements: &[(String, Statement<'static>, Origin)]) -> Catalog {
 )]
 fn parse(sql: &str) -> Vec<(String, Statement<'static>, Origin)> {
     DialectId::Oracle
-        .pieces(sql.as_bytes(), Runner::SqlPlus, 0)
+        .pieces(sql.as_bytes(), Runner::SqlPlus, 0, 1)
         .map(|piece| {
             let piece = piece.unwrap();
             let origin = Origin {
                 file: 0,
-                offset: piece.span.start,
+                run: RunAt {
+                    segment: 0,
+                    offset: piece.span.start,
+                },
                 line: piece.line,
             };
             (

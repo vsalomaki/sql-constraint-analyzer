@@ -413,11 +413,13 @@ impl<R: BufRead> Splitter<R> {
         }
     }
 
-    /// Treats the reader as starting `offset` bytes into the file, so pieces carry offsets in the file as stored
-    /// (the input layer skips a byte-order mark before handing the reader over).
+    /// Treats the reader as starting `offset` bytes into the file, on line `line`, so pieces carry offsets and lines
+    /// in the file as stored (the input layer skips a byte-order mark, or seeks to where an include command ends,
+    /// before handing the reader over).
     #[must_use]
-    pub fn starting_at(mut self, offset: u64) -> Self {
+    pub fn starting_at(mut self, offset: u64, line: u64) -> Self {
         self.offset = offset;
+        self.line = line;
         self
     }
 
@@ -744,12 +746,19 @@ mod tests {
     }
 
     #[test]
-    fn offsets_start_where_the_reader_was_positioned() {
+    fn offsets_and_lines_start_where_the_reader_was_positioned() {
         let pieces: Vec<_> = Splitter::new("select 1;\n".as_bytes(), Runner::SqlPlus)
-            .starting_at(3)
+            .starting_at(3, 1)
             .map(|p| p.unwrap().span)
             .collect();
         assert_eq!(pieces, [Span { start: 3, end: 12 }]);
+        // The rest of an include command's line, then the next statement.
+        let pieces: Vec<_> = Splitter::new("\r\nselect 1;\n".as_bytes(), Runner::SqlPlus)
+            .starting_at(40, 4)
+            .map(|p| p.unwrap())
+            .map(|p| (p.span, p.line))
+            .collect();
+        assert_eq!(pieces, [(Span { start: 42, end: 51 }, 5)]);
     }
 
     #[test]

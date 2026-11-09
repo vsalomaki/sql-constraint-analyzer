@@ -7,6 +7,14 @@ pub struct Span {
     pub end: u64,
 }
 
+/// Where a statement runs: the segment of the run it is in, then its offset in that segment's file. Segments are
+/// numbered in the order the run reaches them, so a later `RunAt` always runs later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RunAt {
+    pub segment: usize,
+    pub offset: u64,
+}
+
 /// A length or index as a byte offset.
 pub(crate) fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)

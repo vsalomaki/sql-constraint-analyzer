@@ -31,6 +31,7 @@ fn check(schema: &str) -> Report {
                 path,
                 role: Role::Data,
                 order: OrderSource::Given,
+                includes: Vec::new(),
             }
         })
         .collect();

@@ -5,12 +5,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::dialect::{DialectId, Include, Runner};
-use crate::source::Encoding;
+use crate::source::{Encoding, RunAt, Span};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
@@ -36,6 +37,12 @@ pub enum InputError {
     Utf16(PathBuf),
     #[error("{list}: line {line}: not valid UTF-8")]
     ListNotUtf8 { list: String, line: usize },
+    #[error(
+        "'{}' is given with --schema or --reference and run by --script; give it once, as --script runs what it \
+         includes where it is",
+        .0.display()
+    )]
+    ScriptListedBefore(PathBuf),
     #[error("script '{}' includes itself: {chain}", script.display())]
     IncludeLoop { script: PathBuf, chain: String },
     #[error("{}:{line}: cannot find the script '{name}' (looked in {looked_in})", from.display())]
@@ -112,6 +119,18 @@ pub struct InputFile {
     pub role: Role,
     pub bytes: u64,
     pub order: OrderSource,
+    /// A `--script` file's include commands, in order; empty for any other file.
+    pub includes: Vec<IncludeAt>,
+}
+
+/// An include command of a script, and the file it runs there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeAt {
+    /// From the command's first character to the end of its last line, without the line end.
+    pub span: Span,
+    pub last_line: u64,
+    /// The file it runs, by position in the run; `None` when that file is read where it was listed first.
+    pub file: Option<usize>,
 }
 
 /// What the command line asked for.
@@ -143,6 +162,8 @@ struct Candidate {
     path: PathBuf,
     role: Role,
     order: OrderSource,
+    /// A script's include commands, each with the position among the candidates of the file it names.
+    includes: Vec<(Include, usize)>,
 }
 
 /// The files of a run in processing order. `stdin` is read only for `--files-from -`.
@@ -173,46 +194,73 @@ pub fn resolve(spec: &InputSpec, stdin: &mut dyn Read) -> Result<Resolved, Input
                 path,
                 role: Role::Data,
                 order: order.clone(),
+                includes: Vec::new(),
             });
         }
     }
     if let Some(script) = &spec.script {
-        let mut paths = Vec::new();
+        let mut scripts = Vec::new();
         follow_script(
             script,
             spec,
             &mut Vec::new(),
             &mut HashSet::new(),
-            &mut paths,
+            &mut scripts,
         )?;
-        for path in paths {
+        let first = candidates.len();
+        for (path, includes) in scripts {
             candidates.push(Candidate {
                 path,
                 role: Role::Data,
                 order: OrderSource::IncludedBy(script.clone()),
+                includes: includes
+                    .into_iter()
+                    .map(|(include, target)| (include, first + target))
+                    .collect(),
             });
         }
     }
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut first_position = HashMap::new();
+    // By candidate: its position in the run, unless it is read where it was listed first.
+    let mut kept: Vec<Option<usize>> = Vec::with_capacity(candidates.len());
+    let mut includes = Vec::new();
     for candidate in candidates {
         let key = fs::canonicalize(&candidate.path).map_err(|e| path_error(&candidate.path, e))?;
         if let Some(position) = first_position.get(&key) {
+            // Read where it is listed first, a script would run its includes apart from its own statements.
+            if !candidate.includes.is_empty() {
+                return Err(InputError::ScriptListedBefore(candidate.path));
+            }
             warnings.push(format!(
                 "'{}' is listed more than once; it is read once, at position {position}",
                 candidate.path.display()
             ));
+            kept.push(None);
             continue;
         }
         let bytes = inspect(&candidate.path)?;
+        kept.push(Some(files.len()));
+        includes.push(candidate.includes);
         files.push(InputFile {
             path: candidate.path,
             role: candidate.role,
             bytes,
             order: candidate.order,
+            includes: Vec::new(),
         });
         first_position.insert(key, files.len());
+    }
+    for (file, found) in files.iter_mut().zip(includes) {
+        file.includes = found
+            .into_iter()
+            .map(|(include, target)| IncludeAt {
+                span: include.span,
+                last_line: include.last_line,
+                file: kept.get(target).copied().flatten(),
+            })
+            .collect();
     }
     if files.is_empty() {
         return Err(InputError::Empty);
@@ -246,6 +294,7 @@ fn expand_patterns(
                 path: PathBuf::from(pattern),
                 role,
                 order: OrderSource::Given,
+                includes: Vec::new(),
             });
             continue;
         }
@@ -276,6 +325,7 @@ fn expand_patterns(
             path,
             role,
             order: OrderSource::GlobMatches,
+            includes: Vec::new(),
         }));
     }
     Ok(())
@@ -379,12 +429,16 @@ fn read_list(list: &str, null: bool, stdin: &mut dyn Read) -> Result<Vec<PathBuf
     parse_list(&bytes, null, name)
 }
 
+/// A script and what it includes, as `follow_script` lists them: each with its include commands and the position in
+/// the list of the file each one names.
+type Scripts = Vec<(PathBuf, Vec<(Include, usize)>)>;
+
 fn follow_script(
     script: &Path,
     spec: &InputSpec,
     stack: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
-    out: &mut Vec<PathBuf>,
+    out: &mut Scripts,
 ) -> Result<(), InputError> {
     let canonical = fs::canonicalize(script).map_err(|e| path_error(script, e))?;
     if stack.contains(&canonical) {
@@ -400,25 +454,63 @@ fn follow_script(
         });
     }
     // A repeated script is listed again, for the duplicate warning, but not followed again.
-    out.push(script.to_owned());
+    let position = out.len();
+    out.push((script.to_owned(), Vec::new()));
     if !seen.insert(canonical.clone()) {
         return Ok(());
     }
     stack.push(canonical);
-    let opened = open(script)?;
-    let found = spec
-        .dialect
-        .script_includes(opened.reader, spec.runner, spec.encoding)
-        .map_err(|source| InputError::Io {
-            path: script.to_owned(),
-            source,
-        })?;
-    for include in found {
+    for include in include_commands(script, spec.dialect, spec.runner, spec.encoding)? {
         let target = find_include(script, &include, spec)?;
+        let at = out.len();
         follow_script(&target, spec, stack, seen, out)?;
+        if let Some((_, includes)) = out.get_mut(position) {
+            includes.push((include, at));
+        }
     }
     stack.pop();
     Ok(())
+}
+
+/// The include commands of the script at `path`, in order, with their places in the file as stored.
+fn include_commands(
+    path: &Path,
+    dialect: DialectId,
+    runner: Runner,
+    encoding: Encoding,
+) -> Result<Vec<Include>, InputError> {
+    let opened = open(path)?;
+    dialect
+        .script_includes(opened.reader, runner, opened.base_offset, encoding)
+        .map_err(|source| InputError::Io {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+/// `file`'s includes as the script now at `path` has them: the same files, at where its include commands are now.
+/// A fix moves them when it cuts or adds bytes before them, and never cuts one.
+pub fn refresh_includes(
+    file: &InputFile,
+    path: &Path,
+    dialect: DialectId,
+    runner: Runner,
+    encoding: Encoding,
+) -> Result<Vec<IncludeAt>, InputError> {
+    if file.includes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found = include_commands(path, dialect, runner, encoding)?;
+    Ok(file
+        .includes
+        .iter()
+        .zip(found)
+        .map(|(old, now)| IncludeAt {
+            span: now.span,
+            last_line: now.last_line,
+            file: old.file,
+        })
+        .collect())
 }
 
 fn find_include(script: &Path, include: &Include, spec: &InputSpec) -> Result<PathBuf, InputError> {
@@ -509,6 +601,132 @@ fn inspect(path: &Path) -> Result<u64, InputError> {
     }
     open(path)?;
     Ok(meta.len())
+}
+
+/// A stretch of one file that runs with no include in between: from `start` on line `line`, to `end`, where an
+/// include command's line ends, or else to the end of the file. A segment after an include starts with the rest of
+/// the command's line, its line end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    pub file: usize,
+    pub start: u64,
+    pub line: u64,
+    pub end: Option<u64>,
+}
+
+/// A file read on its own, with the files its includes run: the segments it is read in, one after another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unit {
+    pub file: usize,
+    pub segments: Range<usize>,
+}
+
+/// The order a run reads its files in. Each file read on its own is a unit, and an include runs its file where the
+/// command is, so a script is read in segments with the files it includes in between.
+#[derive(Debug, Clone, Default)]
+pub struct RunPlan {
+    segments: Vec<Segment>,
+    units: Vec<Unit>,
+    /// By file: its segments' positions, in order.
+    of_file: Vec<Vec<usize>>,
+    /// By file: the file whose unit it is read in.
+    unit_of: Vec<usize>,
+}
+
+impl RunPlan {
+    /// The plan for `files` as `resolve` gives them, which refuses an include loop and lists a file once.
+    pub fn new(files: &[InputFile]) -> Self {
+        let mut plan = Self {
+            of_file: vec![Vec::new(); files.len()],
+            unit_of: (0..files.len()).collect(),
+            ..Self::default()
+        };
+        let included: HashSet<usize> = files
+            .iter()
+            .flat_map(|f| &f.includes)
+            .filter_map(|i| i.file)
+            .collect();
+        for file in (0..files.len()).filter(|f| !included.contains(f)) {
+            let first = plan.segments.len();
+            plan.add(files, file, file);
+            plan.units.push(Unit {
+                file,
+                segments: first..plan.segments.len(),
+            });
+        }
+        plan
+    }
+
+    fn add(&mut self, files: &[InputFile], file: usize, unit: usize) {
+        if let Some(slot) = self.unit_of.get_mut(file) {
+            *slot = unit;
+        }
+        let (mut start, mut line) = (0, 1);
+        let includes = files.get(file).map_or(&[][..], |f| f.includes.as_slice());
+        for include in includes {
+            let Some(target) = include.file else {
+                continue;
+            };
+            self.push(Segment {
+                file,
+                start,
+                line,
+                end: Some(include.span.end),
+            });
+            self.add(files, target, unit);
+            (start, line) = (include.span.end, include.last_line);
+        }
+        self.push(Segment {
+            file,
+            start,
+            line,
+            end: None,
+        });
+    }
+
+    fn push(&mut self, segment: Segment) {
+        if let Some(of_file) = self.of_file.get_mut(segment.file) {
+            of_file.push(self.segments.len());
+        }
+        self.segments.push(segment);
+    }
+
+    pub fn units(&self) -> &[Unit] {
+        &self.units
+    }
+
+    pub fn segment(&self, position: usize) -> Option<&Segment> {
+        self.segments.get(position)
+    }
+
+    /// The file whose unit `file` is read in: itself, unless an include runs it.
+    pub fn unit_of(&self, file: usize) -> usize {
+        self.unit_of.get(file).copied().unwrap_or(file)
+    }
+
+    /// Where the statement at `offset` in the file at `file` runs.
+    pub fn at(&self, file: usize, offset: u64) -> RunAt {
+        RunAt {
+            segment: self.find(file, |s| s.start <= offset),
+            offset,
+        }
+    }
+
+    /// Where the row on `line` of the file at `file` runs, as an order: rows on one line aren't told apart.
+    pub fn row_order(&self, file: usize, line: u64) -> (usize, u64) {
+        (self.find(file, |s| s.line <= line), line)
+    }
+
+    /// The last of the file's segments that `starts_before` holds for.
+    fn find(&self, file: usize, starts_before: impl Fn(&Segment) -> bool) -> usize {
+        let of_file = self.of_file.get(file).map_or(&[][..], Vec::as_slice);
+        of_file
+            .iter()
+            .copied()
+            .rfind(|&p| self.segments.get(p).is_some_and(&starts_before))
+            .or_else(|| of_file.first().copied())
+            .unwrap_or_default()
+    }
 }
 
 /// How `sqlca inputs` lists the files.
@@ -759,6 +977,135 @@ mod tests {
         let resolved = resolve_script(&script_spec(master)).unwrap();
         assert_eq!(names(&resolved, base), ["load.sql", "x.sql"]);
         assert_eq!(resolved.warnings.len(), 1);
+        let runs: Vec<_> = resolved.files[0].includes.iter().map(|i| i.file).collect();
+        assert_eq!(runs, [Some(1), None], "the second include runs nothing");
+    }
+
+    #[test]
+    fn an_include_of_a_file_listed_before_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let master = write(base, "load.sql", "@@ref\n@@data\n");
+        write(base, "ref.sql", "");
+        write(base, "data.sql", "");
+        let spec = InputSpec {
+            reference: vec![base.join("ref.sql").to_string_lossy().into_owned()],
+            ..script_spec(master)
+        };
+        let resolved = resolve_script(&spec).unwrap();
+        assert_eq!(names(&resolved, base), ["ref.sql", "load.sql", "data.sql"]);
+        let runs: Vec<_> = resolved.files[1].includes.iter().map(|i| i.file).collect();
+        assert_eq!(runs, [None, Some(2)]);
+        let plan = RunPlan::new(&resolved.files);
+        let units: Vec<usize> = plan.units().iter().map(|u| u.file).collect();
+        assert_eq!(
+            units,
+            [0, 1],
+            "the reference file is read on its own, first"
+        );
+    }
+
+    /// Read where it is given, a script would leave its includes to run on their own, apart from its statements.
+    #[test]
+    fn a_script_given_before_its_run_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let master = write(base, "load.sql", "@@sub\n");
+        write(base, "sub.sql", "@@x\n");
+        write(base, "x.sql", "");
+        let given = |name: &str| vec![base.join(name).to_string_lossy().into_owned()];
+        let as_reference = InputSpec {
+            reference: given("load.sql"),
+            ..script_spec(master.clone())
+        };
+        let as_schema = InputSpec {
+            schema: given("sub.sql"),
+            ..script_spec(master)
+        };
+        for spec in [as_reference, as_schema] {
+            let error = resolve_script(&spec).unwrap_err().to_string();
+            assert!(error.contains("and run by --script"), "{error}");
+        }
+    }
+
+    /// The spans the include scan records are the check's, also after a byte-order mark.
+    #[test]
+    fn includes_are_recorded_where_the_check_splits_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let master = base.join("load.sql");
+        fs::write(
+            &master,
+            b"\xEF\xBB\xBFset define off\r\n@@x -\r\nx.sql\r\nrem\r\n",
+        )
+        .unwrap();
+        write(base, "x.sql", "");
+        let resolved = resolve_script(&script_spec(master.clone())).unwrap();
+        let opened = open(&master).unwrap();
+        let command = DialectId::Oracle
+            .pieces(opened.reader, Runner::SqlPlus, opened.base_offset, 1)
+            .map(Result::unwrap)
+            .find(|p| p.text.starts_with(b"@@"))
+            .unwrap();
+        let include = &resolved.files[0].includes[0];
+        assert_eq!(include.span, command.span);
+        assert_eq!((command.line, include.last_line), (2, 3));
+    }
+
+    #[test]
+    fn a_script_runs_each_include_between_its_own_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let master = write(base, "load.sql", "@@a\nselect 1 from dual;\n@@b\nrem end\n");
+        write(base, "a.sql", "@@c\n");
+        write(base, "b.sql", "");
+        write(base, "c.sql", "");
+        let resolved = resolve_script(&script_spec(master)).unwrap();
+        assert_eq!(
+            names(&resolved, base),
+            ["load.sql", "a.sql", "c.sql", "b.sql"]
+        );
+        let plan = RunPlan::new(&resolved.files);
+        let segment = |s: &Segment| (s.file, s.start, s.line, s.end);
+        let segments: Vec<_> = (0..7).map(|p| segment(plan.segment(p).unwrap())).collect();
+        assert_eq!(
+            segments,
+            [
+                (0, 0, 1, Some(3)),
+                (1, 0, 1, Some(3)),
+                (2, 0, 1, None),
+                (1, 3, 1, None),
+                (0, 3, 1, Some(27)),
+                (3, 0, 1, None),
+                (0, 27, 3, None),
+            ]
+        );
+        assert!(plan.segment(7).is_none());
+        assert_eq!(
+            plan.units(),
+            [Unit {
+                file: 0,
+                segments: 0..7
+            }]
+        );
+        assert_eq!(
+            plan.at(0, 4),
+            RunAt {
+                segment: 4,
+                offset: 4
+            }
+        );
+        assert!(
+            plan.at(2, 0) < plan.at(0, 4),
+            "c runs before the script's select"
+        );
+        assert!(
+            plan.at(0, 28) > plan.at(3, 0),
+            "the script's last line runs after b"
+        );
+        assert_eq!(plan.row_order(0, 2), (4, 2));
+        assert_eq!(plan.row_order(0, 4), (6, 4));
+        assert_eq!((plan.unit_of(2), plan.unit_of(3)), (0, 0));
     }
 
     #[test]

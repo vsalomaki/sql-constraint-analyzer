@@ -793,6 +793,7 @@ fn fix_export(
             },
             bytes: fs::metadata(export.join(path)).unwrap().len(),
             order: OrderSource::Given,
+            includes: Vec::new(),
         })
         .collect();
     let target = Target {

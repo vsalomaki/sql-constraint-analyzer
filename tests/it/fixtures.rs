@@ -91,6 +91,7 @@ pub(crate) fn inputs(root: &Path) -> Vec<InputFile> {
             },
             bytes: fs::metadata(root.join(path)).unwrap().len(),
             order: OrderSource::Given,
+            includes: Vec::new(),
         })
         .collect()
 }

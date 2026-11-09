@@ -5,16 +5,18 @@ use std::io::{self, BufRead};
 use super::split::{Splitter, command};
 use crate::dialect::{Include, Runner};
 use crate::source::Encoding;
-use crate::source::{Piece, PieceKind};
+use crate::source::{Piece, PieceKind, to_u64};
 
-/// The include commands of the script in `reader`, in order. Everything else in it is left alone.
+/// The include commands of the script in `reader`, which starts `offset` bytes into its file, in order. Everything
+/// else in it is left alone.
 pub fn includes(
     reader: impl BufRead,
     runner: Runner,
+    offset: u64,
     encoding: Encoding,
 ) -> io::Result<Vec<Include>> {
     let mut found = Vec::new();
-    for piece in Splitter::new(reader, runner) {
+    for piece in Splitter::new(reader, runner).starting_at(offset, 1) {
         let piece = piece?;
         if piece.kind == PieceKind::Command
             && let Some(include) = parse(&piece, encoding)
@@ -41,8 +43,12 @@ fn parse(piece: &Piece, encoding: Encoding) -> Option<Include> {
         (false, rest)
     };
     let name = file_name(rest.trim_start())?;
+    // A command ending in `-` goes on onto the next line, which its text keeps.
+    let lines = to_u64(piece.text.split(|&b| b == b'\n').count());
     Some(Include {
         line: piece.line,
+        span: piece.span,
+        last_line: piece.line + lines.saturating_sub(1),
         beside_script,
         name,
     })
@@ -63,9 +69,10 @@ fn file_name(rest: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::Span;
 
     fn found(text: &str) -> Vec<(u64, bool, String)> {
-        includes(text.as_bytes(), Runner::SqlPlus, Encoding::Utf8)
+        includes(text.as_bytes(), Runner::SqlPlus, 0, Encoding::Utf8)
             .unwrap()
             .into_iter()
             .map(|i| (i.line, i.beside_script, i.name))
@@ -102,5 +109,22 @@ mod tests {
     #[test]
     fn an_include_inside_a_statement_is_not_a_command() {
         assert_eq!(found("insert into t values ('\n@a\n');\n"), []);
+    }
+
+    #[test]
+    fn an_include_has_its_place_in_the_file_as_stored() {
+        let text = "select 1 from dual;\r\n@@a -\r\nb.sql\r\n@c\n";
+        let found: Vec<_> = includes(text.as_bytes(), Runner::SqlPlus, 3, Encoding::Utf8)
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.span, i.line, i.last_line))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Span { start: 24, end: 36 }, 2, 3),
+                (Span { start: 38, end: 40 }, 4, 4)
+            ]
+        );
     }
 }

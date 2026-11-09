@@ -8,6 +8,7 @@ mod insert;
 mod pipeline;
 mod samples;
 mod schemas;
+mod script;
 mod split;
 mod sqlcl;
 #[cfg(feature = "gen")]

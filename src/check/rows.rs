@@ -9,10 +9,10 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::Warning;
 use super::structure::Row;
-use crate::catalog::{Catalog, Column, Constraint, Kind, Origin, Parent, Table, TableId};
+use crate::catalog::{Catalog, Column, Constraint, Kind, Parent, Table, TableId};
 use crate::dialect::{DialectId, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
-use crate::source::Encoding;
+use crate::source::{Encoding, RunAt};
 use crate::statement::{DataType, Expr, InsertRow, TypeFamily};
 use crate::value::{self, Canonical, Literal};
 
@@ -26,19 +26,12 @@ fn may_be_date_text(column: &Column, expr: Option<&Expr<'_>>) -> bool {
         || matches!(expr, None | Some(Expr::Default | Expr::String { .. })))
 }
 
-/// Where a row is: its file's position in the run, its offset there, and its line.
+/// Where a row is: its file's position in the run, where it runs, and its line.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct At {
     pub file: usize,
-    pub offset: u64,
+    pub run: RunAt,
     pub line: u64,
-}
-
-impl At {
-    /// Whether the row comes after `origin` in the order the files are run.
-    fn after(self, origin: Origin) -> bool {
-        (self.file, self.offset) > (origin.file, origin.offset)
-    }
 }
 
 /// One constraint's keys, by hash, with each key's first row.
@@ -362,7 +355,7 @@ impl<'a> Checker<'a> {
     }
 
     fn applies(constraint: &Constraint, at: At) -> bool {
-        constraint.judges(at.file, at.offset)
+        constraint.judges(at.run)
     }
 
     /// NULL in a NOT NULL column or a primary key column: one finding per column.
@@ -371,7 +364,7 @@ impl<'a> Checker<'a> {
             if !self.is_null(literal) {
                 continue;
             }
-            if let Some(constraint) = table.forbids_null(column, at.file, at.offset) {
+            if let Some(constraint) = table.forbids_null(column, at.run) {
                 let mut finding = self.finding(FindingKind::NotNull, table, constraint, &[column]);
                 finding.file = Some(self.file(at.file));
                 finding.line = Some(row.line);
@@ -568,7 +561,7 @@ impl<'a> Checker<'a> {
                     at,
                     key: parts.iter().map(|(p, _)| shown(p)).collect(),
                     load_order: self.load_order
-                        && at.after(constraint.enabled_at)
+                        && at.run > constraint.enabled_at.run
                         && !constraint.state.initially_deferred,
                     assumed: parts.iter().any(|(_, a)| *a),
                 });
