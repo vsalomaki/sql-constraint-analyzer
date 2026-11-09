@@ -124,6 +124,18 @@ pub struct Report {
     /// Tables with a key value the check couldn't know or assumed: cutting a row there can uncover a missing parent
     /// that no child found.
     pub uncertain_tables: BTreeSet<String>,
+    /// Tables that may hold a row the database rejects for a foreign key the check couldn't decide: a duplicate there
+    /// may rest on a row that isn't there.
+    pub undecided_tables: BTreeSet<String>,
+}
+
+impl Report {
+    /// What the rows pass found out about the rows `fix` may cut.
+    fn hold(&mut self, holders: rows::Holders) {
+        self.referenced_rows = holders.rows;
+        self.uncertain_tables = holders.uncertain;
+        self.undecided_tables = holders.undecided;
+    }
 }
 
 /// What the schema pass found, for the run's summary.
@@ -436,8 +448,7 @@ pub fn run_without(
     }
     observer.resolve();
     let (mut findings, warnings, holders) = checker.finish();
-    report.referenced_rows = holders.rows;
-    report.uncertain_tables = holders.uncertain;
+    report.hold(holders);
     findings.extend(uncommitted);
     sort_by_place(&mut findings, &names);
     report.findings = findings;

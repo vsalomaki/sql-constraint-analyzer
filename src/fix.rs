@@ -995,6 +995,8 @@ type Row = (usize, u64);
 
 const ASSUMED: &str = "its key rests on a date written as text";
 const CROWDED: &str = "the line holds several rows, so the fix can't tell which";
+const UNDECIDED: &str =
+    "its table may hold a row the database rejects for a foreign key the check couldn't decide";
 
 const PAST_LIMIT: &str = "the fix reached its round limit (--max-rounds) before this row's round";
 
@@ -1254,6 +1256,15 @@ fn targets<'a>(
                 .push(finding);
             continue;
         }
+        if finding.kind == FindingKind::DuplicateKey
+            && report.undecided_tables.contains(&finding.table)
+        {
+            left.push(Left {
+                finding: finding.clone(),
+                why: UNDECIDED,
+            });
+            continue;
+        }
         if finding.assumed && !policy.fix_assumed {
             left.push(Left {
                 finding: finding.clone(),
@@ -1280,6 +1291,16 @@ fn targets<'a>(
     }
     let mut lasts = Vec::new();
     for group in groups.into_values() {
+        if group
+            .iter()
+            .any(|f| report.undecided_tables.contains(&f.table))
+        {
+            left.extend(group.iter().map(|f| Left {
+                finding: (*f).clone(),
+                why: UNDECIDED,
+            }));
+            continue;
+        }
         match all_but_last(&group, files, &row_of, plan, policy, crowded) {
             Ok(last) => lasts.push(last),
             Err(why) => left.extend(group.iter().map(|f| Left {

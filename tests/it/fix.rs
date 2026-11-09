@@ -1045,6 +1045,101 @@ fn an_insert_the_checker_cant_parse_makes_the_fix_refuse() {
     assert!(!out.exists() || fs::read_dir(&out).unwrap().next().is_none());
 }
 
+/// Each case: its tables and rows, then a row the database may reject and a valid duplicate of it, in the order
+/// keep-first would remove the valid one; keep-last gets them the other way round.
+const UNDECIDED_DUPLICATES: [(&str, &str, &str, &str); 5] = [
+    (
+        "a parent key the check can't know",
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, U NUMBER UNIQUE, PID NUMBER REFERENCES P);\n\
+         INSERT INTO P VALUES (1);\nINSERT INTO P VALUES (S.NEXTVAL);\n",
+        "INSERT INTO C VALUES (1, 7, 99);\n",
+        "INSERT INTO C VALUES (2, 7, 1);\n",
+    ),
+    (
+        "a row below one",
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+         CREATE TABLE A (ID NUMBER PRIMARY KEY, PID NUMBER REFERENCES P);\n\
+         CREATE TABLE B (ID NUMBER PRIMARY KEY, U NUMBER UNIQUE, AID NUMBER REFERENCES A);\n\
+         INSERT INTO P VALUES (1);\nINSERT INTO P VALUES (S.NEXTVAL);\n\
+         INSERT INTO A VALUES (10, 99);\nINSERT INTO A VALUES (11, 1);\n",
+        "INSERT INTO B VALUES (1, 7, 10);\n",
+        "INSERT INTO B VALUES (2, 7, 11);\n",
+    ),
+    (
+        "a row in the same INSERT ALL as one",
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+         CREATE TABLE Q (ID NUMBER PRIMARY KEY, PID NUMBER REFERENCES P);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY);\n\
+         INSERT INTO P VALUES (1);\nINSERT INTO P VALUES (S.NEXTVAL);\n",
+        "INSERT ALL\n INTO C VALUES (1)\n INTO Q VALUES (2, 99)\n SELECT 1 FROM DUAL;\n",
+        "INSERT INTO C VALUES (1);\n",
+    ),
+    (
+        "an empty parent table",
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+         CREATE TABLE C (ID NUMBER PRIMARY KEY, PID NUMBER REFERENCES P);\n",
+        "INSERT INTO C VALUES (1, 9);\n",
+        "INSERT INTO C VALUES (1, NULL);\n",
+    ),
+    (
+        "a parent table no input defines",
+        "CREATE TABLE C (ID NUMBER PRIMARY KEY, PID NUMBER REFERENCES ELSEWHERE);\n",
+        "INSERT INTO C VALUES (1, 9);\n",
+        "INSERT INTO C VALUES (1, NULL);\n",
+    ),
+];
+
+#[test]
+fn a_duplicate_where_a_row_may_not_exist_is_left_for_review() {
+    for (case, setup, undecided, valid) in UNDECIDED_DUPLICATES {
+        for (on_duplicate, rows) in [
+            (fix::OnDuplicate::KeepFirst, format!("{undecided}{valid}")),
+            (fix::OnDuplicate::KeepLast, format!("{valid}{undecided}")),
+        ] {
+            let policy = Policy {
+                on_duplicate,
+                ..Policy::default()
+            };
+            let (_dir, _, report) = fix_scripts(
+                &[("t.sql", &format!("{setup}{rows}COMMIT;\n"))],
+                &Options::default(),
+                policy,
+                false,
+            );
+            let at = format!("{case}, {on_duplicate:?}");
+            assert!(report.removed.is_empty(), "{at}: {:?}", report.removed);
+            assert!(
+                report
+                    .left
+                    .iter()
+                    .any(|l| l.finding.kind == FindingKind::DuplicateKey
+                        && l.why.contains("couldn't decide")),
+                "{at}: {:?}",
+                report.left
+            );
+        }
+    }
+}
+
+/// Only duplicates wait: a missing parent the check is sure of goes, below an undecided row too, and a duplicate in
+/// a table nothing undecided reaches is fixed.
+#[test]
+fn rows_that_may_not_exist_hold_back_only_their_tables_duplicates() {
+    let (_dir, _, report) = fix_sql(
+        "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
+         CREATE TABLE A (ID NUMBER PRIMARY KEY, PID NUMBER REFERENCES P);\n\
+         CREATE TABLE B (ID NUMBER PRIMARY KEY, AID NUMBER REFERENCES A);\n\
+         CREATE TABLE U (ID NUMBER PRIMARY KEY);\n\
+         INSERT INTO P VALUES (1);\nINSERT INTO P VALUES (S.NEXTVAL);\n\
+         INSERT INTO A VALUES (10, 99);\nINSERT INTO B VALUES (1, 77);\n\
+         INSERT INTO U VALUES (1);\nINSERT INTO U VALUES (1);\nCOMMIT;\n",
+    );
+    let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+    assert_eq!(removed, [8, 10]);
+    assert!(report.left.is_empty(), "{:?}", report.left);
+}
+
 #[test]
 fn a_duplicate_of_a_removed_row_is_kept() {
     let (_dir, _, report) = fix_sql(
@@ -2270,8 +2365,15 @@ mod generated {
                 );
             }
             let empty_parent = count(&report.input, FindingKind::ParentTableEmpty);
+            // Only what the fix left for review stays: with a parent table's rows left out, a duplicate below it may
+            // rest on a row the database rejects.
             for kind in FIXED {
-                assert_eq!(count(&report.output, kind), 0, "{at}: {kind:?}");
+                let left = report
+                    .left
+                    .iter()
+                    .filter(|l| l.finding.kind == kind)
+                    .count();
+                assert_eq!(count(&report.output, kind), left, "{at}: {kind:?}");
             }
             assert_eq!(
                 count(&report.output, FindingKind::ParentTableEmpty),
@@ -2302,17 +2404,28 @@ mod generated {
                 surviving,
                 "{at}"
             );
+            let (undecided, commits): (Vec<_>, Vec<_>) = report
+                .left
+                .iter()
+                .partition(|l| l.why.contains("couldn't decide"));
+            assert!(
+                undecided
+                    .iter()
+                    .all(|l| l.finding.kind == FindingKind::DuplicateKey),
+                "{at}: {undecided:?}"
+            );
+            if options.omit_data.is_empty() {
+                assert!(undecided.is_empty(), "{at}: {undecided:?}");
+            }
             // The generated schema has a deferred foreign key, so an added COMMIT could roll the load back.
             assert!(
-                report
-                    .left
+                commits
                     .iter()
                     .all(|l| l.finding.kind == FindingKind::Uncommitted),
-                "{at}: {:?}",
-                report.left
+                "{at}: {commits:?}"
             );
             assert_eq!(
-                report.left.len(),
+                commits.len(),
                 count(&report.input, FindingKind::Uncommitted),
                 "{at}"
             );
