@@ -8,7 +8,7 @@ macro_rules! put {
 }
 
 use super::RULES;
-use crate::synth::render::{Batch, DdlItem, DdlStyle, Edge, Insert, Sql};
+use crate::synth::render::{Batch, DdlItem, DdlStyle, Edge, Insert, ScriptItem, Sql};
 use crate::synth::rng::Rng;
 use crate::synth::schema::{
     APP_SCHEMA, AUDIT_SEQ, AUDIT_TRIGGER, Constraint, DefaultValue, EMPLOYEES_EMAIL_UIX, Form,
@@ -74,7 +74,7 @@ impl synth::Render for Render {
             ),
             DdlItem::ForeignKeys(table) => (
                 writer.foreign_keys(table),
-                count(constraints_of(table).filter(|c| c.is_foreign())),
+                count(writer.written_foreign_keys(table)),
             ),
             DdlItem::Sequence => (writer.sequence(), 1),
             // The PL/SQL block ended by `/`, then `ALTER TRIGGER … ENABLE`.
@@ -180,15 +180,39 @@ impl synth::Render for Render {
         }
     }
 
-    fn load_script(&self, paths: &[&str], eol: &str) -> String {
-        paths
-            .iter()
-            .fold(format!("SET DEFINE OFF{eol}"), |mut script, path| {
-                script.push_str("@@");
-                script.push_str(path);
-                script.push_str(eol);
-                script
-            })
+    fn load_script(&self, items: &[ScriptItem<'_>], eol: &str) -> String {
+        let writer = DdlWriter {
+            noise: self.noise,
+            style: DdlStyle {
+                eol,
+                keys_in_table: true,
+                key_between_rows: false,
+                disabled_keys_in_ddl: true,
+            },
+        };
+        let mut script = format!("SET DEFINE OFF{eol}");
+        for item in items {
+            match item {
+                ScriptItem::Include(path) => put!(script, "@@{path}{eol}"),
+                ScriptItem::Commit => put!(script, "{}{eol}", super::COMMIT),
+                ScriptItem::GrantReferences { parent, to } => {
+                    put!(
+                        script,
+                        "GRANT REFERENCES ON {} TO {};{eol}",
+                        qt(*parent),
+                        q(to)
+                    );
+                }
+                ScriptItem::ForeignKeyAfterData(constraint) => {
+                    let after_data = Constraint {
+                        state: State::NotValidated,
+                        ..**constraint
+                    };
+                    script.push_str(&writer.foreign_key(&after_data));
+                }
+            }
+        }
+        script
     }
 }
 
@@ -436,49 +460,58 @@ impl DdlWriter<'_> {
         self.keys(table, |c| self.late(c))
     }
 
+    /// The foreign keys of `table` its DDL adds: all of them, or without the disabled ones that `load.sql` adds.
+    fn written_foreign_keys(&self, table: TableId) -> impl Iterator<Item = &'static Constraint> {
+        let disabled_too = self.style.disabled_keys_in_ddl;
+        constraints_of(table)
+            .filter(move |c| c.is_foreign() && (disabled_too || c.state != State::Disabled))
+    }
+
     fn foreign_keys(&self, table: TableId) -> String {
-        let eol = self.style.eol;
         let mut out = String::new();
-        let mut first = true;
-        for c in constraints_of(table) {
-            let Kind::Foreign {
-                parent,
-                parent_columns,
-                deferred,
-            } = c.kind
-            else {
-                continue;
-            };
-            if first {
+        for (i, c) in self.written_foreign_keys(table).enumerate() {
+            if i == 0 {
                 self.banner(
                     &mut out,
                     &format!("Ref Constraints for Table {}", table.name()),
                 );
-                first = false;
             }
-            let columns = parent_columns
-                .map(|cols| format!(" ({})", col_list(cols)))
-                .unwrap_or_default();
-            let deferrable = if deferred {
-                " DEFERRABLE INITIALLY DEFERRED"
-            } else {
-                ""
-            };
-            let state = match c.state {
-                State::Enforced => "ENABLE",
-                State::NotValidated => "ENABLE NOVALIDATE",
-                State::Disabled => "DISABLE",
-            };
-            put!(
-                out,
-                "  ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}){eol}\t  REFERENCES {}{columns}{deferrable} {state};{eol}",
-                qt(table),
-                q(c.name),
-                col_list(c.columns),
-                qt(parent),
-            );
+            out.push_str(&self.foreign_key(c));
         }
         out
+    }
+
+    /// `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`, in the state the constraint has.
+    fn foreign_key(&self, c: &Constraint) -> String {
+        let eol = self.style.eol;
+        let Kind::Foreign {
+            parent,
+            parent_columns,
+            deferred,
+        } = c.kind
+        else {
+            return String::new();
+        };
+        let columns = parent_columns
+            .map(|cols| format!(" ({})", col_list(cols)))
+            .unwrap_or_default();
+        let deferrable = if deferred {
+            " DEFERRABLE INITIALLY DEFERRED"
+        } else {
+            ""
+        };
+        let state = match c.state {
+            State::Enforced => "ENABLE",
+            State::NotValidated => "ENABLE NOVALIDATE",
+            State::Disabled => "DISABLE",
+        };
+        format!(
+            "  ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}){eol}\t  REFERENCES {}{columns}{deferrable} {state};{eol}",
+            qt(c.table),
+            q(c.name),
+            col_list(c.columns),
+            qt(parent),
+        )
     }
 
     fn sequence(&self) -> String {
@@ -558,6 +591,7 @@ mod tests {
             eol: "\n",
             keys_in_table,
             key_between_rows: false,
+            disabled_keys_in_ddl: true,
         };
         Render::new(Noise::default()).ddl(item, &style).text
     }

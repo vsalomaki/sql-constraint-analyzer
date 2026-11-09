@@ -210,7 +210,8 @@ port, a throwaway password. It loads generated exports and the planted sample sc
 rejections to match the manifest, by file and line where SQL\*Plus allows: its findings' rows, and its cascade rows,
 which have no finding but whose parent Oracle rejected; but not a duplicate whose key's earlier rows Oracle all
 rejected for another reason, since a rejected row never holds its key. A missing `COMMIT` (one export plants it with
-`omit_commit`) is no rejection, since the load commits at its end. Then it fixes the same exports (default policy, with `--annotate`, and
+`omit_commit`) is no rejection, since the load commits at its end. One export (`script_statements`) loads through its
+own `load.sql`, and is fixed through `--script`. Then it fixes the same exports (default policy, with `--annotate`, and
 `--on-duplicate keep-last --annotate`, `--on-fk null --annotate`; `--load-order` when constraints come before the data), requires that under keep-first it removes and sets to NULL exactly the rows the
 manifest lists, that each output with its removed rows put back and any `COMMIT` it added taken out to be its input byte for byte, loads it into fresh schemas, and requires that Oracle
 rejects no duplicate, NULL or missing-parent row other than a child the fix leaves before its parent, that its

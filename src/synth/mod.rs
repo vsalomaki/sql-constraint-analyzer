@@ -20,6 +20,7 @@ pub(crate) mod rng;
 pub(crate) mod schema;
 pub(crate) mod value;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::dialect::DialectId;
 use crate::finding::{Finding, Location};
 pub use out::{Encoding, LineEnding, OutputFile};
-pub(crate) use render::Render;
+pub(crate) use render::{Render, ScriptItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -164,6 +165,10 @@ impl Noise {
 /// A manifest written by hand gives only the options that differ from the defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches, one per generator option"
+)]
 pub struct Options {
     pub dialect: DialectId,
     pub seed: u64,
@@ -194,6 +199,11 @@ pub struct Options {
     /// With `cascades`, the employees each tree's employee manages in a chain, each the manager of the next.
     #[serde(skip_serializing_if = "is_zero")]
     pub manager_chain: u64,
+    /// `load.sql` holds statements of its own, as a master written for a SQLcl export does: each data file's COMMIT
+    /// after its include, the grants a foreign key into the reference schema needs, and the disabled foreign keys,
+    /// added after the data without checking it. Needs separate data files.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub script_statements: bool,
 }
 
 #[expect(
@@ -223,6 +233,7 @@ impl Default for Options {
             rows_per_file: None,
             cascades: false,
             manager_chain: 0,
+            script_statements: false,
         }
     }
 }
@@ -294,6 +305,10 @@ pub enum Error {
     CascadesWithoutData,
     #[error("--manager-chain must be at most {MAX_MANAGER_CHAIN}, got {0}")]
     ChainTooLong(u64),
+    #[error(
+        "--script-statements needs separate data files, so that load.sql can commit after each"
+    )]
+    ScriptStatementsNeedSeparateFiles,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -319,6 +334,9 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     }
     if options.manager_chain > MAX_MANAGER_CHAIN {
         return Err(Error::ChainTooLong(options.manager_chain));
+    }
+    if options.script_statements && options.layout != Layout::Separate {
+        return Err(Error::ScriptStatementsNeedSeparateFiles);
     }
     let render = options.dialect.render(options.noise);
     let switches = render.unsupported_noise();
@@ -346,6 +364,7 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
 
     let data::Written {
         files,
+        commit_after,
         findings,
         cascades,
         fixes,
@@ -353,7 +372,8 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
 
     let eol = options.line_ending.as_str();
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-    fs::write(root.join(LOAD_SCRIPT), render.load_script(&paths, eol))?;
+    let script = script_items(options, &paths, &commit_after);
+    fs::write(root.join(LOAD_SCRIPT), render.load_script(&script, eol))?;
     let order = paths.iter().fold(String::new(), |mut text, path| {
         text.push_str(path);
         text.push_str(eol);
@@ -373,6 +393,44 @@ pub fn generate(options: &Options, root: &Path) -> Result<Manifest, Error> {
     json.push('\n');
     fs::write(root.join(MANIFEST_FILE), json)?;
     Ok(manifest)
+}
+
+/// What `load.sql` runs: each file in load order. With `script_statements`, also each data file's COMMIT after it,
+/// once the reference schema's files are in the grants its parents need, and the disabled foreign keys at the end.
+fn script_items<'a>(
+    options: &Options,
+    paths: &[&'a str],
+    commit_after: &BTreeSet<String>,
+) -> Vec<ScriptItem<'a>> {
+    let mut items = Vec::new();
+    let reference = format!("{}/", data::schema_folder(schema::REF_SCHEMA));
+    let mut granted = !options.script_statements;
+    for &path in paths {
+        if !granted && !path.starts_with(&reference) {
+            for c in &schema::CONSTRAINTS {
+                if let schema::Kind::Foreign { parent, .. } = c.kind
+                    && parent.schema() != c.table.schema()
+                {
+                    items.push(ScriptItem::GrantReferences {
+                        parent,
+                        to: c.table.schema(),
+                    });
+                }
+            }
+            granted = true;
+        }
+        items.push(ScriptItem::Include(path));
+        if commit_after.contains(path) {
+            items.push(ScriptItem::Commit);
+        }
+    }
+    if options.script_statements {
+        let disabled = schema::CONSTRAINTS
+            .iter()
+            .filter(|c| c.is_foreign() && c.state == schema::State::Disabled);
+        items.extend(disabled.map(ScriptItem::ForeignKeyAfterData));
+    }
+    items
 }
 
 #[cfg(test)]

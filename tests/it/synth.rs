@@ -504,6 +504,84 @@ fn load_script_and_order_list_follow_the_load_order() {
     );
 }
 
+/// The data files hold no COMMIT; `load.sql` commits after each, grants what the foreign key into the reference schema
+/// needs once that schema is in, and adds the disabled foreign key last, without checking the rows.
+#[test]
+fn script_statements_go_in_load_sql() {
+    let options = Options {
+        script_statements: true,
+        ..small()
+    };
+    let (dir, manifest) = generate(&options);
+    let load = fs::read_to_string(root(&dir).join(synth::LOAD_SCRIPT)).unwrap();
+    let lines: Vec<&str> = load.lines().collect();
+    let at = |line: &str| lines.iter().position(|l| *l == line).unwrap();
+    assert!(
+        at("@@ref/data/COUNTRIES.sql")
+            < at("GRANT REFERENCES ON \"REF\".\"COUNTRIES\" TO \"APP\";")
+    );
+    assert!(
+        at("GRANT REFERENCES ON \"REF\".\"COUNTRIES\" TO \"APP\";")
+            < at("@@app/tables/DEPARTMENTS.sql")
+    );
+    assert_eq!(lines[at("@@app/data/EMPLOYEES.sql") + 1], "COMMIT;");
+    assert!(load.ends_with(
+        "ADD CONSTRAINT \"LEGACY_NOTES_EMP_FK\" FOREIGN KEY (\"EMP_ID\")\n\t  REFERENCES \"APP\".\"EMPLOYEES\" ENABLE NOVALIDATE;\n"
+    ));
+    for file in manifest.files.iter().filter(|f| f.path.contains("/data/")) {
+        let text = fs::read_to_string(root(&dir).join(&file.path)).unwrap();
+        assert!(!text.contains("COMMIT;"), "{}", file.path);
+    }
+    let ref_constraints = fs::read_dir(root(&dir).join("app/ref_constraints")).unwrap();
+    for entry in ref_constraints {
+        let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+        assert!(!text.contains("LEGACY_NOTES_EMP_FK"));
+    }
+
+    let single = Options {
+        layout: Layout::Single,
+        ..options
+    };
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        synth::generate(&single, dir.path()),
+        Err(synth::Error::ScriptStatementsNeedSeparateFiles)
+    ));
+}
+
+/// `load.sql` commits after a data file exactly where the file would end with a COMMIT of its own: with the
+/// departments written before their managers, not between them, since the departments' deferred key would roll back.
+#[test]
+fn script_statements_commit_where_the_data_files_would() {
+    let plain = Options {
+        seed: 6,
+        shuffle_order: true,
+        ..small()
+    };
+    let (plain_dir, manifest) = generate(&plain);
+    let script = Options {
+        script_statements: true,
+        ..plain
+    };
+    let (script_dir, _) = generate(&script);
+    let load = fs::read_to_string(root(&script_dir).join(synth::LOAD_SCRIPT)).unwrap();
+    let lines: Vec<&str> = load.lines().collect();
+    let at = |path: &str| {
+        lines
+            .iter()
+            .position(|l| l.strip_prefix("@@") == Some(path))
+            .unwrap()
+    };
+    for file in manifest.files.iter().filter(|f| f.path.contains("/data/")) {
+        let own = fs::read_to_string(root(&plain_dir).join(&file.path)).unwrap();
+        let commits = lines.get(at(&file.path) + 1) == Some(&"COMMIT;");
+        assert_eq!(commits, own.contains("COMMIT;"), "{}", file.path);
+    }
+    let (departments, managers) = (at("app/data/DEPARTMENTS.sql"), at("app/data/EMPLOYEES.sql"));
+    assert!(departments + 1 < managers, "{load}");
+    assert!(!lines[departments..managers].contains(&"COMMIT;"), "{load}");
+}
+
 #[test]
 fn output_into_a_non_empty_folder_is_refused() {
     let dir = tempfile::tempdir().unwrap();

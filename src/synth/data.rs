@@ -1,6 +1,6 @@
 //! The rows of each table, the planted findings, and the order everything is written in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
@@ -27,8 +27,13 @@ enum Section {
     Data,
 }
 
+/// The folder a schema's files are in.
+pub(crate) fn schema_folder(schema: &str) -> String {
+    schema.to_ascii_lowercase()
+}
+
 fn file_path(layout: Layout, schema: &str, section: Section, object: &str) -> String {
-    let dir = schema.to_ascii_lowercase();
+    let dir = schema_folder(schema);
     let kind = match section {
         Section::Table => "tables",
         Section::Sequence => "sequences",
@@ -56,6 +61,8 @@ fn part_path(path: &str, part: u64) -> String {
 pub(crate) struct Written {
     /// In load order.
     pub(crate) files: Vec<OutputFile>,
+    /// With `script_statements`, the data files `load.sql` commits after, in place of their own COMMIT.
+    pub(crate) commit_after: BTreeSet<String>,
     pub(crate) findings: Vec<Finding>,
     pub(crate) cascades: Vec<Cascade>,
     pub(crate) fixes: Fixes,
@@ -305,6 +312,8 @@ struct Writer<'o> {
     uncommitted: &'o [TableId],
     /// By file path.
     open: BTreeMap<String, OpenRows>,
+    /// The data files `load.sql` commits after, with `script_statements`.
+    commit_after: BTreeSet<String>,
     render: &'o dyn Render,
     rules: &'static Rules,
     out: Out,
@@ -347,6 +356,7 @@ impl<'o> Writer<'o> {
             omitted,
             uncommitted,
             open: BTreeMap::new(),
+            commit_after: BTreeSet::new(),
             render,
             rules: options.dialect.rules(),
             out: Out::new(root, options.encoding),
@@ -376,6 +386,7 @@ impl<'o> Writer<'o> {
             eol: self.eol,
             keys_in_table: self.options.constraints == Placement::BeforeData,
             key_between_rows: self.options.cascades,
+            disabled_keys_in_ddl: !self.options.script_statements,
         }
     }
 
@@ -475,9 +486,14 @@ impl<'o> Writer<'o> {
     fn end_part(&mut self, done: bool) -> io::Result<()> {
         self.close_group()?;
         if !self.uncommitted.contains(&self.table) && !self.commit_rolls_back(done) {
-            let commit = self.render.commit(self.eol);
-            self.write_data(&commit.text, commit.statements)?;
-            self.open.remove(&self.data_path);
+            if self.options.script_statements {
+                // Read on its own, the file's rows stay open; `load.sql` commits them after it.
+                self.commit_after.insert(self.data_path.clone());
+            } else {
+                let commit = self.render.commit(self.eol);
+                self.write_data(&commit.text, commit.statements)?;
+                self.open.remove(&self.data_path);
+            }
         }
         let footer = self.render.data_section(self.table, Edge::End, self.eol);
         if !footer.text.is_empty() {
@@ -867,6 +883,7 @@ impl<'o> Writer<'o> {
         let files = self.out.finish()?;
         Ok(Written {
             files,
+            commit_after: self.commit_after,
             findings: self.findings,
             cascades,
             fixes: self.fixes,

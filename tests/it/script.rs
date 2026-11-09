@@ -5,7 +5,7 @@ use std::io;
 use std::path::Path;
 
 use sqlca::check::{self, Options, Report};
-use sqlca::finding::FindingKind;
+use sqlca::finding::{FindingKind, Location};
 use sqlca::fix::{self, FixReport, OnDuplicate, OnFk, Policy, ReportPlace};
 use sqlca::input::{self, InputFile, InputSpec};
 
@@ -377,4 +377,159 @@ fn a_file_given_and_included_is_read_where_it_is_given() {
         places(&report, dir.path()),
         [(FindingKind::ParentTableEmpty, String::new(), None)]
     );
+}
+
+/// `script` in `root` with each `@@path` line replaced by that file's lines, and for each line of the result, the
+/// file and line it came from.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a fixture file that can't be read fails the test"
+)]
+fn flatten(root: &Path, script: &str, text: &mut Vec<u8>, lines: &mut Vec<(String, u64)>) {
+    let bytes = fs::read(root.join(script)).unwrap();
+    for (line, content) in (1..).zip(bytes.split_inclusive(|&b| b == b'\n')) {
+        let command = std::str::from_utf8(content).unwrap().trim();
+        if let Some(name) = command.strip_prefix("@@") {
+            flatten(root, name, text, lines);
+            continue;
+        }
+        text.extend_from_slice(content);
+        if !content.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        lines.push((script.to_owned(), line));
+    }
+}
+
+/// The findings with each place below `root`, or for the flattened file, where its line came from.
+fn placed(
+    report: &Report,
+    place: &dyn Fn(&str, u64) -> (String, u64),
+) -> Vec<sqlca::finding::Finding> {
+    let locate = |l: &Location| {
+        let (file, line) = place(&l.file, l.line);
+        Location { file, line }
+    };
+    let mut findings: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| {
+            let at = f
+                .file
+                .as_deref()
+                .zip(f.line)
+                .map(|(file, line)| place(file, line));
+            sqlca::finding::Finding {
+                file: at.as_ref().map(|(file, _)| file.clone()),
+                line: at.map(|(_, line)| line),
+                first: f.first.as_ref().map(locate),
+                unchecked: f.unchecked.iter().map(locate).collect(),
+                ..f.clone()
+            }
+        })
+        .collect();
+    findings.sort();
+    findings
+}
+
+/// The generator's export whose `load.sql` holds statements of its own: what `--script` finds is what the file it
+/// runs, flattened, finds.
+#[test]
+fn the_generated_script_finds_what_its_flattened_file_finds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/gen/oracle/separate-script-statements");
+    let (mut text, mut lines) = (Vec::new(), Vec::new());
+    flatten(&root, "load.sql", &mut text, &mut lines);
+    let dir = tempfile::tempdir().unwrap();
+    let flat = dir.path().join("flat.sql");
+    fs::write(&flat, &text).unwrap();
+    let flat_files = input::resolve(
+        &InputSpec {
+            paths: vec![check::display(&flat)],
+            ..InputSpec::default()
+        },
+        &mut io::empty(),
+    )
+    .unwrap()
+    .files;
+    let script_files = script(&root, |_| {});
+    let prefix = format!("{}/", check::display(&root));
+    let from_script =
+        |file: &str, line: u64| (file.strip_prefix(&prefix).unwrap_or(file).to_owned(), line);
+    let from_flat = |_: &str, line: u64| {
+        let index = usize::try_from(line - 1).unwrap();
+        lines[index].clone()
+    };
+    for load_order in [false, true] {
+        let options = Options {
+            load_order,
+            ..Options::default()
+        };
+        let by_script = check::run(&script_files, &options).unwrap();
+        let by_flat = check::run(&flat_files, &options).unwrap();
+        assert!(by_script.errors.is_empty(), "{:?}", by_script.errors);
+        assert_eq!(by_script.rows, by_flat.rows);
+        assert_eq!(
+            placed(&by_script, &from_script),
+            placed(&by_flat, &from_flat),
+            "load order: {load_order}"
+        );
+        if load_order {
+            assert!(
+                by_script
+                    .findings
+                    .iter()
+                    .any(|f| f.kind == FindingKind::FkLoadOrder)
+            );
+        }
+    }
+}
+
+/// Through its own `load.sql`, the export has the manifest's row findings and no missing COMMIT, and keep-first
+/// removes the rows the manifest lists: what `make oracle-check` loads and fixes it by.
+#[test]
+fn the_generated_script_has_the_manifests_rows() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/gen/oracle/separate-script-statements");
+    let manifest = crate::fixtures::manifest(&root);
+    let files = script(&root, |_| {});
+    let prefix = format!("{}/", check::display(&root));
+    let relative =
+        |file: &str, line: u64| (file.strip_prefix(&prefix).unwrap_or(file).to_owned(), line);
+    for load_order in [false, true] {
+        let options = Options {
+            load_order,
+            ..Options::default()
+        };
+        let report = check::run(&files, &options).unwrap();
+        let mut expected: Vec<_> = manifest
+            .findings
+            .iter()
+            .filter(|f| f.kind != FindingKind::Uncommitted)
+            .filter(|f| load_order || f.kind != FindingKind::FkLoadOrder)
+            .cloned()
+            .collect();
+        expected.sort();
+        assert_eq!(
+            placed(&report, &relative),
+            expected,
+            "load order: {load_order}"
+        );
+    }
+    let out = tempfile::tempdir().unwrap();
+    let fixed = fix_into(&files, &out.path().join("out"), Policy::default());
+    let mut removed: Vec<Location> = fixed
+        .removed
+        .iter()
+        .filter(|r| r.nulled.is_empty())
+        .map(|r| {
+            let (file, line) = relative(&r.file, r.line);
+            Location { file, line }
+        })
+        .collect();
+    removed.sort();
+    let mut expected = manifest.fixes.removed.clone();
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(fixed.committed.is_empty());
 }

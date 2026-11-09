@@ -12,8 +12,8 @@ use super::RULES;
 use crate::check;
 use crate::finding::{Finding, FindingKind, Location};
 use crate::fix::{self, FixReport, OnDuplicate, OnFk, Policy, Removal, ReportPlace, Target};
-use crate::input::{InputFile, OrderSource, Role};
-use crate::synth::schema::{APP_TABLES, Kind, REF_TABLES, constraints_of};
+use crate::input::{self, InputFile, InputSpec, OrderSource, Role, RunPlan};
+use crate::synth::schema::{self, APP_TABLES, Kind, REF_TABLES, constraints_of};
 use crate::synth::{
     self, Cascade, Encoding, Fixes, Layout, LineEnding, Manifest, Noise, Nulled, Options, Placement,
 };
@@ -77,8 +77,9 @@ impl Schemas {
         script.join("\n")
     }
 
-    /// Loads `files` in order, continuing past errors, into the spool `run` names, then counts the tables' rows.
-    fn driver(&self, files: &[&str], run: &str) -> String {
+    /// Loads `files` in order, or the export's own `load.sql` when `script`, continuing past errors, into the spool
+    /// `run` names, then counts the tables' rows.
+    fn driver(&self, files: &[&str], script: bool, run: &str) -> String {
         let mut schema = None;
         let mut include = |f: &&str| {
             let user = f.split('/').next().map(str::to_uppercase);
@@ -103,11 +104,16 @@ impl Schemas {
         .map(String::from)
         .into();
         driver.push(format!("SPOOL /tmp/sqlca-{run}.log"));
-        let (references, data): (Vec<&str>, Vec<&str>) =
-            files.iter().partition(|f| f.starts_with("ref/"));
-        driver.extend(references.iter().flat_map(&mut include));
-        driver.extend(self.grants.iter().cloned());
-        driver.extend(data.iter().flat_map(&mut include));
+        if script {
+            // The script grants what it needs itself.
+            driver.push(format!("@@{}", synth::LOAD_SCRIPT));
+        } else {
+            let (references, data): (Vec<&str>, Vec<&str>) =
+                files.iter().partition(|f| f.starts_with("ref/"));
+            driver.extend(references.iter().flat_map(&mut include));
+            driver.extend(self.grants.iter().cloned());
+            driver.extend(data.iter().flat_map(&mut include));
+        }
         driver.extend(["COMMIT;", "SET HEADING OFF", "SET FEEDBACK OFF"].map(String::from));
         driver.push(format!("SPOOL /tmp/sqlca-{run}-rows.log"));
         let tables: Vec<String> = self
@@ -175,15 +181,18 @@ impl Oracle {
         out.stdout
     }
 
-    /// Loads `export` in its load order as SYSTEM, continuing past errors, and returns the SQL*Plus spool.
-    fn load(&self, export: &Path, schemas: &Schemas, encoding: Encoding, run: &str) -> String {
+    /// Loads `export` in its load order as SYSTEM, continuing past errors, and returns the SQL*Plus spool. An export
+    /// whose `load.sql` holds statements of its own loads through it.
+    fn load(&self, export: &Path, schemas: &Schemas, options: &Options, run: &str) -> String {
+        let encoding = options.encoding;
         let order = fs::read_to_string(export.join(synth::ORDER_FILE)).unwrap();
         let files: Vec<&str> = order
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .collect();
-        fs::write(export.join("driver.sql"), schemas.driver(&files, run)).unwrap();
+        let driver = schemas.driver(&files, options.script_statements, run);
+        fs::write(export.join("driver.sql"), driver).unwrap();
         fs::write(export.join("users.sql"), schemas.users_script()).unwrap();
 
         let dir = format!("/tmp/sqlca-{run}");
@@ -411,15 +420,10 @@ fn samples() -> Export {
 /// SQL*Plus prints a line other than the first), only the kinds and counts are compared.
 fn check_load_order(oracle: &Oracle, export: &Export, run: &str, exact: bool) {
     let manifest = &export.manifest;
-    let spool = oracle.load(
-        &export.path,
-        &export.schemas,
-        manifest.options.encoding,
-        run,
-    );
+    let spool = oracle.load(&export.path, &export.schemas, &manifest.options, run);
     let observed = observed_load_order(&spool, &line_index(&export.path, manifest), run, exact);
-    let files = load_order(manifest);
-    let expected = expected_load_order(&manifest.findings, &manifest.cascades, &files, exact);
+    let order = LoadOrder::of(&export.path, manifest);
+    let expected = expected_load_order(&manifest.findings, &manifest.cascades, &order, exact);
     assert_rejections(
         &observed,
         &expected,
@@ -491,8 +495,51 @@ fn observed_load_order(
     }))
 }
 
-fn load_order(manifest: &Manifest) -> Vec<String> {
-    manifest.files.iter().map(|f| f.path.clone()).collect()
+/// The order rows load in: by file in load order, then line; or for an export that loads through its own `load.sql`,
+/// the order that script runs them in.
+struct LoadOrder {
+    /// Relative to the export, by position in the run.
+    files: Vec<String>,
+    plan: Option<RunPlan>,
+}
+
+impl LoadOrder {
+    fn of(export: &Path, manifest: &Manifest) -> Self {
+        if !manifest.options.script_statements {
+            return Self {
+                files: manifest.files.iter().map(|f| f.path.clone()).collect(),
+                plan: None,
+            };
+        }
+        let inputs = script_inputs(export, manifest.options.encoding);
+        Self {
+            files: inputs.iter().map(|f| relative(export, &f.path)).collect(),
+            plan: Some(RunPlan::new(&inputs)),
+        }
+    }
+
+    fn key(&self, row: &Location) -> (usize, u64) {
+        let file = self.files.iter().position(|f| *f == row.file);
+        match (&self.plan, file) {
+            (Some(plan), Some(file)) => plan.row_order(file, row.line),
+            (None, Some(file)) => (file, row.line),
+            (_, None) => (usize::MAX, row.line),
+        }
+    }
+}
+
+/// What `--script load.sql` reads of the export.
+fn script_inputs(export: &Path, encoding: Encoding) -> Vec<InputFile> {
+    let spec = InputSpec {
+        script: Some(export.join(synth::LOAD_SCRIPT)),
+        encoding,
+        ..InputSpec::default()
+    };
+    input::resolve(&spec, &mut std::io::empty()).unwrap().files
+}
+
+fn relative(export: &Path, path: &Path) -> String {
+    check::display(path.strip_prefix(export).unwrap())
 }
 
 fn location(finding: &Finding) -> Option<Location> {
@@ -533,7 +580,7 @@ fn holders(findings: &[Finding]) -> BTreeMap<(String, Vec<Option<String>>), BTre
 fn accepted_duplicates(
     findings: &[Finding],
     cascades: &[Cascade],
-    files: &[String],
+    order: &LoadOrder,
 ) -> BTreeSet<(String, Location)> {
     let rejected: BTreeSet<Location> = findings
         .iter()
@@ -544,12 +591,11 @@ fn accepted_duplicates(
             line: c.line,
         }))
         .collect();
-    let load_order = |row: &Location| (files.iter().position(|f| *f == row.file), row.line);
     holders(findings)
         .into_iter()
         .filter_map(|((constraint, _), rows)| {
             let mut rows: Vec<Location> = rows.into_iter().collect();
-            rows.sort_by_key(load_order);
+            rows.sort_by_key(|row| order.key(row));
             let holder = rows.into_iter().find(|row| !rejected.contains(row))?;
             Some((constraint, holder))
         })
@@ -561,10 +607,10 @@ fn accepted_duplicates(
 fn expected_load_order(
     findings: &[Finding],
     cascades: &[Cascade],
-    files: &[String],
+    order: &LoadOrder,
     exact: bool,
 ) -> BTreeMap<Signature, usize> {
-    let accepted = accepted_duplicates(findings, cascades, files);
+    let accepted = accepted_duplicates(findings, cascades, order);
     let mut rows: Vec<Signature> = findings
         .iter()
         .filter(|f| {
@@ -732,12 +778,7 @@ fn expected_after_data(findings: &[Finding], cascades: &[Cascade]) -> AfterData 
 /// foreign key either validates or fails. A foreign key whose parent key failed can't be added at all.
 fn check_after_data(oracle: &Oracle, export: &Export, run: &str) {
     let manifest = &export.manifest;
-    let spool = oracle.load(
-        &export.path,
-        &export.schemas,
-        manifest.options.encoding,
-        run,
-    );
+    let spool = oracle.load(&export.path, &export.schemas, &manifest.options, run);
     let observed = observed_after_data(&spool, &line_index(&export.path, manifest), run);
     assert_eq!(
         observed,
@@ -779,23 +820,29 @@ fn fix_export(
     check: &check::Options,
     policy: Policy,
     annotate: bool,
+    script: bool,
 ) -> (FixReport, Vec<Finding>) {
-    let order = fs::read_to_string(export.join(synth::ORDER_FILE)).unwrap();
-    let relative: Vec<&str> = order.lines().filter(|l| !l.trim().is_empty()).collect();
-    let files: Vec<InputFile> = relative
-        .iter()
-        .map(|path| InputFile {
-            path: export.join(path),
-            role: if path.starts_with("ref/") {
-                Role::Reference
-            } else {
-                Role::Data
-            },
-            bytes: fs::metadata(export.join(path)).unwrap().len(),
-            order: OrderSource::Given,
-            includes: Vec::new(),
-        })
-        .collect();
+    let files: Vec<InputFile> = if script {
+        script_inputs(export, check.encoding)
+    } else {
+        let order = fs::read_to_string(export.join(synth::ORDER_FILE)).unwrap();
+        order
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|path| InputFile {
+                path: export.join(path),
+                role: if path.starts_with("ref/") {
+                    Role::Reference
+                } else {
+                    Role::Data
+                },
+                bytes: fs::metadata(export.join(path)).unwrap().len(),
+                order: OrderSource::Given,
+                includes: Vec::new(),
+            })
+            .collect()
+    };
+    let relative: Vec<String> = files.iter().map(|f| relative(export, &f.path)).collect();
     let target = Target {
         report: ReportPlace::Off,
         annotate,
@@ -813,7 +860,7 @@ fn fix_export(
         .zip(&relative)
         .map(|(output, path)| {
             assert_eq!(output.path, fixed.join(path), "outputs keep their paths");
-            (check::display(&output.path), *path)
+            (check::display(&output.path), path.as_str())
         })
         .collect();
     let left = report
@@ -997,12 +1044,21 @@ fn check_fixed(
         load_order: !after_data,
         ..check::Options::default()
     };
-    let inputs: Vec<(String, Vec<u8>)> = manifest
-        .files
-        .iter()
-        .map(|f| (f.path.clone(), fs::read(export.path.join(&f.path)).unwrap()))
+    // Through its own `load.sql`, the script is an input too, listed first.
+    let script = options.script_statements.then_some(synth::LOAD_SCRIPT);
+    let inputs: Vec<(String, Vec<u8>)> = script
+        .into_iter()
+        .chain(manifest.files.iter().map(|f| f.path.as_str()))
+        .map(|path| (path.to_owned(), fs::read(export.path.join(path)).unwrap()))
         .collect();
-    let (report, left) = fix_export(&export.path, &fixed, &check, policy, annotate);
+    let (report, left) = fix_export(
+        &export.path,
+        &fixed,
+        &check,
+        policy,
+        annotate,
+        options.script_statements,
+    );
     assert!(!report.removed.is_empty(), "{run}: the fix removed nothing");
     assert!(
         policy.on_fk != OnFk::Null || report.removed.iter().any(|r| !r.nulled.is_empty()),
@@ -1012,7 +1068,7 @@ fn check_fixed(
         assert_fixes(&report, &inputs, &manifest.fixes, policy.on_fk, run);
     }
     assert_restores(&inputs, &fixed, &report, annotate, run);
-    let spool = oracle.load(&fixed, &export.schemas, options.encoding, run);
+    let spool = oracle.load(&fixed, &export.schemas, options, run);
     let index = line_index(&fixed, manifest);
     let rejected = if after_data {
         let observed = observed_after_data(&spool, &index, run);
@@ -1034,7 +1090,7 @@ fn check_fixed(
         observed.rows.values().sum::<usize>()
     } else {
         let observed = observed_load_order(&spool, &index, run, exact);
-        let files = load_order(manifest);
+        let files = LoadOrder::of(&export.path, manifest);
         let before_parents: Vec<Finding> = left
             .iter()
             .filter(|f| f.kind == FindingKind::FkLoadOrder)
@@ -1072,10 +1128,46 @@ fn every_quirk_but_wrapping() -> Noise {
     }
 }
 
+/// Oracle rejects a row at its insert when its parent comes later. When that row is the parent a deferred foreign key
+/// needs, the key fails at COMMIT and the whole load rolls back, which no manifest describes: a shuffled order must
+/// write a deferred key's parent after the tables its own keys point at. A self-reference is only ever a planted row,
+/// which no other row points at.
 #[test]
-#[ignore = "needs Oracle Free in Docker: run `make oracle-check`"]
-fn oracle_agrees_with_the_manifest_and_the_fix() {
-    let oracle = Oracle::from_env();
+fn no_export_rejects_what_a_deferred_key_needs() {
+    let needed: BTreeSet<String> = schema::CONSTRAINTS
+        .iter()
+        .filter_map(|c| match c.kind {
+            Kind::Foreign {
+                parent,
+                deferred: true,
+                ..
+            } => Some(parent),
+            _ => None,
+        })
+        .flat_map(constraints_of)
+        .filter(|c| matches!(c.kind, Kind::Foreign { parent, .. } if parent != c.table))
+        .map(|c| c.qualified(&RULES))
+        .collect();
+    for (options, run, _) in exports() {
+        let manifest = generate(&options).manifest;
+        let rejected: Vec<&Finding> = manifest
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::FkLoadOrder)
+            .filter(|f| f.constraint.as_ref().is_some_and(|c| needed.contains(c)))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "{run}: {} rows like {:?}",
+            rejected.len(),
+            rejected.first()
+        );
+    }
+}
+
+/// The generated exports the check loads and fixes, each with its run's name and whether lines are compared; with
+/// `exact` off, only kinds and counts are.
+fn exports() -> [(Options, &'static str, bool); 6] {
     // A deferred violation would roll back the whole load at COMMIT, with no row to match.
     let base = Options {
         rows: 200,
@@ -1121,14 +1213,30 @@ fn oracle_agrees_with_the_manifest_and_the_fix() {
         manager_chain: 3,
         ..base.clone()
     };
-    // With `exact` off, only kinds and counts are compared.
-    let exports = [
+    // Loaded and fixed through its own `load.sql`: the commits are there, and a foreign key added after the data
+    // without checking it, which no row may be fixed for. The shuffled order of `shuffled`, so no COMMIT may come
+    // between the departments and their managers.
+    let script = Options {
+        seed: 6,
+        shuffle_order: true,
+        script_statements: true,
+        ..base.clone()
+    };
+    [
         (base, "sqldev", true),
         (quirks, "quirks", true),
         (wrapped, "wrapped", false),
         (after, "after-data", true),
         (shuffled, "shuffled", true),
-    ];
+        (script, "script", true),
+    ]
+}
+
+#[test]
+#[ignore = "needs Oracle Free in Docker: run `make oracle-check`"]
+fn oracle_agrees_with_the_manifest_and_the_fix() {
+    let oracle = Oracle::from_env();
+    let exports = exports();
     for (options, run, exact) in &exports {
         match options.constraints {
             Placement::BeforeData => check_load_order(&oracle, &generate(options), run, *exact),
@@ -1232,7 +1340,10 @@ fn a_duplicate_of_a_row_rejected_at_insert_holds_its_key() {
     let null = found(FindingKind::NotNull, None, 1, None);
     let second = found(FindingKind::DuplicateKey, Some("APP.T_UK"), 2, Some(1));
     let third = found(FindingKind::DuplicateKey, Some("APP.T_UK"), 3, Some(1));
-    let files = ["f.sql".to_owned()];
+    let files = LoadOrder {
+        files: vec!["f.sql".to_owned()],
+        plan: None,
+    };
     let signature = |line, what: &'static str, detail: &str| Signature {
         location: Some(("f.sql".to_owned(), line)),
         what,
