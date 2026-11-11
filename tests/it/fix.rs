@@ -1140,6 +1140,30 @@ fn rows_that_may_not_exist_hold_back_only_their_tables_duplicates() {
     assert!(report.left.is_empty(), "{:?}", report.left);
 }
 
+/// The database rejects the whole `INSERT ALL` for its unknown column, so the plain row is the only `C (7)`: the fix
+/// keeps it, under keep-first and keep-last alike, and leaves the statement with the error as it is.
+#[test]
+fn a_row_with_the_key_of_an_insert_all_the_database_rejects_is_kept() {
+    let ddl = "CREATE TABLE C (ID NUMBER PRIMARY KEY);\nCREATE TABLE Q (ID NUMBER PRIMARY KEY);\n";
+    let all =
+        "INSERT ALL\n INTO C VALUES (7)\n INTO Q (ID, NOPE) VALUES (2, 0)\n SELECT 1 FROM DUAL;\n";
+    let row = "INSERT INTO C VALUES (7);\n";
+    for (policy, rows) in [
+        (Policy::default(), format!("{all}{row}")),
+        (keep_last(), format!("{row}{all}")),
+    ] {
+        let (_dir, _, report) = fix_scripts(
+            &[("t.sql", &format!("{ddl}{rows}"))],
+            &Options::default(),
+            policy,
+            false,
+        );
+        assert!(report.removed.is_empty(), "{:?}", report.removed);
+        let kinds: Vec<FindingKind> = report.output.findings.iter().map(|f| f.kind).collect();
+        assert_eq!(kinds, [FindingKind::UnknownColumn]);
+    }
+}
+
 #[test]
 fn a_duplicate_of_a_removed_row_is_kept() {
     let (_dir, _, report) = fix_sql(

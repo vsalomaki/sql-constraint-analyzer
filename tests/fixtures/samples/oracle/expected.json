@@ -50,6 +50,22 @@
       "line": 5
     },
     {
+      "kind": "unknown_column",
+      "table": "HR.COUNTRIES",
+      "columns": ["CAPITAL"],
+      "file": "hr/hr_plants.sql",
+      "line": 6
+    },
+    {
+      "kind": "fk_missing_parent",
+      "constraint": "HR.COUNTR_REG_FK",
+      "table": "HR.COUNTRIES",
+      "columns": ["REGION_ID"],
+      "file": "hr/hr_plants.sql",
+      "line": 7,
+      "key": ["70"]
+    },
+    {
       "kind": "duplicate_key",
       "constraint": "CO.ORDER_ITEMS_PK",
       "table": "CO.ORDER_ITEMS",
@@ -106,6 +122,7 @@
       { "file": "hr/hr_plants.sql", "line": 3 },
       { "file": "hr/hr_plants.sql", "line": 4 },
       { "file": "hr/hr_plants.sql", "line": 5 },
+      { "file": "hr/hr_plants.sql", "line": 7 },
       { "file": "co/co_plants.sql", "line": 3 },
       { "file": "co/co_plants.sql", "line": 4 },
       { "file": "co/co_plants.sql", "line": 5 },
@@ -125,7 +142,8 @@
       { "file": "co/co_plants.sql", "line": 8 }
     ],
     "nulled_on_fk_null": [
-      { "file": "hr/hr_plants.sql", "line": 4, "columns": ["DEPARTMENT_ID"] }
+      { "file": "hr/hr_plants.sql", "line": 4, "columns": ["DEPARTMENT_ID"] },
+      { "file": "hr/hr_plants.sql", "line": 7, "columns": ["REGION_ID"] }
     ]
   }
 }

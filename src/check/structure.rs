@@ -1,5 +1,6 @@
 //! Structure comes first: the row's table and columns must exist and its values must fit them, or the row gets that
-//! one finding and no other check sees it.
+//! one finding. When the database surely rejects it, it rejects the whole statement, so no other check sees any of
+//! its rows.
 
 use crate::catalog::{Catalog, Lookup, TableId};
 use crate::finding::{Finding, FindingKind};
@@ -110,6 +111,12 @@ pub(super) fn table_name(catalog: &Catalog, row: &InsertRow, file: usize) -> Str
 }
 
 impl StructureError {
+    /// Whether the database rejects the row, and with it its statement: when the error is against a table the inputs
+    /// define. A table no input defines, or one in several schemas, may be in the database.
+    pub fn rejects(&self) -> bool {
+        matches!(self, Self::UnknownColumns(_) | Self::ValueCount { .. })
+    }
+
     /// The finding for `row` in `file`, the file at `index` in the run.
     pub fn finding(&self, catalog: &Catalog, row: &InsertRow, file: &str, index: usize) -> Finding {
         let (kind, columns) = match self {

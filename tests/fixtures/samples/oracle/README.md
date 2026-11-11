@@ -25,4 +25,6 @@ populate script. `order.txt` loads both schemas with their plants, and `expected
 generator's manifest format, lists what they break and what `sqlca fix` removes: a duplicate primary and unique
 key and a NULL in a NOT NULL column in each schema, a missing department in HR (a nullable foreign key, which
 `--on-fk null` sets to NULL), and in CO an order with a missing customer and two order lines on it, which go with
-it. A duplicate's first row is a line of a populate script, so a new sample commit can move it.
+it. In HR, an `INSERT ALL` writes two regions and a country with a column COUNTRIES doesn't have: Oracle rejects the
+whole statement, so the country after it has no region, and the region after that is no duplicate. A duplicate's
+first row is a line of a populate script, so a new sample commit can move it.

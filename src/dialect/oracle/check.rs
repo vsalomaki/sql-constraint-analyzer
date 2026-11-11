@@ -10,9 +10,11 @@ use std::process::Command;
 
 use super::RULES;
 use crate::check;
+use crate::dialect::{DialectId, Pass, Runner};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::fix::{self, FixReport, OnDuplicate, OnFk, Policy, Removal, ReportPlace, Target};
 use crate::input::{self, InputFile, InputSpec, OrderSource, Role, RunPlan};
+use crate::statement::Statement;
 use crate::synth::schema::{self, APP_TABLES, Kind, REF_TABLES, constraints_of};
 use crate::synth::{
     self, Cascade, Encoding, Fixes, Layout, LineEnding, Manifest, Noise, Nulled, Options, Placement,
@@ -351,6 +353,24 @@ fn row_signature(error: &Error) -> Option<(&'static str, String)> {
         "ORA-00947" | "ORA-00913" => ("value count", String::new()),
         _ => return None,
     })
+}
+
+/// The rows an error about a row rejects: every row of its statement, which is the line SQL*Plus printed when the
+/// statement is on one line. A statement over several lines holds one row in every export that plants one.
+fn rows_rejected(error: &Error) -> usize {
+    let text = format!(
+        "{};\n",
+        error.echo.as_deref().unwrap_or_default().trim_end()
+    );
+    let piece = DialectId::Oracle
+        .pieces(text.as_bytes(), Runner::SqlPlus, 0, 1)
+        .next()
+        .unwrap()
+        .unwrap();
+    match DialectId::Oracle.parse(&piece, Encoding::Utf8, Pass::Rows) {
+        Ok(Some(Statement::Insert(rows))) => rows.len(),
+        _ => 1,
+    }
 }
 
 /// What Oracle reports for a finding's row; nothing for a missing commit, since the load commits at its end.
@@ -1070,7 +1090,7 @@ fn check_fixed(
     assert_restores(&inputs, &fixed, &report, annotate, run);
     let spool = oracle.load(&fixed, &export.schemas, options, run);
     let index = line_index(&fixed, manifest);
-    let rejected = if after_data {
+    if after_data {
         let observed = observed_after_data(&spool, &index, run);
         let failed = [&observed.keys, &observed.fks, &observed.blocked];
         assert!(
@@ -1087,7 +1107,6 @@ fn check_fixed(
             expected_after_data(&left, &[]),
             "{run}: Oracle (left) differs from the fix's check of its output (right)"
         );
-        observed.rows.values().sum::<usize>()
     } else {
         let observed = observed_load_order(&spool, &index, run, exact);
         let files = LoadOrder::of(&export.path, manifest);
@@ -1111,8 +1130,13 @@ fn check_fixed(
                 "{run}: Oracle's rejections (left) differ from the fix's check of its output (right)"
             ),
         );
-        observed.values().sum::<usize>()
-    };
+    }
+    let errors = errors(&spool);
+    let rejected: usize = errors
+        .iter()
+        .filter(|e| row_signature(e).is_some())
+        .map(rows_rejected)
+        .sum();
     assert_eq!(
         oracle.rows(run),
         report.output.rows - u64::try_from(rejected).unwrap(),
