@@ -254,7 +254,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// A structure finding, or nothing for a reference row.
     /// A row of `table` that `fix` removed.
     pub(super) fn removed(&mut self, table: TableId) {
         self.removed.insert(table);
@@ -289,6 +288,7 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A structure finding, or nothing for a reference row.
     pub(super) fn structure(&mut self, finding: Finding, reference: bool) {
         if !reference {
             self.findings.push(finding);

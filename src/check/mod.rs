@@ -18,7 +18,7 @@ use crate::dialect::{DialectId, ParseMemo, Pass, Runner};
 use crate::finding::{Finding, FindingKind};
 use crate::input::{self, InputError, InputFile, Role, RunPlan, Segment, Unit};
 use crate::source::{Encoding, Piece, RunAt, Span};
-use crate::statement::{Expr, Skip, Statement};
+use crate::statement::{Expr, InsertRow, Skip, Statement};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -211,6 +211,17 @@ pub fn is_removed(cuts: &[Span], span: Span) -> bool {
         .is_some_and(|c| span.end <= c.end)
 }
 
+/// Reads the values at the sorted `spans` as NULL.
+fn read_as_null(rows: &mut [InsertRow<'_>], spans: &[Span]) {
+    if spans.is_empty() {
+        return;
+    }
+    let values = rows.iter_mut().flat_map(|r| &mut r.values);
+    for value in values.filter(|v| spans.binary_search(&v.span).is_ok()) {
+        value.expr = Expr::Null;
+    }
+}
+
 /// By file position, the schema named after the file's folder as `mode` picks it, below the folder all files share.
 fn homes(
     files: &[InputFile],
@@ -394,14 +405,10 @@ pub fn run_without(
                     let reference = files.get(index).is_some_and(|f| f.role == Role::Reference);
                     let cuts = removed.get(index).map_or(&[][..], Vec::as_slice);
                     let nulls = nulled.get(index).map_or(&[][..], Vec::as_slice);
-                    if !nulls.is_empty() {
-                        let values = inserted.iter_mut().flat_map(|r| &mut r.values);
-                        for value in values.filter(|v| nulls.binary_search(&v.span).is_ok()) {
-                            value.expr = Expr::Null;
-                        }
-                    }
+                    read_as_null(&mut inserted, nulls);
                     let file = names.get(index).map_or("", String::as_str);
                     let mut matched = Vec::with_capacity(inserted.len());
+                    let mut rejected = false;
                     for row in &inserted {
                         if is_removed(cuts, row.span) {
                             if let Lookup::Found(table) = catalog.resolve(&row.table, index) {
@@ -422,12 +429,16 @@ pub fn run_without(
                         match resolve_row(catalog, row, index) {
                             Ok(resolved) => matched.push((resolved, row, at)),
                             Err(error) => {
+                                rejected |= error.rejects();
                                 let finding = error.finding(catalog, row, file, index);
                                 checker.structure(finding, reference);
                             }
                         }
                     }
-                    checker.statement(&matched, options.encoding, reference);
+                    // The database rejects the whole statement, so none of its rows exists.
+                    if !rejected {
+                        checker.statement(&matched, options.encoding, reference);
+                    }
                 }
                 Statement::Skipped(Skip::NotFollowed(what)) => {
                     not_followed.push(problem(&names, origin.file, Some(origin.line), what));
@@ -468,13 +479,7 @@ struct Open {
 }
 
 impl Open {
-    fn add(
-        &mut self,
-        catalog: &Catalog,
-        row: &crate::statement::InsertRow,
-        index: usize,
-        file: &str,
-    ) {
+    fn add(&mut self, catalog: &Catalog, row: &InsertRow, index: usize, file: &str) {
         self.rows += 1;
         if self.first.is_none() {
             let table = structure::table_name(catalog, row, index);

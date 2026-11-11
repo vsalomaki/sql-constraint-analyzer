@@ -114,7 +114,10 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   are more). Keep-last removes them a round at a time, as each comes first, and a key whose last row is one of them
   waits for it; a key with more than the check kept is left for review.
 - **Never acted on:**
-  - structure errors, unverifiable keys and disabled constraints;
+  - structure errors, unverifiable keys and disabled constraints. The database rejects a statement whole for a
+    structure error against a table the inputs define, so no row of it holds a key: in an `INSERT ALL`, a later row
+    with another clause's key is no duplicate. A table no input defines, or one in several schemas, is no such
+    error: the database may hold it;
   - load-order findings, since the row is valid in the end state; `fix` never reorders statements;
   - a key resting on an assumed value, and a row on a line holding several rows, both left for review;
   - a duplicate in a table that may hold a row the database rejects for a foreign key the check couldn't decide (a
@@ -203,8 +206,9 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   strips the wrapper and changes nothing else but product 4's JSON, which it shortens to what plain SQL accepts
   (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO leaves INVENTORY's
   key to its identity column, so that key can't be checked. `hr_plants.sql` and `co_plants.sql` plant rows after
-  them that break each kind `fix` acts on, CO's with a cascade; `order.txt` and the hand-written `expected.json`
-  make the folder an export like the generator's, which the manifest tests and `make oracle-check` run on.
+  them that break each kind `fix` acts on, CO's with a cascade, and HR's an `INSERT ALL` one clause's unknown column
+  rejects whole; `order.txt` and the hand-written `expected.json` make the folder an export like the generator's,
+  which the manifest tests and `make oracle-check` run on.
   `sqlcl/` (`make sample-sqlcl-fixtures`) is both schemas loaded into Oracle Free and exported again by SQLcl in
   SQL Developer's separate-files layout, one folder per schema with `order.txt` and `counts.csv`; the object list
   comes from Oracle's dictionary. Like `tests/fixtures/sqlcl/`, each data file has the finding for rows with no

@@ -553,6 +553,56 @@ fn a_statement_the_runner_never_runs_holds_no_key() {
     assert_eq!((errors, unverifiable), (vec![5], vec![]));
 }
 
+/// The database rejects a whole `INSERT ALL` when one clause names a column its table doesn't have, or gives the
+/// wrong number of values: none of its rows holds a key, so a child of one is missing its parent and a later row
+/// with the same key is no duplicate.
+#[test]
+fn a_structure_error_in_one_clause_rejects_the_whole_insert_all() {
+    use FindingKind::{DuplicateKey, FkMissingParent, UnknownColumn, ValueCountMismatch};
+    for (clause, expected) in [
+        ("", vec![(DuplicateKey, 5, false)]),
+        (
+            " INTO EMP (EMPNO, NOPE) VALUES (2, 0)",
+            vec![(UnknownColumn, 3, false), (FkMissingParent, 4, false)],
+        ),
+        (
+            " INTO EMP VALUES (2)",
+            vec![(ValueCountMismatch, 3, false), (FkMissingParent, 4, false)],
+        ),
+    ] {
+        let (_, findings) = check_sql(
+            &format!(
+                "{DEPT_AND_EMP}INSERT ALL INTO DEPT VALUES (10){clause} INTO DEPT VALUES (20) SELECT 1 FROM DUAL;\n\
+                 INSERT INTO EMP VALUES (1, 10);\nINSERT INTO DEPT VALUES (20);\n"
+            ),
+            false,
+        );
+        assert_eq!(findings, expected, "{clause}");
+    }
+}
+
+/// A table no input defines, or one in several schemas, may be in the database, which then runs the statement: the
+/// other rows of its `INSERT ALL` stay checked, and the child of one finds its parent.
+#[test]
+fn a_table_the_inputs_cant_resolve_leaves_its_insert_all_checked() {
+    for (table, kind) in [
+        ("T", FindingKind::AmbiguousTable),
+        ("NOPE", FindingKind::UnknownTable),
+    ] {
+        let (_, findings) = check_sql(
+            &format!(
+                "CREATE TABLE A.T (ID NUMBER PRIMARY KEY);\nCREATE TABLE B.T (ID NUMBER PRIMARY KEY);\n\
+                 CREATE TABLE A.P (ID NUMBER PRIMARY KEY);\n\
+                 CREATE TABLE A.C (ID NUMBER PRIMARY KEY, PID NUMBER NOT NULL REFERENCES A.P);\n\
+                 INSERT ALL INTO A.P VALUES (7) INTO {table} VALUES (1) SELECT 1 FROM DUAL;\n\
+                 INSERT INTO A.C VALUES (1, 7);\n"
+            ),
+            false,
+        );
+        assert_eq!(findings, [(kind, 5, false)], "{table}");
+    }
+}
+
 #[test]
 fn a_parent_key_the_checker_cant_know_makes_a_missing_parent_unverifiable() {
     let (report, findings) = check_sql(
