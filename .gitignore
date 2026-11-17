@@ -5,7 +5,7 @@
 /gen-out/
 
 # Tooling state.
-/.worktrees/
 /.claude/worktrees/
 /.claude/settings.local.json
+*.local.md
 junit.xml

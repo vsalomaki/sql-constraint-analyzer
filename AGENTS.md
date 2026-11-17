@@ -281,23 +281,13 @@ A dispatch of `release.yml` (`gh workflow run release.yml --ref <branch>`) is a 
 - **Merging:** rebase only (`gh pr merge <n> --rebase`); squash and merge commits are off, and GitHub deletes the
   branch. Rebase-merge replays every commit, so squash locally first unless each commit is meant to land.
 - **PR body:** `## Summary` (what and why) and `## Test plan` (what was run, what a reviewer can rerun).
-- **After a merge:** remove the PR's worktree and delete its local branch with `git branch -D` (rebase-merge rewrites
-  the commits, so `-d` refuses).
+- **After a merge:** delete the local branch with `git branch -D` (rebase-merge rewrites the commits, so `-d`
+  refuses).
 
 ## External review
 
-Non-trivial PRs get a Codex review before merging:
+Non-trivial PRs get an external model review before merging.
 
-```sh
-CX=$(ls -d ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | sort -V | tail -1)
-node "$CX" adversarial-review --background --base main --scope branch "<focus text>"
-node "$CX" status --all      # match the job id you launched
-node "$CX" result <job-id>
-```
-
-- Run the launch command in the background; it can block past a tool timeout. A job takes a few minutes. One that
-  answers within seconds with a generic reply did no work: relaunch it.
-- A finding is a claim: verify it against the code, and reject it with reasoning when it doesn't hold. Weigh the
-  complexity a fix adds (see "Engineering principles"); prove a fix by reverting it and watching a test fail.
+- Weigh each finding as engineering principle 7 says, and reject one with reasoning when it doesn't hold.
 - When several reviewers run, wait for all of them, then make one round of changes. Say in the PR what the review
   found and what changed.
