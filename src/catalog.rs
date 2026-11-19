@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use crate::dialect::Rules;
 use crate::source::RunAt;
 use crate::statement::{
-    AlterAction, ColumnDef, ConstraintDef, ConstraintKind, ConstraintState, DataType, Expr, Ident,
-    IndexColumn, Name, Statement,
+    AlterAction, ColumnDef, ConstraintDef, ConstraintKind, ConstraintState, DataType, Expr,
+    Generated, Ident, IndexColumn, Name, Statement,
 };
 
 /// Where a statement is in the input: the file's position in the run, where it runs, and its line in that file.
@@ -44,8 +44,32 @@ pub struct Column {
     pub data_type: DataType,
     pub default: Option<Expr<'static>>,
     pub default_on_null: bool,
-    pub identity: bool,
+    pub generated: Option<Generated>,
+    /// Where an `ALTER TABLE … MODIFY` made an identity column `ALWAYS` (`true`), or `BY DEFAULT` or dropped its
+    /// identity (`false`).
+    pub identity_switches: Vec<(RunAt, bool)>,
     pub invisible: bool,
+}
+
+impl Column {
+    /// Whether the database computes the column from the row's other columns.
+    pub fn is_virtual(&self) -> bool {
+        self.generated == Some(Generated::Virtual)
+    }
+
+    /// Whether the database rejects a row that runs `at` and gives the column a value other than `DEFAULT`.
+    pub fn refuses_values(&self, at: RunAt) -> bool {
+        match self.generated {
+            Some(Generated::Virtual) => true,
+            Some(Generated::Identity { always }) => self
+                .identity_switches
+                .iter()
+                .filter(|(run, _)| *run < at)
+                .max_by_key(|(run, _)| *run)
+                .map_or(always, |&(_, switched)| switched),
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,7 +504,8 @@ fn add_columns(
             data_type: column.data_type,
             default: column.default,
             default_on_null: column.default_on_null,
-            identity: column.identity,
+            generated: column.generated,
+            identity_switches: Vec::new(),
             invisible: column.invisible,
         });
     }
@@ -676,16 +701,45 @@ impl Build {
                             .extend(constraints.into_iter().map(|c| Written::new(c, origin)));
                     }
                 }
-                AlterAction::Identity { column, on_null } => {
-                    let restated = table
+                AlterAction::Identity {
+                    column,
+                    always,
+                    on_null,
+                } => {
+                    let found = table
                         .column(&column.value)
-                        .and_then(|i| table.columns.get(i))
-                        .is_some_and(|c| c.identity && c.default_on_null == on_null);
-                    if !restated {
+                        .and_then(|i| table.columns.get_mut(i))
+                        .filter(|c| matches!(c.generated, Some(Generated::Identity { .. })));
+                    let followed = match (found, always) {
+                        (Some(found), Some(always)) => {
+                            found.identity_switches.push((origin.run, always));
+                            found.default_on_null == on_null
+                        }
+                        (Some(_), None) => true,
+                        (None, _) => false,
+                    };
+                    if !followed {
                         issues.push(Issue {
                             origin,
                             message: format!(
                                 "ALTER TABLE {shown} MODIFY {} changes its identity: not followed",
+                                column.value
+                            ),
+                        });
+                    }
+                }
+                AlterAction::DropIdentity(column) => {
+                    let found = table
+                        .column(&column.value)
+                        .and_then(|i| table.columns.get_mut(i))
+                        .filter(|c| matches!(c.generated, Some(Generated::Identity { .. })));
+                    if let Some(found) = found {
+                        found.identity_switches.push((origin.run, false));
+                    } else {
+                        issues.push(Issue {
+                            origin,
+                            message: format!(
+                                "ALTER TABLE {shown} MODIFY {} DROP IDENTITY, which isn't an identity column: not followed",
                                 column.value
                             ),
                         });

@@ -1047,7 +1047,7 @@ fn an_insert_the_checker_cant_parse_makes_the_fix_refuse() {
 
 /// Each case: its tables and rows, then a row the database may reject and a valid duplicate of it, in the order
 /// keep-first would remove the valid one; keep-last gets them the other way round.
-const UNDECIDED_DUPLICATES: [(&str, &str, &str, &str); 5] = [
+const UNDECIDED_DUPLICATES: [(&str, &str, &str, &str); 7] = [
     (
         "a parent key the check can't know",
         "CREATE TABLE P (ID NUMBER PRIMARY KEY);\n\
@@ -1087,6 +1087,19 @@ const UNDECIDED_DUPLICATES: [(&str, &str, &str, &str); 5] = [
         "CREATE TABLE C (ID NUMBER PRIMARY KEY, PID NUMBER REFERENCES ELSEWHERE);\n",
         "INSERT INTO C VALUES (1, 9);\n",
         "INSERT INTO C VALUES (1, NULL);\n",
+    ),
+    (
+        "a key over a virtual column",
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY, E VARCHAR2(9), U AS (UPPER(E)) UNIQUE);\n\
+         INSERT INTO T (ID, E) VALUES (1, 'a');\n",
+        "INSERT INTO T (ID, E) VALUES (2, 'A');\n",
+        "INSERT INTO T (ID, E) VALUES (2, 'b');\n",
+    ),
+    (
+        "a NOT NULL virtual column",
+        "CREATE TABLE T (ID NUMBER PRIMARY KEY, E VARCHAR2(9), U AS (UPPER(E)) NOT NULL);\n",
+        "INSERT INTO T (ID) VALUES (2);\n",
+        "INSERT INTO T (ID, E) VALUES (2, 'b');\n",
     ),
 ];
 
@@ -1161,6 +1174,69 @@ fn a_row_with_the_key_of_an_insert_all_the_database_rejects_is_kept() {
         assert!(report.removed.is_empty(), "{:?}", report.removed);
         let kinds: Vec<FindingKind> = report.output.findings.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, [FindingKind::UnknownColumn]);
+    }
+}
+
+/// The database rejects a row that gives a virtual or `GENERATED ALWAYS` identity column a value, so the plain row
+/// is the only `T (7)`: the fix keeps it, under keep-first and keep-last alike.
+#[test]
+fn a_row_with_the_key_of_a_row_that_fills_a_generated_column_is_kept() {
+    let ddl = "CREATE TABLE T (ID NUMBER PRIMARY KEY, E VARCHAR2(9), U AS (UPPER(E)), \
+               G NUMBER GENERATED ALWAYS AS IDENTITY);\n";
+    let row = "INSERT INTO T (ID, E) VALUES (7, 'b');\n";
+    for bad in [
+        "INSERT INTO T (ID, E, U) VALUES (7, 'a', 'A');\n",
+        "INSERT INTO T VALUES (7, 'a', DEFAULT, 1);\n",
+    ] {
+        for (policy, rows) in [
+            (Policy::default(), format!("{bad}{row}")),
+            (keep_last(), format!("{row}{bad}")),
+        ] {
+            let (_dir, _, report) = fix_scripts(
+                &[("t.sql", &format!("{ddl}{rows}COMMIT;\n"))],
+                &Options::default(),
+                policy,
+                false,
+            );
+            assert!(report.removed.is_empty(), "{bad}: {:?}", report.removed);
+            let kinds: Vec<FindingKind> = report.output.findings.iter().map(|f| f.kind).collect();
+            assert_eq!(kinds, [FindingKind::GeneratedColumn], "{bad}");
+        }
+    }
+}
+
+/// A reference file holds rows the database already has, with the values it generated for them: they are parents,
+/// never rows it refuses. Only the child without a parent goes.
+#[test]
+fn reference_rows_that_name_generated_columns_are_parents() {
+    for policy in [Policy::default(), keep_last()] {
+        let (_dir, _, report) = fix_scripts(
+            &[
+                (
+                    "a_ddl.sql",
+                    "CREATE TABLE P (ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, E VARCHAR2(9), \
+                     U AS (UPPER(E)));\nCREATE TABLE C (ID NUMBER PRIMARY KEY, P_ID NUMBER REFERENCES P);\n",
+                ),
+                (
+                    "ref/p.sql",
+                    "INSERT INTO P (ID, E, U) VALUES (1, 'a', 'A');\nINSERT INTO P VALUES (2, 'b', 'B');\n",
+                ),
+                (
+                    "c.sql",
+                    "INSERT INTO C VALUES (10, 1);\nINSERT INTO C VALUES (20, 2);\nINSERT INTO C VALUES (30, 3);\n",
+                ),
+            ],
+            &Options::default(),
+            policy,
+            false,
+        );
+        let removed: Vec<u64> = report.removed.iter().map(|r| r.line).collect();
+        assert_eq!(removed, [3]);
+        assert!(
+            report.output.findings.is_empty(),
+            "{:?}",
+            report.output.findings
+        );
     }
 }
 

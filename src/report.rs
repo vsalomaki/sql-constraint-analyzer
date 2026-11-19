@@ -150,6 +150,7 @@ pub fn kind_name(kind: FindingKind) -> &'static str {
         FindingKind::AmbiguousTable => "ambiguous table",
         FindingKind::UnknownColumn => "unknown column",
         FindingKind::ValueCountMismatch => "value count",
+        FindingKind::GeneratedColumn => "generated column",
         FindingKind::ParentTableEmpty => "parent table empty",
         FindingKind::Uncommitted => "no COMMIT",
     }
@@ -227,6 +228,9 @@ pub fn describe(finding: &Finding) -> String {
         FindingKind::UnknownColumn => format!("unknown column {columns} in {table}"),
         FindingKind::ValueCountMismatch => {
             format!("the value count doesn't match the columns of {table}")
+        }
+        FindingKind::GeneratedColumn => {
+            format!("a value for {columns} in {table}, which the database generates")
         }
         FindingKind::ParentTableEmpty => format!(
             "{}: the parent table has no rows, so {} rows of {table} have no parent",

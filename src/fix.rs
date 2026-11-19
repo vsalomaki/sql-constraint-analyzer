@@ -24,7 +24,7 @@ use crate::dialect::Pass;
 use crate::finding::{Finding, FindingKind, Location};
 use crate::input::{self, InputError, InputFile, Role, RunPlan};
 use crate::source::{RunAt, Span};
-use crate::statement::{InsertRow, Statement};
+use crate::statement::{Generated, InsertRow, Statement};
 use crate::value;
 
 /// What happens to a row with NULL in a NOT NULL column.
@@ -996,7 +996,7 @@ type Row = (usize, u64);
 const ASSUMED: &str = "its key rests on a date written as text";
 const CROWDED: &str = "the line holds several rows, so the fix can't tell which";
 const UNDECIDED: &str =
-    "its table may hold a row the database rejects for a foreign key the check couldn't decide";
+    "its table may hold a row the database rejects for a constraint the check couldn't decide";
 
 const PAST_LIMIT: &str = "the fix reached its round limit (--max-rounds) before this row's round";
 
@@ -1543,6 +1543,7 @@ fn nullable_values(
     catalog: &Catalog,
     plan: &RunPlan,
 ) -> Result<Vec<(String, Span)>, String> {
+    let at = plan.at(file, row.span.start);
     let resolved = check::resolve_row(catalog, row, file)
         .map_err(|_| "its table can't be matched".to_owned())?;
     let table = catalog
@@ -1553,7 +1554,7 @@ fn nullable_values(
         let position = table
             .column(column)
             .ok_or_else(|| format!("{column} isn't a column of its table"))?;
-        if let Some(why) = not_nullable(table, position, plan.at(file, row.span.start)) {
+        if let Some(why) = not_nullable(table, position, at) {
             return Err(format!("{column} {why}"));
         }
         let value = resolved
@@ -1574,7 +1575,7 @@ fn nullable_values(
 /// check judges the row by.
 fn not_nullable(table: &Table, position: usize, at: RunAt) -> Option<&'static str> {
     let column = table.columns.get(position)?;
-    if column.identity {
+    if matches!(column.generated, Some(Generated::Identity { .. })) {
         return Some("is an identity column");
     }
     if column.default_on_null {

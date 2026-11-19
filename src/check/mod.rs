@@ -124,8 +124,8 @@ pub struct Report {
     /// Tables with a key value the check couldn't know or assumed: cutting a row there can uncover a missing parent
     /// that no child found.
     pub uncertain_tables: BTreeSet<String>,
-    /// Tables that may hold a row the database rejects for a foreign key the check couldn't decide: a duplicate there
-    /// may rest on a row that isn't there.
+    /// Tables that may hold a row the database rejects for a constraint the check couldn't decide (a foreign key, or a
+    /// key or NOT NULL over a virtual column): a duplicate there may rest on a row that isn't there.
     pub undecided_tables: BTreeSet<String>,
 }
 
@@ -426,7 +426,7 @@ pub fn run_without(
                             line: row.line,
                         };
                         open.add(catalog, row, index, file);
-                        match resolve_row(catalog, row, index) {
+                        match structure::resolve_loaded(catalog, row, index, at.run, reference) {
                             Ok(resolved) => matched.push((resolved, row, at)),
                             Err(error) => {
                                 rejected |= error.rejects();

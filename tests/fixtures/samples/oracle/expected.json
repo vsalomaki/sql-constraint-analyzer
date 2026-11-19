@@ -66,6 +66,20 @@
       "key": ["70"]
     },
     {
+      "kind": "generated_column",
+      "table": "HR.BADGES",
+      "columns": ["BADGE_ID"],
+      "file": "hr/hr_plants.sql",
+      "line": 13
+    },
+    {
+      "kind": "generated_column",
+      "table": "HR.BADGES",
+      "columns": ["CODE_UC"],
+      "file": "hr/hr_plants.sql",
+      "line": 14
+    },
+    {
       "kind": "duplicate_key",
       "constraint": "CO.ORDER_ITEMS_PK",
       "table": "CO.ORDER_ITEMS",

@@ -117,13 +117,15 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   - structure errors, unverifiable keys and disabled constraints. The database rejects a statement whole for a
     structure error against a table the inputs define, so no row of it holds a key: in an `INSERT ALL`, a later row
     with another clause's key is no duplicate. A table no input defines, or one in several schemas, is no such
-    error: the database may hold it;
+    error: the database may hold it. A value other than `DEFAULT` for a virtual column, or for an identity column
+    while it is `GENERATED ALWAYS`, is one;
   - load-order findings, since the row is valid in the end state; `fix` never reorders statements;
   - a key resting on an assumed value, and a row on a line holding several rows, both left for review;
   - a duplicate in a table that may hold a row the database rejects for a foreign key the check couldn't decide (a
-    parent key it can't know, an unknown value, an empty parent table or one no input defines), in any table below
-    such a table, or in one sharing an `INSERT ALL` with one: left for review, since the row holding the key may not
-    exist. Only duplicates wait; a missing parent the check is sure of is still acted on.
+    parent key it can't know, an unknown value, an empty parent table or one no input defines) or for a key or NOT
+    NULL over a virtual column, whose value the check doesn't compute; in any table below such a table, or in one
+    sharing an `INSERT ALL` with one: left for review, since the row holding the key may not exist. Only duplicates
+    wait; a missing parent the check is sure of is still acted on.
 - **Refused:** an input with an insert the checker couldn't parse. The runner runs it, so which rows exist is unknown,
   and a fix could remove a row the database keeps: a child of an unread row, the duplicate of a row the database
   rejects, a row in the same `INSERT ALL` as one. The check still runs, and a child whose parent table has such rows
@@ -207,7 +209,8 @@ catalog, checks, reporting, fixing, the generator's model, rows and plants) neve
   (`README.md` there says how). Oracle Free loads both without an error. They have no violations; CO leaves INVENTORY's
   key to its identity column, so that key can't be checked. `hr_plants.sql` and `co_plants.sql` plant rows after
   them that break each kind `fix` acts on, CO's with a cascade, and HR's an `INSERT ALL` one clause's unknown column
-  rejects whole; `order.txt` and the hand-written `expected.json` make the folder an export like the generator's,
+  rejects whole and a table with a virtual key and a `GENERATED ALWAYS` identity column, with rows that give each a
+  value; `order.txt` and the hand-written `expected.json` make the folder an export like the generator's,
   which the manifest tests and `make oracle-check` run on.
   `sqlcl/` (`make sample-sqlcl-fixtures`) is both schemas loaded into Oracle Free and exported again by SQLcl in
   SQL Developer's separate-files layout, one folder per schema with `order.txt` and `counts.csv`; the object list

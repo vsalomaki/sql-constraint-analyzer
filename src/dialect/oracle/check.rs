@@ -132,7 +132,7 @@ impl Schemas {
     }
 }
 
-/// The tables of Oracle's HR and CO sample schemas.
+/// The tables of Oracle's HR and CO sample schemas, and the one HR's plants create.
 const SAMPLE_TABLES: &[&str] = &[
     "HR.REGIONS",
     "HR.COUNTRIES",
@@ -141,6 +141,7 @@ const SAMPLE_TABLES: &[&str] = &[
     "HR.JOBS",
     "HR.EMPLOYEES",
     "HR.JOB_HISTORY",
+    "HR.BADGES",
     "CO.CUSTOMERS",
     "CO.STORES",
     "CO.PRODUCTS",
@@ -351,6 +352,8 @@ fn row_signature(error: &Error) -> Option<(&'static str, String)> {
             unquote(error.message.split_whitespace().nth(3)?),
         ),
         "ORA-00947" | "ORA-00913" => ("value count", String::new()),
+        // A virtual column, and a GENERATED ALWAYS identity column; the message names neither.
+        "ORA-54013" | "ORA-32795" => ("generated column", String::new()),
         _ => return None,
     })
 }
@@ -389,6 +392,7 @@ fn expected_row(finding: &Finding) -> Option<(&'static str, String)> {
             ("unknown table", unquote(&finding.table))
         }
         FindingKind::ValueCountMismatch => ("value count", String::new()),
+        FindingKind::GeneratedColumn => ("generated column", String::new()),
         FindingKind::ParentTableEmpty => ("parent table empty", constraint()),
         FindingKind::Uncommitted => return None,
     })
