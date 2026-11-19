@@ -6,7 +6,8 @@ use super::lex::TokenKind;
 use crate::source::{Encoding, Piece, PieceKind};
 use crate::statement::{
     AlterAction, ColumnDef, ConstraintDef, ConstraintKind, ConstraintState, DataType, Decimal,
-    Expr, Ident, IndexColumn, Name, ParseError, Skip, StateChange, Statement, TypeFamily,
+    Expr, Generated, Ident, IndexColumn, Name, ParseError, Skip, StateChange, Statement,
+    TypeFamily,
 };
 
 /// The statement a table or index DDL piece makes, or `None` when the piece is something else.
@@ -149,7 +150,7 @@ fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
         data_type,
         default: None,
         default_on_null: false,
-        identity: false,
+        generated: None,
         invisible: false,
         constraints: Vec::new(),
     };
@@ -167,14 +168,18 @@ fn column_def(c: &mut Cursor) -> Result<ColumnDef, ParseError> {
             }
             column.default = Some(default_value(c)?);
         } else if c.eat_word("GENERATED") {
-            if let Some(on_null) = generated_identity(c)? {
-                column.identity = true;
-                column.default_on_null = on_null;
+            if let Some(identity) = generated_identity(c)? {
+                column.generated = Some(Generated::Identity {
+                    always: identity.always.unwrap_or(true),
+                });
+                column.default_on_null = identity.on_null;
             } else {
                 virtual_expression(c)?;
+                column.generated = Some(Generated::Virtual);
             }
         } else if c.eat_word("AS") {
             virtual_expression(c)?;
+            column.generated = Some(Generated::Virtual);
         } else if let Some(constraint) = inline_constraint(c, &column.name)? {
             column.constraints.push(constraint);
         }
@@ -208,17 +213,30 @@ const IDENTITY_OPTIONS: &[&str] = &[
     "GLOBAL",
 ];
 
-/// After `GENERATED`: for an identity column, whether an explicit NULL takes a generated value (`BY DEFAULT ON
-/// NULL`); `None` before a virtual column's expression.
-fn generated_identity(c: &mut Cursor) -> Result<Option<bool>, ParseError> {
-    let on_null =
-        !c.eat_word("ALWAYS") && c.eat_words(&["BY", "DEFAULT"]) && c.eat_words(&["ON", "NULL"]);
+struct Identity {
+    /// `ALWAYS` or `BY DEFAULT`; `None` when neither is written, which is `ALWAYS` in a column definition and keeps
+    /// the column's own mode in a `MODIFY`.
+    always: Option<bool>,
+    /// `BY DEFAULT ON NULL`: an explicit NULL takes a generated value.
+    on_null: bool,
+}
+
+/// After `GENERATED`: the identity column it makes; `None` before a virtual column's expression.
+fn generated_identity(c: &mut Cursor) -> Result<Option<Identity>, ParseError> {
+    let always = if c.eat_word("ALWAYS") {
+        Some(true)
+    } else if c.eat_words(&["BY", "DEFAULT"]) {
+        Some(false)
+    } else {
+        None
+    };
+    let on_null = always == Some(false) && c.eat_words(&["ON", "NULL"]);
     c.expect_word("AS")?;
     if !c.eat_word("IDENTITY") {
         return Ok(None);
     }
     identity_options(c)?;
-    Ok(Some(on_null))
+    Ok(Some(Identity { always, on_null }))
 }
 
 /// An identity column's options, in parentheses or, as `DBMS_METADATA` writes them, without.
@@ -643,8 +661,8 @@ fn add(c: &mut Cursor, actions: &mut Vec<AlterAction>) -> Result<(), ParseError>
     Ok(())
 }
 
-/// `MODIFY` columns: the constraints they gain, and the identity they restate. Anything else a modification does (a
-/// type, a default, `NULL`) isn't followed, so such a `MODIFY` is kept as written.
+/// `MODIFY` columns: the constraints they gain, and the identity they set or drop. Anything else a modification does
+/// (a type, a default, `NULL`) isn't followed, so such a `MODIFY` is kept as written; its identity changes still count.
 fn modify(c: &mut Cursor, start: usize, actions: &mut Vec<AlterAction>) -> Result<(), ParseError> {
     let parenthesized = c.eat_punct(b'(');
     let mut items = Vec::new();
@@ -654,11 +672,16 @@ fn modify(c: &mut Cursor, start: usize, actions: &mut Vec<AlterAction>) -> Resul
         let column = c.ident("a column name").map(Ident::into_owned)?;
         let mut constraints = Vec::new();
         while !c.at_item_end() {
+            if c.eat_words(&["DROP", "IDENTITY"]) {
+                identities.push(AlterAction::DropIdentity(column.clone()));
+                continue;
+            }
             if c.eat_word("GENERATED") {
                 match generated_identity(c)? {
-                    Some(on_null) => identities.push(AlterAction::Identity {
+                    Some(identity) => identities.push(AlterAction::Identity {
                         column: column.clone(),
-                        on_null,
+                        always: identity.always,
+                        on_null: identity.on_null,
                     }),
                     None => followed = false,
                 }
@@ -694,10 +717,10 @@ fn modify(c: &mut Cursor, start: usize, actions: &mut Vec<AlterAction>) -> Resul
     }
     if followed {
         actions.push(AlterAction::ModifyColumns(items));
-        actions.extend(identities);
     } else {
         actions.push(AlterAction::Other(c.text(start, c.pos())));
     }
+    actions.extend(identities);
     Ok(())
 }
 
@@ -1092,32 +1115,38 @@ mod tests {
     }
 
     #[test]
-    fn identity_invisible_and_virtual_columns_are_noted_or_skipped() {
+    fn generated_and_invisible_columns_are_noted() {
         let Statement::CreateTable { columns, .. } = parse(
             "CREATE TABLE T (ID NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY (START WITH 1 CACHE 20) NOT NULL, \
-             H VARCHAR2(10) INVISIBLE, V NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, W AS (ID + 1))",
+             A NUMBER GENERATED AS IDENTITY, B NUMBER GENERATED ALWAYS AS IDENTITY, \
+             C NUMBER GENERATED BY DEFAULT AS IDENTITY, H VARCHAR2(10) INVISIBLE, \
+             V NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, W AS (ID + 1) UNIQUE)",
         ) else {
             panic!("not a CREATE TABLE");
         };
-        let flags: Vec<(&str, bool, bool, bool, usize)> = columns
+        let flags: Vec<(&str, Option<Generated>, bool, bool, usize)> = columns
             .iter()
             .map(|c| {
                 (
                     &*c.name.value,
-                    c.identity,
+                    c.generated,
                     c.default_on_null,
                     c.invisible,
                     c.constraints.len(),
                 )
             })
             .collect();
+        let identity = |always| Some(Generated::Identity { always });
         assert_eq!(
             flags,
             [
-                ("ID", true, true, false, 1),
-                ("H", false, false, true, 0),
-                ("V", false, false, false, 0),
-                ("W", false, false, false, 0)
+                ("ID", identity(false), true, false, 1),
+                ("A", identity(true), false, false, 0),
+                ("B", identity(true), false, false, 0),
+                ("C", identity(false), false, false, 0),
+                ("H", None, false, true, 0),
+                ("V", Some(Generated::Virtual), false, false, 0),
+                ("W", Some(Generated::Virtual), false, false, 1)
             ]
         );
     }
@@ -1142,7 +1171,7 @@ mod tests {
             };
             let read: Vec<(&str, bool, usize)> = columns
                 .iter()
-                .map(|c| (&*c.name.value, c.identity, c.constraints.len()))
+                .map(|c| (&*c.name.value, c.generated.is_some(), c.constraints.len()))
                 .collect();
             assert_eq!(read, [("ID", true, 1), ("N", false, 0)], "{written}");
         }

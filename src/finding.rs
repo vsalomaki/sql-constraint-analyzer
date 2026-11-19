@@ -18,6 +18,8 @@ pub enum FindingKind {
     AmbiguousTable,
     UnknownColumn,
     ValueCountMismatch,
+    /// A value other than `DEFAULT` for a column the database computes: a virtual or `GENERATED ALWAYS` identity column.
+    GeneratedColumn,
     /// The foreign key's parent table is defined but has no rows; one finding per foreign key, with a row count.
     ParentTableEmpty,
     /// Rows at the end of a data file with no commit after them; at the first such row, with their count.

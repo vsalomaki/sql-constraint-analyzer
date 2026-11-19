@@ -154,11 +154,19 @@ pub struct ColumnDef {
     pub default: Option<Expr<'static>>,
     /// `DEFAULT ON NULL`: an explicit NULL takes the default.
     pub default_on_null: bool,
-    /// Identity and invisible columns are noted so the checker can warn; their values are not checked.
-    pub identity: bool,
+    pub generated: Option<Generated>,
     pub invisible: bool,
     /// Constraints written on the column itself, NOT NULL included.
     pub constraints: Vec<ConstraintDef>,
+}
+
+/// A column whose value the database makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Generated {
+    /// `always` (as created) refuses a value the row gives; `BY DEFAULT` takes one.
+    Identity { always: bool },
+    /// Computed from the row's other columns.
+    Virtual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,11 +176,15 @@ pub enum AlterAction {
     /// `MODIFY (col NOT NULL …)` and the like: the constraints the modified columns gain.
     ModifyColumns(Vec<(Ident<'static>, Vec<ConstraintDef>)>),
     /// `MODIFY col GENERATED … AS IDENTITY …`. Oracle accepts it only on an identity column, so it changes no more
-    /// than the next generated value unless it changes whether an explicit NULL takes one.
+    /// than the next generated value unless it changes `ALWAYS` or whether an explicit NULL takes one. `always` is
+    /// `None` when neither `ALWAYS` nor `BY DEFAULT` is written: the column keeps both.
     Identity {
         column: Ident<'static>,
+        always: Option<bool>,
         on_null: bool,
     },
+    /// `MODIFY col DROP IDENTITY`: the column takes the values rows give it from here on.
+    DropIdentity(Ident<'static>),
     /// `ENABLE` / `DISABLE` / `MODIFY CONSTRAINT name …`: what changes in a constraint's state.
     ChangeConstraint {
         name: Ident<'static>,

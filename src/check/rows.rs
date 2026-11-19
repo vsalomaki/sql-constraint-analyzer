@@ -13,7 +13,7 @@ use crate::catalog::{Catalog, Column, Constraint, Kind, Lookup, Parent, Table, T
 use crate::dialect::{DialectId, Rules, UniqueNulls};
 use crate::finding::{Finding, FindingKind, Location};
 use crate::source::{Encoding, RunAt};
-use crate::statement::{DataType, Expr, InsertRow, TypeFamily, Unread};
+use crate::statement::{DataType, Expr, Generated, InsertRow, TypeFamily, Unread};
 use crate::value::{self, Canonical, Literal};
 
 /// Whether a value no constraint reads still counts: a string, or the default, in a date column may be text read as
@@ -118,7 +118,7 @@ pub(super) struct Holders {
     /// Tables with a key value the check couldn't know or assumed: cutting a row there can uncover a missing parent
     /// that no child found.
     pub uncertain: BTreeSet<String>,
-    /// Tables that may hold a row the database rejects for a foreign key the check couldn't decide: a duplicate there
+    /// Tables that may hold a row the database rejects for a constraint the check couldn't decide: a duplicate there
     /// may rest on a row that isn't there.
     pub undecided: BTreeSet<String>,
 }
@@ -364,26 +364,29 @@ impl<'a> Checker<'a> {
                     *self.dates.entry((matched.table, position)).or_default() += 1;
                 }
             }
-            self.not_null(table, &literals, row, at);
+            self.not_null(matched.table, table, &literals, row, at);
         }
         self.keys_of(matched.table, table, &literals, row, at, reference);
         literals
     }
 
     /// The value a column gets: the row's, or the column's default where the row leaves it out, writes `DEFAULT`, or
-    /// writes NULL into a `DEFAULT ON NULL` column.
+    /// writes NULL into a `DEFAULT ON NULL` column. A row giving a virtual column a value never gets here.
     fn literal<'v>(
         &self,
         column: &Column,
         expr: Option<&Expr<'v>>,
         encoding: Encoding,
     ) -> Literal<'v> {
-        let default = || match &column.default {
-            Some(expr) => self.dialect.evaluate(expr, encoding),
-            None if column.identity => {
+        let default = || match (&column.default, column.generated) {
+            (_, Some(Generated::Virtual)) => {
+                Literal::Unknown("a virtual column's value".to_owned())
+            }
+            (Some(expr), _) => self.dialect.evaluate(expr, encoding),
+            (None, Some(Generated::Identity { .. })) => {
                 Literal::Unknown("an identity column's generated value".to_owned())
             }
-            None => Literal::Null,
+            (None, None) => Literal::Null,
         };
         match expr {
             None | Some(Expr::Default) => default(),
@@ -407,8 +410,20 @@ impl<'a> Checker<'a> {
     }
 
     /// NULL in a NOT NULL column or a primary key column: one finding per column.
-    fn not_null(&mut self, table: &Table, literals: &[Literal], row: &InsertRow, at: At) {
+    fn not_null(
+        &mut self,
+        id: TableId,
+        table: &Table,
+        literals: &[Literal],
+        row: &InsertRow,
+        at: At,
+    ) {
         for (column, literal) in literals.iter().enumerate() {
+            let computed = table.columns.get(column).is_some_and(Column::is_virtual);
+            if computed && table.forbids_null(column, at.run).is_some() {
+                // Its expression may give NULL, and the database then rejects the row.
+                self.undecided.insert(id);
+            }
             if !self.is_null(literal) {
                 continue;
             }
@@ -456,6 +471,13 @@ impl<'a> Checker<'a> {
             if parts.contains(&Canonical::Unknown) {
                 self.doubt.entry((id, position)).or_default().unknown = true;
                 if !reference && Self::applies(constraint, at) {
+                    let computed = columns
+                        .iter()
+                        .any(|&c| table.columns.get(c).is_some_and(Column::is_virtual));
+                    if computed {
+                        // The database may reject the row for this key, and then the row holds none of its keys.
+                        self.undecided.insert(id);
+                    }
                     self.undecided((id, position), columns, literals);
                 }
                 continue;
